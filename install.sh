@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="muqsitnawaz/linear-cli"
+REPO="phnx-labs/linear-cli"
 BRANCH="${LINEAR_CLI_BRANCH:-main}"
 URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/linear"
 

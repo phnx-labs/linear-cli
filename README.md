@@ -1,5 +1,11 @@
 # linear-cli
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
+[![Single file](https://img.shields.io/badge/single%20file-43%20KB-brightgreen.svg)](./linear)
+[![Built for agents](https://img.shields.io/badge/built%20for-AI%20agents-8b5cf6.svg)](#built-for-ai-agents)
+
 A terminal Linear client built for AI agents. Query your queue, claim tasks, report progress, close with proof — all from the shell or a subagent.
 
 Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on macOS and Linux.
@@ -7,13 +13,13 @@ Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on m
 ## Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/muqsitnawaz/linear-cli/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/main/install.sh | bash
 ```
 
 Or manually:
 
 ```bash
-curl -o /usr/local/bin/linear https://raw.githubusercontent.com/muqsitnawaz/linear-cli/main/linear
+curl -o /usr/local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/main/linear
 chmod +x /usr/local/bin/linear
 ```
 
