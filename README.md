@@ -1,14 +1,27 @@
 # linear-cli
 
+> Linear for you and your agents. Same queue, same CLI.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
 [![Single file](https://img.shields.io/badge/single%20file-43%20KB-brightgreen.svg)](./linear)
-[![Built for agents](https://img.shields.io/badge/built%20for-AI%20agents-8b5cf6.svg)](#built-for-ai-agents)
+[![Team CLI](https://img.shields.io/badge/team-CLI-a3e635.svg)](#why-the-mcp-server-isnt-always-the-answer)
 
-A terminal Linear client built for AI agents. Query your queue, claim tasks, report progress, close with proof — all from the shell or a subagent.
+Issue tracking from the shell — for humans and their agents. Query your queue, claim tasks, report progress, close with proof. Works the same whether you're typing or a subagent is.
 
 Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on macOS and Linux.
+
+```
+  ┌─────────┐   files    ┌────────────┐   picks up   ┌───────────┐   ships    ┌──────────┐
+  │  Human  │ ─────────> │   Linear   │ ───────────> │   Agent   │ ─────────> │  PR +    │
+  │assignee │            │   ticket   │              │implementer│            │  proof   │
+  └─────────┘            │ label:lane │              └───────────┘            └──────────┘
+       ▲                 └────────────┘                                             │
+       └───────────────────────── reviews ─────────────────────────────────────────┘
+```
+
+<!-- HERO_VIDEO -->
 
 ## Install
 
@@ -33,6 +46,8 @@ linear setup --api-key lin_api_... --agent claude
 
 Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents/linear.json` from an earlier setup, linear-cli auto-migrates it on first run.
 
+> **Security:** treat the API key like a password. **Do not paste it into chat with an LLM in plaintext.** Pass it from your shell env (`linear setup --api-key "$LINEAR_API_KEY"`), or let linear-cli read it from the macOS Keychain. Resolution order is: config file → `LINEAR_API_KEY` env → Keychain service `linear-api-key`.
+
 ## Usage
 
 ```bash
@@ -51,9 +66,9 @@ linear cycles
 
 Full help: `linear <command> --help`.
 
-## Built for AI agents
+## For humans and agents
 
-linear-cli exists because driving Linear from a subagent shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.
+The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.
 
 - **Assignee-as-queue.** `linear tasks` returns what *you* own, filtered to the active cycle. No dashboards, no saved views.
 - **Agent-lane labels.** Set `--agent claude` at setup and `linear tasks` filters to issues labeled for that agent. Multiple agents can share a team without stepping on each other.
@@ -115,6 +130,26 @@ If you want the MCP, use it. If you want a subagent to burn through 50 tickets w
 
 - Python 3.9+ (ships with every macOS since 11, every Ubuntu since 20.04)
 - A Linear API key with [Full access](https://linear.app/settings/account/security)
+
+## FAQ
+
+### Can the agent be the assignee directly, instead of routing by label?
+
+Yes. If your agent has its own Linear account (many teams provision one seat per agent — e.g. `claude@yourcompany.com`, `codex@yourcompany.com`), run `linear setup --api-key <agent's own key>` without `--agent`. Then `linear tasks` returns tickets assigned *directly to the agent's user*. No labels, no filtering — the assignee IS the lane.
+
+Use `--agent <label>` when you want multiple agents to share one Linear seat; skip it when each agent has its own.
+
+### How do I rotate the API key?
+
+Revoke the old key at [linear.app/settings/account/security](https://linear.app/settings/account/security) and run `linear setup --api-key <new-key>` again. The config file is overwritten in place.
+
+### Does it work on Windows?
+
+Untested. The script is plain Python + `urllib` + `subprocess`, so it should run under WSL or Git Bash. The only macOS-specific bit is the Keychain fallback in `get_api_key` (via the `security` binary) — on other platforms it silently skips, so use the env var or config file.
+
+### Why Python instead of Go / Rust / Node?
+
+Because every Mac and every modern Linux already ships it. Zero install, zero toolchain, zero `npm audit` churn. The tradeoff is startup isn't as fast as a compiled binary (~170 ms vs ~10 ms), but for a tool invoked a handful of times per ticket that's noise.
 
 ## License
 
