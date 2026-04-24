@@ -1,0 +1,1263 @@
+#!/usr/bin/env python3
+"""linear - Task management CLI for AI agent teams.
+
+General-purpose Linear CLI designed for orchestrating work across teams of
+AI agents. Each agent can query its work queue, pick up tasks, report progress,
+and see the full team board.
+
+Commands:
+    setup               Configure Linear connection
+    tasks               List/view/board tasks
+    update              Modify an issue (status, comment)
+    create              Create a new issue
+    cycles              List cycles for the team
+
+Config: ~/.linear-cli/config.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import subprocess
+import sys
+from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import URLError
+
+CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
+LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
+API_URL = "https://api.linear.app/graphql"
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        return json.loads(CONFIG_PATH.read_text())
+    if LEGACY_CONFIG_PATH.exists():
+        cfg = json.loads(LEGACY_CONFIG_PATH.read_text())
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        print(f"Migrated config: {LEGACY_CONFIG_PATH} -> {CONFIG_PATH}", file=sys.stderr)
+        return cfg
+    return {}
+
+
+def save_config(cfg: dict):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def get_api_key(cfg: dict) -> str:
+    """Resolve API key: config > env > Keychain."""
+    key = cfg.get("apiKey") or os.environ.get("LINEAR_API_KEY")
+    if key:
+        return key
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "linear-api-key", "-w"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return ""
+
+
+def get_team_id(cfg: dict) -> str:
+    """Resolve team ID: config > env > Keychain."""
+    tid = cfg.get("teamId") or os.environ.get("LINEAR_TEAM_ID")
+    if tid:
+        return tid
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "linear-team-id", "-w"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# GraphQL client
+# ---------------------------------------------------------------------------
+
+def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
+    payload: dict = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    body = json.dumps(payload).encode()
+
+    req = Request(API_URL, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", api_key)
+
+    try:
+        with urlopen(req) as resp:
+            return json.loads(resp.read())
+    except URLError as e:
+        # HTTPError has a response body with actual GraphQL error details
+        body = ""
+        if hasattr(e, "read"):
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+                parsed = json.loads(body)
+                if "errors" in parsed:
+                    return parsed
+            except (json.JSONDecodeError, Exception):
+                pass
+        detail = body if body else str(e)
+        return {"errors": [{"message": detail}]}
+
+
+def check_errors(data: dict) -> bool:
+    errors = data.get("errors")
+    if errors:
+        print(f"Error: {errors[0].get('message', 'Unknown error')}", file=sys.stderr)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# State resolution (dynamic, not hardcoded)
+# ---------------------------------------------------------------------------
+
+def get_states(api_key: str, team_id: str, cfg: dict) -> dict:
+    cached = cfg.get("states")
+    if cached:
+        return cached
+
+    data = gql(api_key, """
+        query($teamId: ID!) {
+            workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+                nodes { id name type }
+            }
+        }
+    """, {"teamId": team_id})
+
+    if check_errors(data):
+        return {}
+
+    states = {}
+    for node in data["data"]["workflowStates"]["nodes"]:
+        states[node["name"]] = {"id": node["id"], "type": node["type"]}
+
+    cfg["states"] = states
+    save_config(cfg)
+    return states
+
+
+def resolve_state_id(states: dict, name: str) -> str | None:
+    if name in states:
+        return states[name]["id"]
+    for k, v in states.items():
+        if k.lower() == name.lower():
+            return v["id"]
+    aliases = {
+        "progress": "In Progress",
+        "in-progress": "In Progress",
+        "wip": "In Progress",
+    }
+    mapped = aliases.get(name.lower(), "")
+    if mapped in states:
+        return states[mapped]["id"]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Viewer + user resolution (for auto-assign on create)
+# ---------------------------------------------------------------------------
+
+def get_viewer_id(api_key: str, cfg: dict) -> str | None:
+    """Return the API-key owner's user ID. Cached in config after first lookup."""
+    cached = cfg.get("viewerId")
+    if cached:
+        return cached
+
+    data = gql(api_key, "{ viewer { id name email } }")
+    if check_errors(data):
+        return None
+
+    viewer = data.get("data", {}).get("viewer") or {}
+    vid = viewer.get("id")
+    if vid:
+        cfg["viewerId"] = vid
+        # Stash email too for setup output; not load-bearing.
+        if viewer.get("email"):
+            cfg["viewerEmail"] = viewer["email"]
+        save_config(cfg)
+    return vid
+
+
+def resolve_user_id_by_email(api_key: str, email: str) -> str | None:
+    """Look up a user by email address. Returns user ID or None."""
+    data = gql(api_key, """
+        query($email: String!) {
+            users(filter: { email: { eq: $email } }) {
+                nodes { id name email }
+            }
+        }
+    """, {"email": email})
+    if check_errors(data):
+        return None
+    nodes = data.get("data", {}).get("users", {}).get("nodes", [])
+    if not nodes:
+        return None
+    return nodes[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Cycle resolution (for auto-attach on create, move on update, listing)
+# ---------------------------------------------------------------------------
+
+def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
+    """Return the active or next cycle ID for a team. Never cached (cycles rotate)."""
+    if which not in ("active", "next"):
+        return None
+    if which == "active":
+        data = gql(api_key, f"""{{
+            team(id: "{team_id}") {{ activeCycle {{ id name }} }}
+        }}""")
+        if check_errors(data):
+            return None
+        cycle = (data.get("data") or {}).get("team", {}).get("activeCycle")
+        return cycle.get("id") if cycle else None
+
+    # "next" — Linear has no team.nextCycle field. Find the first cycle whose
+    # startsAt is after the active cycle's endsAt, ordered ascending.
+    active_query = gql(api_key, f"""{{
+        team(id: "{team_id}") {{
+            activeCycle {{ endsAt }}
+        }}
+    }}""")
+    if check_errors(active_query):
+        return None
+    active_ends = (
+        ((active_query.get("data") or {}).get("team", {}) or {})
+        .get("activeCycle", {}) or {}
+    ).get("endsAt")
+    if not active_ends:
+        return None
+
+    data = gql(api_key, """
+        query($teamId: ID!, $after: DateTimeOrDuration!) {
+            cycles(
+                filter: {
+                    team: { id: { eq: $teamId } }
+                    startsAt: { gte: $after }
+                }
+                orderBy: updatedAt
+                first: 20
+            ) {
+                nodes { id name startsAt }
+            }
+        }
+    """, {"teamId": team_id, "after": active_ends})
+    if check_errors(data):
+        return None
+
+    nodes = (data.get("data") or {}).get("cycles", {}).get("nodes", []) or []
+    nodes = [n for n in nodes if n.get("startsAt") and n["startsAt"] >= active_ends]
+    nodes.sort(key=lambda n: n["startsAt"])
+    return nodes[0]["id"] if nodes else None
+
+
+def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
+    """Return all cycles for a team, most recent first."""
+    data = gql(api_key, """
+        query($teamId: ID!) {
+            cycles(
+                filter: { team: { id: { eq: $teamId } } }
+                orderBy: updatedAt
+                first: 50
+            ) {
+                nodes {
+                    id number name startsAt endsAt completedAt
+                    issueCountHistory
+                }
+            }
+        }
+    """, {"teamId": team_id})
+    if check_errors(data):
+        return []
+    return data.get("data", {}).get("cycles", {}).get("nodes", []) or []
+
+
+# ---------------------------------------------------------------------------
+# File upload
+# ---------------------------------------------------------------------------
+
+def upload_file(api_key: str, filepath: str) -> str | None:
+    """Upload a file to Linear and return the asset URL."""
+    path = Path(filepath)
+    if not path.exists():
+        print(f"File not found: {filepath}", file=sys.stderr)
+        return None
+
+    size = path.stat().st_size
+    content_type = mimetypes.guess_type(filepath)[0] or "application/octet-stream"
+
+    data = gql(api_key, """
+        mutation($filename: String!, $contentType: String!, $size: Int!) {
+            fileUpload(filename: $filename, contentType: $contentType, size: $size) {
+                success
+                uploadFile { uploadUrl assetUrl headers { key value } }
+            }
+        }
+    """, {"filename": path.name, "contentType": content_type, "size": size})
+
+    if check_errors(data):
+        return None
+
+    upload = data["data"]["fileUpload"]
+    if not upload["success"]:
+        print("Failed to get upload URL.", file=sys.stderr)
+        return None
+
+    uf = upload["uploadFile"]
+    file_bytes = path.read_bytes()
+
+    req = Request(uf["uploadUrl"], data=file_bytes, method="PUT")
+    req.add_header("Content-Type", content_type)
+    for h in uf.get("headers") or []:
+        req.add_header(h["key"], h["value"])
+
+    try:
+        with urlopen(req) as resp:
+            if resp.status not in (200, 201):
+                print(f"Upload failed: HTTP {resp.status}", file=sys.stderr)
+                return None
+    except URLError as e:
+        print(f"Upload failed: {e}", file=sys.stderr)
+        return None
+
+    return uf["assetUrl"]
+
+
+def build_proof_comment(api_key: str, proofs: list[str]) -> str:
+    """Build a markdown comment body from proof items.
+
+    Each item is auto-detected:
+      - File path (exists on disk) -> upload and embed as image/link
+      - URL (starts with http) -> embed as link
+      - Plain text -> inline as-is
+    """
+    parts = []
+    for i, proof in enumerate(proofs, 1):
+        label = f"**Proof {i}:**" if len(proofs) > 1 else "**Proof:**"
+        path = Path(proof)
+
+        if path.exists() and path.is_file():
+            asset_url = upload_file(api_key, proof)
+            if not asset_url:
+                parts.append(f"{label} (upload failed: {path.name})")
+                continue
+            ct = mimetypes.guess_type(proof)[0] or ""
+            if ct.startswith("image/"):
+                parts.append(f"{label}\n![{path.name}]({asset_url})")
+            else:
+                parts.append(f"{label} [{path.name}]({asset_url})")
+        elif proof.startswith("http://") or proof.startswith("https://"):
+            parts.append(f"{label} {proof}")
+        else:
+            parts.append(f"{label} {proof}")
+
+    return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Issue resolution
+# ---------------------------------------------------------------------------
+
+def resolve_issue(api_key: str, team_id: str, identifier: str) -> dict | None:
+    number = identifier.split("-")[-1]
+    try:
+        number = int(number)
+    except ValueError:
+        print(f"Invalid identifier: {identifier}", file=sys.stderr)
+        return None
+
+    data = gql(api_key, f"""{{
+        issues(filter: {{
+            team: {{ id: {{ eq: "{team_id}" }} }}
+            number: {{ eq: {number} }}
+        }}) {{
+            nodes {{ id identifier title }}
+        }}
+    }}""")
+
+    if check_errors(data):
+        return None
+
+    nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
+    return nodes[0] if nodes else None
+
+
+# ---------------------------------------------------------------------------
+# Formatters
+# ---------------------------------------------------------------------------
+
+PRIORITY_MAP = {0: "-", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
+
+PRIORITY_NAMES = {
+    "urgent": 1, "high": 2, "medium": 3, "med": 3, "low": 4,
+    "none": 0, "no": 0, "no-priority": 0,
+}
+
+
+def parse_priority(value: str) -> int:
+    """Accept named priorities: urgent, high, medium, low, none."""
+    v = str(value).strip().lower()
+    if v in PRIORITY_NAMES:
+        return PRIORITY_NAMES[v]
+    raise SystemExit(
+        f"Invalid --priority '{value}'. Use: urgent, high, medium, low, or none."
+    )
+
+ISSUE_FIELDS = """
+    identifier title description state { name type }
+    priority labels { nodes { name } }
+    assignee { name }
+    project { name id }
+    dueDate createdAt url
+"""
+
+
+# Sort sentinel for missing due dates — push them to the end of their tier.
+_NO_DUE = "9999-99-99"
+
+
+def issue_sort_key(node: dict) -> tuple:
+    """Primary: priority (Urgent=1 first, No-priority=4 last).
+    Secondary: due date ascending (earliest first, nulls last).
+    Tertiary: identifier so ties are deterministic."""
+    priority = node.get("priority") or 4
+    due = node.get("dueDate") or _NO_DUE
+    ident = node.get("identifier") or ""
+    return (priority, due, ident)
+
+
+def format_due(due: str | None) -> str:
+    """Compact due date display: '--' if missing, 'today' / 'tomorrow' / relative
+    within a week, otherwise MM-DD."""
+    if not due:
+        return "    --    "
+    try:
+        from datetime import date, datetime
+        today = date.today()
+        d = datetime.fromisoformat(due.replace("Z", "+00:00")).date() if "T" in due else date.fromisoformat(due)
+        delta = (d - today).days
+        if delta < 0:
+            return f"{-delta}d overdue".ljust(10)
+        if delta == 0:
+            return "today     "
+        if delta == 1:
+            return "tomorrow  "
+        if delta <= 7:
+            return f"in {delta}d    "[:10]
+        return d.strftime("%b %d   ")[:10]
+    except Exception:
+        return (due[:10] + "  ")[:10]
+
+
+def format_issue_row(node: dict) -> str:
+    ident = node["identifier"]
+    title = node["title"]
+    state = node["state"]["name"]
+    pri = PRIORITY_MAP.get(node.get("priority", 0), "-")
+    due = format_due(node.get("dueDate"))
+    labels = [l["name"] for l in node.get("labels", {}).get("nodes", [])]
+    label_str = f"  [{', '.join(labels)}]" if labels else ""
+    assignee = (node.get("assignee") or {}).get("name") or "unassigned"
+    return f"  {ident:<8} {pri:<7}  {state:<12}  {due}  {assignee:<14}  {title}{label_str}"
+
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+def cmd_setup(args, cfg):
+    api_key = args.api_key or input("Linear API key: ").strip()
+    if not api_key:
+        print("API key required.")
+        sys.exit(1)
+
+    cfg["apiKey"] = api_key
+
+    data = gql(api_key, "{ teams { nodes { id name key } } }")
+    if check_errors(data):
+        sys.exit(1)
+
+    teams = data["data"]["teams"]["nodes"]
+    if not teams:
+        print("No teams found.")
+        sys.exit(1)
+
+    if len(teams) == 1:
+        team = teams[0]
+        print(f"Found team: {team['name']} ({team['key']})")
+    else:
+        print("Teams:")
+        for i, t in enumerate(teams):
+            print(f"  {i + 1}. {t['name']} ({t['key']})")
+        choice = input(f"Select team [1-{len(teams)}]: ").strip()
+        try:
+            team = teams[int(choice) - 1]
+        except (ValueError, IndexError):
+            print("Invalid selection.")
+            sys.exit(1)
+
+    cfg["teamId"] = team["id"]
+    cfg["teamKey"] = team["key"]
+
+    agent = args.agent or input("Default agent identity (e.g. claude, codex) [skip]: ").strip()
+    if agent:
+        cfg["agent"] = agent
+
+    cfg.pop("states", None)
+    states = get_states(api_key, team["id"], cfg)
+
+    save_config(cfg)
+    print(f"\nConfigured: team={team['name']}, states={len(states)}")
+    if agent:
+        print(f"Agent identity: {agent}")
+    print(f"Config: {CONFIG_PATH}")
+
+
+# ---------------------------------------------------------------------------
+# tasks - list, view, board
+# ---------------------------------------------------------------------------
+
+def cmd_tasks(args, cfg, api_key, team_id):
+    # If an identifier is given, show detail view
+    if args.identifier:
+        return show_issue_detail(args, api_key, team_id)
+
+    # If --board, show team board
+    if args.board:
+        return show_board(args, api_key, team_id, cfg)
+
+    # Otherwise, list tasks
+    return list_tasks(args, cfg, api_key, team_id)
+
+
+def list_tasks(args, cfg, api_key, team_id):
+    """Default view: my agent's tasks + tasks with no agent:* label (unowned).
+    `--agent X` narrows to a specific agent. `--all` shows literally every task.
+    Tasks are sorted by priority, then due date (earliest first), then id.
+    """
+    filters = []
+
+    # Resolve which agent filter to apply (if any). `--all` overrides config default.
+    if args.all:
+        explicit_agent = None
+        include_unowned = False  # --all means show everything including other agents
+    elif args.agent:
+        explicit_agent = args.agent
+        include_unowned = False  # explicit agent request — just show their queue
+    elif cfg.get("agent"):
+        explicit_agent = cfg.get("agent")
+        include_unowned = True   # default view = my queue + unowned
+    else:
+        explicit_agent = None
+        include_unowned = False
+
+    if args.label and not explicit_agent:
+        filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
+
+    if args.status:
+        status = args.status.lower()
+        if status == "open":
+            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+        elif status == "done":
+            filters.append('state: { type: { eq: "completed" } }')
+        else:
+            states = get_states(api_key, team_id, cfg)
+            sid = resolve_state_id(states, status)
+            if sid:
+                filters.append(f'state: {{ id: {{ eq: "{sid}" }} }}')
+            else:
+                filters.append(f'state: {{ name: {{ eqi: "{status}" }} }}')
+    else:
+        filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+
+    filter_str = ", ".join(filters)
+    if filter_str:
+        filter_str = f", {filter_str}"
+
+    cycle_field = "activeCycle" if args.cycle != "next" else "nextCycle"
+
+    query = f"""{{
+        team(id: "{team_id}") {{
+            {cycle_field} {{
+                name startsAt endsAt
+                issues(filter: {{
+                    team: {{ id: {{ eq: "{team_id}" }} }}
+                    {filter_str}
+                }}) {{
+                    nodes {{ {ISSUE_FIELDS} }}
+                }}
+            }}
+        }}
+    }}"""
+
+    data = gql(api_key, query)
+    if check_errors(data):
+        return
+
+    team = data.get("data", {}).get("team", {})
+    cycle = team.get(cycle_field)
+    if not cycle:
+        which = "active" if cycle_field == "activeCycle" else "next"
+        print(f"No {which} cycle found.")
+        return
+
+    nodes = cycle.get("issues", {}).get("nodes", [])
+    cycle_name = cycle.get("name", "Cycle")
+
+    # Apply agent ownership filter client-side so "my tasks + unowned" is expressible.
+    if explicit_agent:
+        target_label = f"agent:{explicit_agent}"
+
+        def match(n):
+            names = [l["name"] for l in n.get("labels", {}).get("nodes", [])]
+            has_target = target_label in names
+            has_any_agent = any(x.startswith("agent:") for x in names)
+            if has_target:
+                return True
+            if include_unowned and not has_any_agent:
+                return True
+            return False
+
+        nodes = [n for n in nodes if match(n)]
+
+    if args.json:
+        print(json.dumps({
+            "cycle": {
+                "name": cycle_name,
+                "startsAt": cycle.get("startsAt"),
+                "endsAt": cycle.get("endsAt"),
+            },
+            "issues": nodes,
+        }, indent=2))
+        return
+
+    nodes.sort(key=issue_sort_key)
+
+    if not nodes:
+        print(f"No matching tasks in {cycle_name}.")
+        return
+
+    header_note = ""
+    if explicit_agent and include_unowned:
+        owned = sum(1 for n in nodes if any(l["name"] == f"agent:{explicit_agent}" for l in n.get("labels", {}).get("nodes", [])))
+        unowned = len(nodes) - owned
+        header_note = f"  ({owned} yours, {unowned} unowned)"
+    print(f"{cycle_name} -- {len(nodes)} task(s){header_note}")
+    print()
+    for n in nodes:
+        print(format_issue_row(n))
+
+
+def show_board(args, api_key, team_id, cfg):
+    cycle_field = "activeCycle" if args.cycle != "next" else "nextCycle"
+
+    query = f"""{{
+        team(id: "{team_id}") {{
+            {cycle_field} {{
+                name startsAt endsAt
+                issues(filter: {{
+                    team: {{ id: {{ eq: "{team_id}" }} }}
+                    state: {{ type: {{ nin: ["completed", "canceled"] }} }}
+                }}) {{
+                    nodes {{ {ISSUE_FIELDS} }}
+                }}
+            }}
+        }}
+    }}"""
+
+    data = gql(api_key, query)
+    if check_errors(data):
+        return
+
+    team = data.get("data", {}).get("team", {})
+    cycle = team.get(cycle_field)
+    if not cycle:
+        print("No active cycle found.")
+        return
+
+    nodes = cycle.get("issues", {}).get("nodes", [])
+    cycle_name = cycle.get("name", "Cycle")
+
+    if args.json:
+        print(json.dumps({
+            "cycle": {
+                "name": cycle_name,
+                "startsAt": cycle.get("startsAt"),
+                "endsAt": cycle.get("endsAt"),
+            },
+            "issues": nodes,
+        }, indent=2))
+        return
+
+    if not nodes:
+        print(f"No open tasks in {cycle_name}.")
+        return
+
+    agents: dict[str, list] = {}
+    unassigned: list = []
+
+    for n in nodes:
+        labels = [l["name"] for l in n.get("labels", {}).get("nodes", [])]
+        agent_labels = [l for l in labels if l.startswith("agent:")]
+        if agent_labels:
+            for al in agent_labels:
+                agent_name = al.split(":", 1)[1]
+                agents.setdefault(agent_name, []).append(n)
+        else:
+            unassigned.append(n)
+
+    print(f"{cycle_name} -- {len(nodes)} task(s)")
+    print()
+
+    for agent_name in sorted(agents.keys()):
+        issues = agents[agent_name]
+        issues.sort(key=issue_sort_key)
+        print(f"  @{agent_name} ({len(issues)})")
+        for n in issues:
+            pri = PRIORITY_MAP.get(n.get("priority", 0), "-")
+            state = n["state"]["name"]
+            due = format_due(n.get("dueDate"))
+            print(f"    {n['identifier']:<8} {pri:<7}  {state:<12}  {due}  {n['title']}")
+        print()
+
+    if unassigned:
+        unassigned.sort(key=issue_sort_key)
+        print(f"  unassigned ({len(unassigned)})")
+        for n in unassigned:
+            pri = PRIORITY_MAP.get(n.get("priority", 0), "-")
+            state = n["state"]["name"]
+            due = format_due(n.get("dueDate"))
+            labels = [l["name"] for l in n.get("labels", {}).get("nodes", [])]
+            label_str = f"  [{', '.join(labels)}]" if labels else ""
+            print(f"    {n['identifier']:<8} {pri:<7}  {state:<12}  {due}  {n['title']}{label_str}")
+        print()
+
+
+def show_issue_detail(args, api_key, team_id):
+    identifier = args.identifier
+    number = identifier.split("-")[-1]
+    try:
+        number = int(number)
+    except ValueError:
+        print(f"Invalid identifier: {identifier}", file=sys.stderr)
+        sys.exit(1)
+
+    data = gql(api_key, f"""{{
+        issues(filter: {{
+            team: {{ id: {{ eq: "{team_id}" }} }}
+            number: {{ eq: {number} }}
+        }}) {{
+            nodes {{
+                id identifier title description
+                state {{ name }}
+                priority
+                labels {{ nodes {{ name }} }}
+                assignee {{ name }}
+                createdAt updatedAt
+                comments {{ nodes {{ body createdAt user {{ name }} }} }}
+            }}
+        }}
+    }}""")
+
+    if check_errors(data):
+        return
+
+    nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
+    if not nodes:
+        print(f"Issue {identifier} not found.")
+        return
+
+    n = nodes[0]
+
+    if args.json:
+        print(json.dumps(n, indent=2))
+        return
+
+    pri = PRIORITY_MAP.get(n.get("priority", 0), "-")
+    labels = ", ".join(l["name"] for l in n.get("labels", {}).get("nodes", []))
+    assignee = n.get("assignee")
+    assignee_name = assignee.get("name", "Unassigned") if assignee else "Unassigned"
+
+    print(f"{n['identifier']}  {n['title']}")
+    print(f"  Status:   {n['state']['name']}")
+    print(f"  Priority: {pri}")
+    print(f"  Labels:   {labels or '-'}")
+    print(f"  Assignee: {assignee_name}")
+    print()
+
+    desc = n.get("description", "")
+    if desc:
+        print("Description:")
+        for line in desc.split("\n"):
+            print(f"  {line}")
+        print()
+
+    comments = n.get("comments", {}).get("nodes", [])
+    if comments:
+        print(f"Comments ({len(comments)}):")
+        for c in comments:
+            user = c.get("user", {}).get("name", "Unknown")
+            body = c.get("body", "").strip().replace("\n", "\n    ")
+            print(f"  [{user}] {body}")
+        print()
+
+
+# ---------------------------------------------------------------------------
+# update - all mutations on an existing issue
+# ---------------------------------------------------------------------------
+
+def cmd_update(args, cfg, api_key, team_id):
+    # Require proof when marking done
+    if args.done and not args.proof:
+        print("Cannot mark done without proof. Provide at least one --proof:", file=sys.stderr)
+        print("  --proof /path/to/screenshot.png   (file upload)", file=sys.stderr)
+        print("  --proof https://example.com/result (URL)", file=sys.stderr)
+        print('  --proof "Sent 15/30 emails"        (text)', file=sys.stderr)
+        sys.exit(1)
+
+    issue = resolve_issue(api_key, team_id, args.identifier)
+    if not issue:
+        print(f"Issue {args.identifier} not found.")
+        sys.exit(1)
+
+    did_something = False
+
+    # Post proof as a comment before status change
+    if args.proof:
+        proof_body = build_proof_comment(api_key, args.proof)
+        if args.comment:
+            proof_body = f"{args.comment}\n\n{proof_body}"
+
+        data = gql(api_key, """
+            mutation($input: CommentCreateInput!) {
+                commentCreate(input: $input) { success }
+            }
+        """, {"input": {"issueId": issue["id"], "body": proof_body}})
+
+        if check_errors(data):
+            return
+        if data["data"]["commentCreate"]["success"]:
+            print(f"Proof posted to {args.identifier}.")
+        else:
+            print("Proof comment failed.", file=sys.stderr)
+            sys.exit(1)
+        did_something = True
+        # Comment already included in proof, don't post separately
+        args.comment = None
+
+    # Status change
+    target_state = None
+    if args.done:
+        target_state = "Done"
+    elif args.pickup:
+        target_state = "In Progress"
+    elif args.todo:
+        target_state = "Todo"
+    elif args.status:
+        target_state = args.status
+
+    if target_state:
+        states = get_states(api_key, team_id, cfg)
+        state_id = resolve_state_id(states, target_state)
+        if not state_id:
+            print(f"State '{target_state}' not found. Available: {', '.join(states.keys())}", file=sys.stderr)
+            sys.exit(1)
+
+        data = gql(api_key, """
+            mutation($id: String!, $stateId: String!) {
+                issueUpdate(id: $id, input: { stateId: $stateId }) {
+                    success
+                    issue { identifier title state { name } }
+                }
+            }
+        """, {"id": issue["id"], "stateId": state_id})
+
+        if check_errors(data):
+            return
+
+        result = data["data"]["issueUpdate"]
+        if result["success"]:
+            i = result["issue"]
+            print(f"{i['identifier']} -> {i['state']['name']}")
+        else:
+            print("Status update failed.")
+        did_something = True
+
+    # Labels
+    if args.label:
+        label_data = gql(api_key, """
+            query($teamId: ID!) {
+                issueLabels(
+                    filter: {
+                        or: [
+                            { team: { id: { eq: $teamId } } }
+                            { team: { null: true } }
+                        ]
+                    }
+                    first: 200
+                ) {
+                    nodes { id name }
+                }
+            }
+        """, {"teamId": team_id})
+
+        if not check_errors(label_data):
+            all_labels = label_data["data"]["issueLabels"]["nodes"]
+            label_map = {l["name"]: l["id"] for l in all_labels}
+
+            # Also get current labels on the issue
+            issue_data = gql(api_key, f"""{{
+                issue(id: "{issue['id']}") {{
+                    labels {{ nodes {{ id name }} }}
+                }}
+            }}""")
+            current_ids = []
+            if not check_errors(issue_data):
+                current_ids = [l["id"] for l in issue_data["data"]["issue"]["labels"]["nodes"]]
+
+            label_ids = list(current_ids)
+            added = []
+            for lbl in args.label:
+                if lbl in label_map:
+                    if label_map[lbl] not in label_ids:
+                        label_ids.append(label_map[lbl])
+                        added.append(lbl)
+                else:
+                    print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
+
+            if added:
+                data = gql(api_key, """
+                    mutation($id: String!, $labelIds: [String!]!) {
+                        issueUpdate(id: $id, input: { labelIds: $labelIds }) {
+                            success
+                        }
+                    }
+                """, {"id": issue["id"], "labelIds": label_ids})
+
+                if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+                    print(f"Labels added to {args.identifier}: {', '.join(added)}")
+                else:
+                    print("Label update failed.")
+                did_something = True
+
+    # Cycle move: --cycle active | next | none
+    if args.cycle:
+        choice = args.cycle.lower()
+        new_cycle_id: str | None = None
+        if choice == "none":
+            new_cycle_id = None
+        elif choice in ("active", "next"):
+            new_cycle_id = get_cycle_id(api_key, team_id, choice)
+            if not new_cycle_id:
+                print(f"Warning: no {choice} cycle found; skipping cycle move.", file=sys.stderr)
+                new_cycle_id = ...  # sentinel — skip mutation below
+
+        if new_cycle_id is not ...:
+            data = gql(api_key, """
+                mutation($id: String!, $cycleId: String) {
+                    issueUpdate(id: $id, input: { cycleId: $cycleId }) {
+                        success
+                        issue { identifier cycle { name } }
+                    }
+                }
+            """, {"id": issue["id"], "cycleId": new_cycle_id})
+            if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+                i = data["data"]["issueUpdate"]["issue"]
+                cyc = (i.get("cycle") or {}).get("name") or "no cycle"
+                print(f"{i['identifier']} -> cycle: {cyc}")
+                did_something = True
+            else:
+                print("Cycle update failed.")
+
+    # Comment
+    if args.comment:
+        comment_body = args.comment
+
+        data = gql(api_key, """
+            mutation($input: CommentCreateInput!) {
+                commentCreate(input: $input) { success }
+            }
+        """, {"input": {"issueId": issue["id"], "body": comment_body}})
+
+        if check_errors(data):
+            return
+
+        if data["data"]["commentCreate"]["success"]:
+            print(f"Comment added to {args.identifier}.")
+        else:
+            print("Comment failed.")
+        did_something = True
+
+    if not did_something:
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, or --comment.")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# create
+# ---------------------------------------------------------------------------
+
+def cmd_create(args, cfg, api_key, team_id):
+    input_obj: dict = {
+        "teamId": team_id,
+        "title": args.title,
+    }
+
+    if args.description:
+        input_obj["description"] = args.description
+
+    # Priority: default Medium (3) so tickets land with a sensible weight.
+    priority = parse_priority(args.priority) if args.priority is not None else 3
+    input_obj["priority"] = priority
+
+    # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
+    # Explicit --status always wins.
+    desired_status = args.status
+    if not desired_status:
+        desired_status = "Backlog" if priority == 4 else "Todo"
+
+    states = get_states(api_key, team_id, cfg)
+    sid = resolve_state_id(states, desired_status)
+    if sid:
+        input_obj["stateId"] = sid
+    else:
+        print(f"Warning: state '{desired_status}' not found; letting Linear pick the default.", file=sys.stderr)
+
+    # Cycle: default "active". Explicit "none" skips cycle assignment.
+    cycle_choice = (args.cycle or "active").lower()
+    if cycle_choice in ("active", "next"):
+        cid = get_cycle_id(api_key, team_id, cycle_choice)
+        if cid:
+            input_obj["cycleId"] = cid
+        else:
+            print(f"Warning: no {cycle_choice} cycle found; creating without cycle.", file=sys.stderr)
+    # "none" -> no cycleId (backlog behavior)
+
+    # Assign: default = API key owner. "none" -> unassigned. An email -> lookup.
+    assign_arg = args.assign
+    if assign_arg is None:
+        # Default behavior: assign to the caller (API key owner).
+        vid = get_viewer_id(api_key, cfg)
+        if vid:
+            input_obj["assigneeId"] = vid
+    elif assign_arg.lower() == "none":
+        pass
+    elif "@" in assign_arg:
+        uid = resolve_user_id_by_email(api_key, assign_arg.strip())
+        if uid:
+            input_obj["assigneeId"] = uid
+        else:
+            print(f"Warning: user '{assign_arg}' not found; leaving unassigned.", file=sys.stderr)
+    else:
+        print(f"Warning: --assign expects an email or 'none'; got '{assign_arg}'. Ignoring.", file=sys.stderr)
+
+    if args.label:
+        label_data = gql(api_key, """
+            query($teamId: ID!) {
+                issueLabels(
+                    filter: {
+                        or: [
+                            { team: { id: { eq: $teamId } } }
+                            { team: { null: true } }
+                        ]
+                    }
+                    first: 200
+                ) {
+                    nodes { id name }
+                }
+            }
+        """, {"teamId": team_id})
+
+        if not check_errors(label_data):
+            all_labels = label_data["data"]["issueLabels"]["nodes"]
+            label_map = {l["name"]: l["id"] for l in all_labels}
+            label_ids = []
+            for lbl in args.label:
+                if lbl in label_map:
+                    label_ids.append(label_map[lbl])
+                else:
+                    print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
+            if label_ids:
+                input_obj["labelIds"] = label_ids
+
+    data = gql(api_key, """
+        mutation($input: IssueCreateInput!) {
+            issueCreate(input: $input) {
+                success
+                issue { identifier title state { name } cycle { name } assignee { name } }
+            }
+        }
+    """, {"input": input_obj})
+
+    if check_errors(data):
+        return
+
+    result = data["data"]["issueCreate"]
+    if result["success"]:
+        i = result["issue"]
+        cyc = (i.get("cycle") or {}).get("name") or "no cycle"
+        asg = (i.get("assignee") or {}).get("name") or "unassigned"
+        print(f"Created {i['identifier']}: {i['title']}  [{cyc} | {asg}]")
+    else:
+        print("Create failed.")
+
+
+# ---------------------------------------------------------------------------
+# cycles (list)
+# ---------------------------------------------------------------------------
+
+def cmd_cycles(args, cfg, api_key, team_id):
+    """List all cycles for the team, with dates, status, issue counts."""
+    cycles = list_team_cycles(api_key, team_id)
+    if not cycles:
+        print("No cycles found.")
+        return
+
+    if args.json:
+        print(json.dumps(cycles, indent=2))
+        return
+
+    # Sort by startsAt descending (most recent first)
+    cycles.sort(key=lambda c: c.get("startsAt") or "", reverse=True)
+
+    # Find the currently-active cycle id so we can mark it in output.
+    active_id = get_cycle_id(api_key, team_id, "active")
+    next_id = get_cycle_id(api_key, team_id, "next")
+
+    # Format: status marker | name (number) | startsAt -> endsAt | issue count
+    for c in cycles:
+        cid = c.get("id")
+        name = c.get("name") or f"Cycle {c.get('number')}"
+        starts = (c.get("startsAt") or "")[:10]
+        ends = (c.get("endsAt") or "")[:10]
+        history = c.get("issueCountHistory") or []
+        count = history[-1] if history else 0
+
+        marker = "  "
+        if cid == active_id:
+            marker = "* "
+        elif cid == next_id:
+            marker = "> "
+        elif c.get("completedAt"):
+            marker = "- "
+
+        print(f"{marker}{name:40s}  {starts} → {ends}  {count} issue(s)")
+
+    print("\n(* = active, > = next, - = completed)")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="linear",
+        description="Task management CLI for AI agent teams",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # setup
+    p_setup = sub.add_parser("setup", help="Configure Linear connection and agent identity")
+    p_setup.add_argument("--api-key", help="Linear API key")
+    p_setup.add_argument("--agent", help="Default agent identity")
+
+    # tasks (list + view + board)
+    p_tasks = sub.add_parser("tasks", help="List tasks, view details, or show team board")
+    p_tasks.add_argument("identifier", nargs="?", help="Issue identifier for detail view (e.g. GR-42)")
+    p_tasks.add_argument("--agent", help="Filter by agent label (e.g. --agent claude)")
+    p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter, show all")
+    p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
+    p_tasks.add_argument("--label", help="Filter by any label")
+    p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
+    p_tasks.add_argument("--cycle", default="active", choices=["active", "next"])
+    p_tasks.add_argument("--json", action="store_true", help="JSON output")
+
+    # update (all mutations on an issue)
+    p_update = sub.add_parser("update", help="Update an issue (status, comment)")
+    p_update.add_argument("identifier", help="Issue identifier (e.g. GR-42)")
+    status_group = p_update.add_mutually_exclusive_group()
+    status_group.add_argument("--done", action="store_true", help="Mark Done")
+    status_group.add_argument("--pickup", action="store_true", help="Mark In Progress")
+    status_group.add_argument("--todo", action="store_true", help="Mark Todo")
+    status_group.add_argument("--status", help="Move to any state by name")
+    p_update.add_argument("--comment", help="Add a comment")
+    p_update.add_argument("--proof", action="append",
+                          help="Proof of completion (repeatable). File path, URL, or text.")
+    p_update.add_argument("--label", action="append", help="Add label(s) (repeatable)")
+    p_update.add_argument("--cycle", choices=["active", "next", "none"],
+                          help="Move issue: active cycle, next cycle, or remove from cycle")
+
+    # create
+    p_create = sub.add_parser("create", help="Create a new issue")
+    p_create.add_argument("title", help="Issue title")
+    p_create.add_argument("--label", action="append", help="Label(s) to add (repeatable)")
+    p_create.add_argument("--priority", type=str, default=None,
+                          help="urgent, high, medium (default), low, or none")
+    p_create.add_argument("--description", help="Issue description")
+    p_create.add_argument("--status", help="Initial status (default: Todo)")
+    p_create.add_argument("--cycle", default="active",
+                          choices=["active", "next", "none"],
+                          help="Cycle assignment (default: active)")
+    p_create.add_argument("--assign", default=None,
+                          help="Assignee: email address, or 'none' (default: API key owner)")
+
+    # cycles (list all cycles for the team)
+    p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
+    p_cycles.add_argument("--json", action="store_true", help="JSON output")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    cfg = load_config()
+
+    if args.command == "setup":
+        cmd_setup(args, cfg)
+        return
+
+    # All other commands need credentials
+    api_key = get_api_key(cfg)
+    team_id = get_team_id(cfg)
+
+    if not api_key:
+        print("No API key configured. Run: linear setup", file=sys.stderr)
+        sys.exit(1)
+    if not team_id:
+        print("No team configured. Run: linear setup", file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == "tasks":
+        cmd_tasks(args, cfg, api_key, team_id)
+    elif args.command == "update":
+        cmd_update(args, cfg, api_key, team_id)
+    elif args.command == "create":
+        cmd_create(args, cfg, api_key, team_id)
+    elif args.command == "cycles":
+        cmd_cycles(args, cfg, api_key, team_id)
+
+
+if __name__ == "__main__":
+    main()
