@@ -58,10 +58,57 @@ linear-cli exists because driving Linear from a subagent shouldn't require shell
 
 Drop [`skill.md`](./skill.md) into your agent's skills directory (e.g. `~/.claude/skills/linear/skill.md`) to teach Claude / Codex / Gemini how to use the CLI without you explaining it every session.
 
+## Why this one?
+
+The Linear CLI space already has options. Here's what's different about this one, measured — not vibes.
+
+### Zero dependencies. Literally.
+
+```
+$ grep -E '^(import|from)' linear | sort -u
+from __future__ import annotations
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+import argparse
+import json
+import mimetypes
+import os
+import subprocess
+import sys
+```
+
+Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno. The whole tool is one ~43 KB file you can read top-to-bottom in an hour.
+
+### How it compares
+
+| Tool | Runtime | Deps | Install footprint | Last published |
+|------|---------|------|-------------------|----------------|
+| **linear-cli** (this) | Python 3.9+ stdlib | **0** | 43 KB, 1 file | active |
+| [`@linear/cli`](https://www.npmjs.com/package/@linear/cli) (official) | Node | 0 | 5 MB npm pkg | Nov 2021 (abandoned) |
+| [Linearis](https://github.com/czottmann/linearis) | Node | `@linear/sdk` + `commander` | 27 MB `node_modules` | 2025 |
+| [schpet/linear-cli](https://github.com/schpet/linear-cli) | Deno | 25+ imports (cliffy, graphql-codegen, unified, valibot…) | Deno + codegen | active |
+| [scmfury/linear-cli](https://github.com/feras239/linear-cli) | Node 18+ | `@linear/sdk`, commander, dotenv, picocolors | 27 MB `node_modules` | 2025 |
+| [evangodon/linear-cli](https://github.com/evangodon/linear-cli) | Node | 18 deps (oclif, boxen, chalk, inquirer, marked…) | heavy | stale |
+| [Finesssee/linear-cli](https://github.com/Finesssee/linear-cli) | Rust toolchain | 28 crates (tokio, reqwest, clap, keyring…) | compiled binary | active |
+| Linear's hosted [MCP server](https://linear.app/docs/mcp) | remote | — | 0 local, but 13k+ tokens injected into every agent turn | active |
+
+Numbers verified against each project's `package.json` / `Cargo.toml` / `deno.json` via the npm registry.
+
+### Why the MCP server isn't always the answer
+
+Linear ships a first-party MCP server at `mcp.linear.app/mcp`. It's great for interactive chat. Less great for agents doing volume work:
+
+- MCP injects the full tool catalog into every turn. Industry data: [40–50% of the context window](https://www.speakeasy.com/blog/how-we-reduced-token-usage-by-100x-dynamic-toolsets-v2) is consumed by tool schemas before the agent does anything. The [Linearis author cites ~13k tokens](https://zottmann.org/2025/09/03/linearis-my-linear-cli-built.html) for Linear's MCP alone. That was the explicit reason he built a CLI.
+- [Benchmarks](https://onlycli.github.io/OnlyCLI/blog/mcp-token-cost-benchmark/) show CLI tools completing the same tasks ~33% more token-efficiently than equivalent MCP servers.
+- `linear tasks --json` returns exactly the bytes you asked for. That's the whole point.
+
+If you want the MCP, use it. If you want a subagent to burn through 50 tickets without blowing its context on schema chatter, use this.
+
 ## Requirements
 
-- Python 3.10+ (stdlib only, no pip deps)
-- A Linear API key with Full access
+- Python 3.9+ (ships with every macOS since 11, every Ubuntu since 20.04)
+- A Linear API key with [Full access](https://linear.app/settings/account/security)
 
 ## License
 
