@@ -21,7 +21,11 @@ Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on m
        └───────────────────────── reviews ─────────────────────────────────────────┘
 ```
 
-<!-- HERO_VIDEO -->
+<p align="center">
+  <video src="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4" controls muted playsinline width="100%">
+    Your browser doesn't support inline video. <a href="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4">Download the demo</a>.
+  </video>
+</p>
 
 ## Install
 
