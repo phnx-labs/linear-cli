@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img" aria-label="How a Linear ticket becomes a PR: a human files the ticket and stays the assignee, an agent picks it up by lane label and ships a PR plus proof, then the human reviews. linear-cli is the contract between them.">
+  <defs>
+    <radialGradient id="bgVignette" cx="50%" cy="42%" r="80%">
+      <stop offset="0%"  stop-color="#0d0d0d"/>
+      <stop offset="100%" stop-color="#040404"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#0f0f0f" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="cardFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#131313"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
+    </linearGradient>
+    <linearGradient id="cardRim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2e2e2e"/>
+      <stop offset="50%" stop-color="#242424"/>
+      <stop offset="100%" stop-color="#1c1c1c"/>
+    </linearGradient>
+    <linearGradient id="limeLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#B6E84A" stop-opacity="0.3"/>
+      <stop offset="50%" stop-color="#B6E84A" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#B6E84A" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="reviewLine" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0%"  stop-color="#7A7A7A" stop-opacity="0.2"/>
+      <stop offset="40%" stop-color="#9A9A9A" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#9A9A9A" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="limeGlow" x="-40%" y="-60%" width="180%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feOffset dy="10" result="offset"/>
+      <feColorMatrix in="offset" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrowLime" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#B6E84A"/>
+    </marker>
+    <marker id="arrowMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9A9A9A"/>
+    </marker>
+    <marker id="dotLime" viewBox="0 0 6 6" refX="3" refY="3" markerWidth="6" markerHeight="6">
+      <circle cx="3" cy="3" r="2.5" fill="#B6E84A"/>
+    </marker>
+    <style><![CDATA[
+      .title       { font: 500 32px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; fill: #f0f0f0; letter-spacing: -0.015em; }
+      .subtitle    { font: 400 18px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; fill: #808080; letter-spacing: 0; }
+      .section     { font: 600 12px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; letter-spacing: 0.32em; fill: #555555; }
+      .role        { font: 600 11px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; letter-spacing: 0.28em; fill: #606060; }
+      .cardtitle   { font: 600 26px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; fill: #f0f0f0; letter-spacing: -0.01em; }
+      .cardsub     { font: 400 14px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; fill: #909090; }
+      .mono        { font: 500 16px ui-monospace, "SF Mono", Menlo, monospace; fill: #ebebeb; }
+      .mono-muted  { font: 500 16px ui-monospace, "SF Mono", Menlo, monospace; fill: #808080; }
+      .mono-faint  { font: 400 14px ui-monospace, "SF Mono", Menlo, monospace; fill: #5a5a5a; }
+      .mono-accent { font: 500 16px ui-monospace, "SF Mono", Menlo, monospace; fill: #B6E84A; }
+      .mono-sm     { font: 500 13px ui-monospace, "SF Mono", Menlo, monospace; fill: #c8c8c8; }
+      .mono-sm-muted { font: 500 13px ui-monospace, "SF Mono", Menlo, monospace; fill: #707070; }
+      .mono-sm-accent { font: 500 13px ui-monospace, "SF Mono", Menlo, monospace; fill: #B6E84A; }
+      .edge        { font: 600 11px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; letter-spacing: 0.22em; fill: #B6E84A; }
+      .edge-muted  { font: 600 11px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; letter-spacing: 0.22em; fill: #9A9A9A; }
+      .nodedesc    { font: 400 14px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; fill: #909090; }
+      .badge       { font: 600 10px -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif; letter-spacing: 0.16em; }
+      .pill        { font: 500 11px ui-monospace, "SF Mono", Menlo, monospace; }
+      .stepnum     { font: 700 13px ui-monospace, "SF Mono", Menlo, monospace; fill: #B6E84A; }
+    ]]></style>
+  </defs>
+
+  <rect width="1600" height="880" fill="url(#bgVignette)"/>
+  <rect width="1600" height="880" fill="url(#grid)" opacity="0.55"/>
+
+  <text x="80" y="72" class="title">How a ticket becomes a PR</text>
+  <text x="80" y="104" class="subtitle">Humans assign.  Agents implement.  The Linear ticket is the contract between them.</text>
+
+  <text x="80" y="174" class="section">ONE LOOP — ASSIGN → IMPLEMENT → SHIP → REVIEW</text>
+
+  <!-- HUMAN CARD -->
+  <g filter="url(#softShadow)">
+    <rect x="80" y="216" width="320" height="288" rx="18" fill="url(#cardFill)" stroke="url(#cardRim)" stroke-width="1"/>
+  </g>
+  <rect x="80.5" y="216.5" width="319" height="1" fill="#3a3a3a" opacity="0.6"/>
+  <text x="106" y="252" class="role">ROLE</text>
+  <text x="106" y="298" class="cardtitle">Human</text>
+  <text x="106" y="324" class="cardsub">stays the assignee · owns the outcome</text>
+  <line x1="106" y1="346" x2="374" y2="346" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- avatar circle -->
+  <circle cx="138" cy="394" r="22" fill="#1a1a1a" stroke="#2e2e2e" stroke-width="1"/>
+  <text x="138" y="400" text-anchor="middle" class="cardtitle" style="font-size:18px; fill:#9A9A9A;">M</text>
+
+  <text x="178" y="388" class="mono-sm">muqsit@phnx.so</text>
+  <text x="178" y="406" class="mono-sm-muted">@trp · cycle Q2W4</text>
+
+  <text x="106" y="456" class="mono-sm-muted">$</text>
+  <text x="124" y="456" class="mono-sm">linear create &quot;Fix auth bug&quot; \</text>
+  <text x="124" y="478" class="mono-sm-accent">    --label agent:claude</text>
+
+  <!-- LINEAR TICKET CARD -->
+  <g filter="url(#softShadow)">
+    <rect x="450" y="216" width="320" height="288" rx="18" fill="url(#cardFill)" stroke="url(#cardRim)" stroke-width="1"/>
+  </g>
+  <rect x="450.5" y="216.5" width="319" height="1" fill="#3a3a3a" opacity="0.6"/>
+  <text x="476" y="252" class="role">SOURCE OF TRUTH</text>
+  <text x="476" y="298" class="cardtitle">RUSH-505</text>
+  <text x="476" y="324" class="cardsub">Email truncated before .com</text>
+  <line x1="476" y1="346" x2="744" y2="346" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- status pill -->
+  <g>
+    <rect x="476" y="368" width="80" height="22" rx="11" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+    <circle cx="490" cy="379" r="3.5" fill="#9A9A9A"/>
+    <text x="500" y="383" class="pill" fill="#c8c8c8">TODO</text>
+  </g>
+
+  <!-- urgency pill -->
+  <g>
+    <rect x="566" y="368" width="74" height="22" rx="11" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+    <circle cx="580" cy="379" r="3.5" fill="#f87171"/>
+    <text x="590" y="383" class="pill" fill="#c8c8c8">URGENT</text>
+  </g>
+
+  <!-- assignee row -->
+  <text x="476" y="424" class="mono-sm-muted">assignee</text>
+  <text x="558" y="424" class="mono-sm">muqsit</text>
+
+  <!-- labels row -->
+  <text x="476" y="446" class="mono-sm-muted">labels</text>
+  <text x="546" y="446" class="mono-sm-accent" filter="url(#limeGlow)">agent:claude</text>
+  <text x="652" y="446" class="mono-sm-muted">·</text>
+  <text x="664" y="446" class="mono-sm">Bug</text>
+
+  <text x="476" y="478" class="mono-faint">cycle: Q2W4 · 50 tasks</text>
+
+  <!-- AGENT CARD -->
+  <g filter="url(#softShadow)">
+    <rect x="820" y="216" width="320" height="288" rx="18" fill="url(#cardFill)" stroke="url(#cardRim)" stroke-width="1"/>
+  </g>
+  <rect x="820.5" y="216.5" width="319" height="1" fill="#3a3a3a" opacity="0.6"/>
+  <text x="846" y="252" class="role">ROLE</text>
+  <text x="846" y="298" class="cardtitle">Agent</text>
+  <text x="846" y="324" class="cardsub">picks up · implements · ships</text>
+  <line x1="846" y1="346" x2="1114" y2="346" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- agent badge -->
+  <circle cx="878" cy="394" r="22" fill="#1a1a1a" stroke="#B6E84A" stroke-width="1.4"/>
+  <text x="878" y="400" text-anchor="middle" class="cardtitle" style="font-size:18px; fill:#B6E84A;">C</text>
+
+  <text x="918" y="388" class="mono-sm">claude</text>
+  <text x="918" y="406" class="mono-sm-muted">--agent claude · lane</text>
+
+  <text x="846" y="456" class="mono-sm-muted">$</text>
+  <text x="864" y="456" class="mono-sm">linear update RUSH-505 \</text>
+  <text x="864" y="478" class="mono-sm-accent">    --pickup</text>
+
+  <!-- PR + PROOF CARD -->
+  <g filter="url(#softShadow)">
+    <rect x="1190" y="216" width="330" height="288" rx="18" fill="url(#cardFill)" stroke="url(#cardRim)" stroke-width="1"/>
+  </g>
+  <rect x="1190.5" y="216.5" width="329" height="1" fill="#3a3a3a" opacity="0.6"/>
+  <text x="1216" y="252" class="role">DELIVERABLE</text>
+  <text x="1216" y="298" class="cardtitle">PR + Proof</text>
+  <text x="1216" y="324" class="cardsub">code · screenshots · links · notes</text>
+  <line x1="1216" y1="346" x2="1494" y2="346" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- proof rows -->
+  <g>
+    <rect x="1216" y="362" width="14" height="14" rx="3" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+    <path d="M 1219 369 L 1222 372 L 1227 366" stroke="#B6E84A" stroke-width="1.5" fill="none"/>
+  </g>
+  <text x="1240" y="374" class="mono-sm">github.com/.../pull/47</text>
+
+  <g>
+    <rect x="1216" y="386" width="14" height="14" rx="3" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+    <path d="M 1219 393 L 1222 396 L 1227 390" stroke="#B6E84A" stroke-width="1.5" fill="none"/>
+  </g>
+  <text x="1240" y="398" class="mono-sm">screenshot-fix.png</text>
+
+  <g>
+    <rect x="1216" y="410" width="14" height="14" rx="3" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+    <path d="M 1219 417 L 1222 420 L 1227 414" stroke="#B6E84A" stroke-width="1.5" fill="none"/>
+  </g>
+  <text x="1240" y="422" class="mono-sm">Shipped in 0.8.79</text>
+
+  <text x="1216" y="456" class="mono-sm-muted">$</text>
+  <text x="1234" y="456" class="mono-sm">linear update RUSH-505 \</text>
+  <text x="1234" y="478" class="mono-sm-accent">    --done --proof &lt;...&gt;</text>
+
+  <!-- ARROWS BETWEEN CARDS -->
+
+  <!-- HUMAN -> LINEAR -->
+  <path d="M 405 360 L 445 360" stroke="url(#limeLine)" fill="none" stroke-width="2.4" marker-end="url(#arrowLime)" marker-start="url(#dotLime)" filter="url(#limeGlow)"/>
+  <g>
+    <rect x="368" y="296" width="114" height="26" rx="13" fill="#080808" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="383" y="313" class="stepnum">1</text>
+    <text x="398" y="313" class="edge-muted" style="letter-spacing:0.16em">·</text>
+    <text x="411" y="313" class="edge">FILES</text>
+  </g>
+
+  <!-- LINEAR -> AGENT -->
+  <path d="M 775 360 L 815 360" stroke="url(#limeLine)" fill="none" stroke-width="2.4" marker-end="url(#arrowLime)" marker-start="url(#dotLime)" filter="url(#limeGlow)"/>
+  <g>
+    <rect x="734" y="296" width="128" height="26" rx="13" fill="#080808" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="749" y="313" class="stepnum">2</text>
+    <text x="764" y="313" class="edge-muted" style="letter-spacing:0.16em">·</text>
+    <text x="777" y="313" class="edge">PICKS UP</text>
+  </g>
+
+  <!-- AGENT -> PR -->
+  <path d="M 1145 360 L 1185 360" stroke="url(#limeLine)" fill="none" stroke-width="2.4" marker-end="url(#arrowLime)" marker-start="url(#dotLime)" filter="url(#limeGlow)"/>
+  <g>
+    <rect x="1104" y="296" width="116" height="26" rx="13" fill="#080808" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="1119" y="313" class="stepnum">3</text>
+    <text x="1134" y="313" class="edge-muted" style="letter-spacing:0.16em">·</text>
+    <text x="1147" y="313" class="edge">SHIPS</text>
+  </g>
+
+  <!-- BOTTOM SECTION -->
+  <line x1="80" y1="588" x2="1520" y2="588" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="2 5"/>
+  <text x="80" y="574" class="section">REVIEW — THE LOOP CLOSES</text>
+
+  <!-- Review path: from PR + Proof down and back to Human (split into two halves so the chip sits cleanly in the middle) -->
+  <path d="M 1355 510 C 1355 640, 1100 740, 870 740"
+        stroke="url(#reviewLine)" fill="none" stroke-width="2" stroke-dasharray="6 5"
+        filter="url(#limeGlow)"/>
+  <path d="M 730 740 C 500 740, 245 660, 245 510"
+        stroke="url(#reviewLine)" fill="none" stroke-width="2" stroke-dasharray="6 5"
+        marker-end="url(#arrowMuted)" filter="url(#limeGlow)"/>
+
+  <!-- review chip (centered on the gap between the two path halves) -->
+  <g>
+    <rect x="720" y="724" width="160" height="32" rx="16" fill="#080808" stroke="#2a2a2a" stroke-width="1"/>
+    <text x="738" y="744" class="stepnum" fill="#9A9A9A">4</text>
+    <text x="753" y="744" class="edge-muted" style="letter-spacing:0.16em">·</text>
+    <text x="766" y="744" class="edge-muted">REVIEWS PROOF</text>
+  </g>
+
+  <!-- footer notes -->
+  <text x="80" y="824" class="nodedesc">The agent never owns the ticket — it picks up by lane label, ships, and posts proof. The human stays accountable.</text>
+  <text x="80" y="848" class="nodedesc">Same flow whether the agent has its own Linear seat (assignee = agent) or shares yours (assignee = you, label = agent).</text>
+
+  <text x="1520" y="848" text-anchor="end" class="mono-faint">linear-cli · phnx-labs/linear-cli</text>
+</svg>

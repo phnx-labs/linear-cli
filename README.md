@@ -12,14 +12,9 @@ Issue tracking from the shell — for humans and their agents. Query your queue,
 
 Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on macOS and Linux.
 
-```
-  ┌─────────┐   files    ┌────────────┐   picks up   ┌───────────┐   ships    ┌──────────┐
-  │  Human  │ ─────────> │   Linear   │ ───────────> │   Agent   │ ─────────> │  PR +    │
-  │assignee │            │   ticket   │              │implementer│            │  proof   │
-  └─────────┘            │ label:lane │              └───────────┘            └──────────┘
-       ▲                 └────────────┘                                             │
-       └───────────────────────── reviews ─────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/flow.svg" alt="How a Linear ticket becomes a PR: a human files the ticket and stays the assignee, an agent picks it up by lane label, ships a PR plus proof, then the human reviews. linear-cli is the contract between them." width="100%" />
+</p>
 
 <p align="center">
   <video src="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4" controls muted playsinline width="100%">
