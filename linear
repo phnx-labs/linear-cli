@@ -27,6 +27,8 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
+__version__ = "0.1.0"
+
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
 API_URL = "https://api.linear.app/graphql"
@@ -1175,6 +1177,7 @@ def main():
         prog="linear",
         description="Task management CLI for AI agent teams",
     )
+    parser.add_argument("--version", action="version", version=f"linear-cli {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     # setup
