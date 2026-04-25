@@ -61,8 +61,10 @@ linear tasks --json | jq             # machine-readable
 linear update ANT-42 --pickup         # claim (In Progress)
 linear update ANT-42 --comment "..."  # progress note
 linear update ANT-42 --done --proof https://pr/123 --proof "deployed"
+linear update ANT-42 --due-date 2026-05-01    # set due (or 'none' to clear)
 
 linear create "Fix auth bug" --label security --priority high
+linear create "Ship v0.2" --due-date 2026-05-01
 linear cycles
 ```
 

@@ -23,6 +23,7 @@ import mimetypes
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -424,6 +425,21 @@ def parse_priority(value: str) -> int:
     raise SystemExit(
         f"Invalid --priority '{value}'. Use: urgent, high, medium, low, or none."
     )
+
+
+def parse_due_date(value: str) -> str | None:
+    """Accept YYYY-MM-DD, or 'none' to clear. Returns the validated string,
+    or None when clearing. Linear's dueDate is a TimelessDate (date-only)."""
+    v = str(value).strip()
+    if v.lower() in ("none", ""):
+        return None
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        raise SystemExit(
+            f"Invalid --due-date '{value}'. Use YYYY-MM-DD (e.g. 2026-04-28) or 'none'."
+        )
+    return v
 
 ISSUE_FIELDS = """
     identifier title description state { name type }
@@ -991,6 +1007,24 @@ def cmd_update(args, cfg, api_key, team_id):
             else:
                 print("Cycle update failed.")
 
+    # Due date: --due-date YYYY-MM-DD | none
+    if args.due_date is not None:
+        due = parse_due_date(args.due_date)
+        data = gql(api_key, """
+            mutation($id: String!, $due: TimelessDate) {
+                issueUpdate(id: $id, input: { dueDate: $due }) {
+                    success
+                    issue { identifier dueDate }
+                }
+            }
+        """, {"id": issue["id"], "due": due})
+        if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+            i = data["data"]["issueUpdate"]["issue"]
+            print(f"{i['identifier']} -> due: {i['dueDate'] or 'cleared'}")
+            did_something = True
+        else:
+            print("Due date update failed.")
+
     # Comment
     if args.comment:
         comment_body = args.comment
@@ -1011,7 +1045,7 @@ def cmd_update(args, cfg, api_key, team_id):
         did_something = True
 
     if not did_something:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --due-date, or --comment.")
         sys.exit(1)
 
 
@@ -1027,6 +1061,11 @@ def cmd_create(args, cfg, api_key, team_id):
 
     if args.description:
         input_obj["description"] = args.description
+
+    if args.due_date:
+        due = parse_due_date(args.due_date)
+        if due is not None:
+            input_obj["dueDate"] = due
 
     # Priority: default Medium (3) so tickets land with a sensible weight.
     priority = parse_priority(args.priority) if args.priority is not None else 3
@@ -1208,6 +1247,8 @@ def main():
     p_update.add_argument("--proof", action="append",
                           help="Proof of completion (repeatable). File path, URL, or text.")
     p_update.add_argument("--label", action="append", help="Add label(s) (repeatable)")
+    p_update.add_argument("--due-date", dest="due_date",
+                          help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
                           help="Move issue: active cycle, next cycle, or remove from cycle")
 
@@ -1222,6 +1263,8 @@ def main():
     p_create.add_argument("--cycle", default="active",
                           choices=["active", "next", "none"],
                           help="Cycle assignment (default: active)")
+    p_create.add_argument("--due-date", dest="due_date",
+                          help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
                           help="Assignee: email address, or 'none' (default: API key owner)")
 
