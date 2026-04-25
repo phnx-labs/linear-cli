@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
+[![Supply chain: 0 attack surface](https://img.shields.io/badge/supply%20chain-0%20attack%20surface-brightgreen.svg)](#zero-supply-chain-attack-surface)
 [![Single file](https://img.shields.io/badge/single%20file-43%20KB-brightgreen.svg)](./linear)
 [![Team CLI](https://img.shields.io/badge/team-CLI-a3e635.svg)](#why-the-mcp-server-isnt-always-the-answer)
 
@@ -114,6 +115,20 @@ Every symbol is in the Python standard library. No `pip install`. No `npm instal
 | Linear's hosted [MCP server](https://linear.app/docs/mcp) | remote | — | 0 local, but 13k+ tokens injected into every agent turn | active |
 
 Numbers verified against each project's `package.json` / `Cargo.toml` / `deno.json` via the npm registry.
+
+### Zero supply chain attack surface
+
+This is the boring superpower of having no dependencies.
+
+Every notable CLI supply chain attack of the last few years — `event-stream`, `colors`/`faker`, `ua-parser-js`, `node-ipc`, the `xz` backdoor, `polyfill.io`, the dozens of [npm typosquats](https://socket.dev) caught monthly — happened through a compromised dependency, not the tool itself. linear-cli has none. The full audit surface is:
+
+- The 1263 lines of Python in this repo (read it: [`linear`](./linear))
+- Python's standard library
+- Linear's own GraphQL API at `api.linear.app`
+
+That's it. No `npm install` running 200 postinstall scripts. No transitive dependency eight layers deep that you've never heard of. No `package-lock.json` to audit, no `Cargo.lock` to chase, no Deno permissions matrix. If you trust this repo and Python's stdlib, you're done auditing.
+
+It's probably the most boring CLI you'll ever security-review. That's the point.
 
 ### Why the MCP server isn't always the answer
 
