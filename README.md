@@ -75,6 +75,18 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
 - **JSON everywhere.** `--json` on every read command. Pipe to `jq` or hand to a subagent.
 
+<p align="center">
+  <em>Works with</em>
+  <br /><br />
+  <img src="assets/harnesses/anthropic.svg" alt="Claude (Anthropic)"  height="32" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/harnesses/openai.svg"    alt="Codex (OpenAI)"      height="32" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/harnesses/google.svg"    alt="Gemini (Google)"     height="32" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/harnesses/cursor.svg"    alt="Cursor"              height="32" />
+</p>
+
 ## Agent skill
 
 Drop [`skill.md`](./skill.md) into your agent's skills directory (e.g. `~/.claude/skills/linear/skill.md`) to teach Claude / Codex / Gemini how to use the CLI without you explaining it every session.
