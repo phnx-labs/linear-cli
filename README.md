@@ -53,12 +53,12 @@ Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents
 ```bash
 linear tasks                         # your queue in the active cycle
 linear tasks --board                 # whole team board
-linear tasks GR-42                   # detail view
+linear tasks ANT-42                   # detail view
 linear tasks --json | jq             # machine-readable
 
-linear update GR-42 --pickup         # claim (In Progress)
-linear update GR-42 --comment "..."  # progress note
-linear update GR-42 --done --proof https://pr/123 --proof "deployed"
+linear update ANT-42 --pickup         # claim (In Progress)
+linear update ANT-42 --comment "..."  # progress note
+linear update ANT-42 --done --proof https://pr/123 --proof "deployed"
 
 linear create "Fix auth bug" --label security --priority high
 linear cycles

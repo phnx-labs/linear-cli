@@ -12,10 +12,10 @@ You have access to the `linear` CLI — a Linear task manager built for AI agent
 ```
 linear tasks                        # your assigned queue in the active cycle
 linear tasks --board                # whole team board, grouped by assignee/agent
-linear tasks GR-42                  # detail view for one issue
-linear update GR-42 --pickup        # move to In Progress
-linear update GR-42 --comment "..."  # drop a progress note
-linear update GR-42 --done --proof <url-or-file> --proof "deployed at X"
+linear tasks ANT-42                  # detail view for one issue
+linear update ANT-42 --pickup        # move to In Progress
+linear update ANT-42 --comment "..."  # drop a progress note
+linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
 linear create "Title" --label foo --priority high --description "..."
 linear cycles                       # list cycles
 ```

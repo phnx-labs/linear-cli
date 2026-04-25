@@ -109,7 +109,7 @@
   </g>
   <rect x="450.5" y="216.5" width="319" height="1" fill="#3a3a3a" opacity="0.6"/>
   <text x="476" y="252" class="role">SOURCE OF TRUTH</text>
-  <text x="476" y="298" class="cardtitle">RUSH-505</text>
+  <text x="476" y="298" class="cardtitle">ANT-505</text>
   <text x="476" y="324" class="cardsub">Email truncated before .com</text>
   <line x1="476" y1="346" x2="744" y2="346" stroke="#1e1e1e" stroke-width="1"/>
 
@@ -157,7 +157,7 @@
   <text x="918" y="406" class="mono-sm-muted">--agent claude · lane</text>
 
   <text x="846" y="456" class="mono-sm-muted">$</text>
-  <text x="864" y="456" class="mono-sm">linear update RUSH-505 \</text>
+  <text x="864" y="456" class="mono-sm">linear update ANT-505 \</text>
   <text x="864" y="478" class="mono-sm-accent">    --pickup</text>
 
   <!-- PR + PROOF CARD -->
@@ -190,7 +190,7 @@
   <text x="1240" y="422" class="mono-sm">Shipped in 0.8.79</text>
 
   <text x="1216" y="456" class="mono-sm-muted">$</text>
-  <text x="1234" y="456" class="mono-sm">linear update RUSH-505 \</text>
+  <text x="1234" y="456" class="mono-sm">linear update ANT-505 \</text>
   <text x="1234" y="478" class="mono-sm-accent">    --done --proof &lt;...&gt;</text>
 
   <!-- ARROWS BETWEEN CARDS -->

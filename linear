@@ -1187,7 +1187,7 @@ def main():
 
     # tasks (list + view + board)
     p_tasks = sub.add_parser("tasks", help="List tasks, view details, or show team board")
-    p_tasks.add_argument("identifier", nargs="?", help="Issue identifier for detail view (e.g. GR-42)")
+    p_tasks.add_argument("identifier", nargs="?", help="Issue identifier for detail view (e.g. ANT-42)")
     p_tasks.add_argument("--agent", help="Filter by agent label (e.g. --agent claude)")
     p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter, show all")
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
@@ -1198,7 +1198,7 @@ def main():
 
     # update (all mutations on an issue)
     p_update = sub.add_parser("update", help="Update an issue (status, comment)")
-    p_update.add_argument("identifier", help="Issue identifier (e.g. GR-42)")
+    p_update.add_argument("identifier", help="Issue identifier (e.g. ANT-42)")
     status_group = p_update.add_mutually_exclusive_group()
     status_group.add_argument("--done", action="store_true", help="Mark Done")
     status_group.add_argument("--pickup", action="store_true", help="Mark In Progress")
