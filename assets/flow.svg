@@ -94,10 +94,10 @@
 
   <!-- avatar circle -->
   <circle cx="138" cy="394" r="22" fill="#1a1a1a" stroke="#2e2e2e" stroke-width="1"/>
-  <text x="138" y="400" text-anchor="middle" class="cardtitle" style="font-size:18px; fill:#9A9A9A;">M</text>
+  <text x="138" y="400" text-anchor="middle" class="cardtitle" style="font-size:18px; fill:#9A9A9A;">D</text>
 
-  <text x="178" y="388" class="mono-sm">muqsit@phnx.so</text>
-  <text x="178" y="406" class="mono-sm-muted">@trp · cycle Q2W4</text>
+  <text x="178" y="388" class="mono-sm">dario@ant.com</text>
+  <text x="178" y="406" class="mono-sm-muted">@dario · cycle Q2W4</text>
 
   <text x="106" y="456" class="mono-sm-muted">$</text>
   <text x="124" y="456" class="mono-sm">linear create &quot;Fix auth bug&quot; \</text>
@@ -129,7 +129,7 @@
 
   <!-- assignee row -->
   <text x="476" y="424" class="mono-sm-muted">assignee</text>
-  <text x="558" y="424" class="mono-sm">muqsit</text>
+  <text x="558" y="424" class="mono-sm">dario</text>
 
   <!-- labels row -->
   <text x="476" y="446" class="mono-sm-muted">labels</text>
