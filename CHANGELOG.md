@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-24
+
+Documentation polish on top of v0.1.0. No code changes beyond the version bump.
+
+### Added
+- Hero demo video (1080p, 17s, with audio) embedded in README, sourced from the v0.1.0 release asset
+- `assets/flow.svg` — replaces the ASCII flow diagram with a dark-grid SVG showing the human-files / agent-implements / human-reviews loop
+- "Zero supply chain attack surface" section in README, with matching badge
+
 ## [0.1.0] - 2026-04-24
 
 First public release.
@@ -23,4 +32,5 @@ First public release.
 - Auto-migration from `~/.agents/linear.json` if present
 - Single-file Python distribution (~43 KB), zero third-party dependencies
 
+[0.1.1]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.1.0
