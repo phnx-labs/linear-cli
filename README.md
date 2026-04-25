@@ -18,9 +18,11 @@ Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on m
 </p>
 
 <p align="center">
-  <video src="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4" controls muted playsinline width="100%">
-    Your browser doesn't support inline video. <a href="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4">Download the demo</a>.
-  </video>
+  <a href="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4">
+    <img src="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.gif" alt="linear-cli in 30 seconds: list your queue, claim a ticket with --pickup, close it with --done --proof. Click through for the MP4 with audio." width="100%" />
+  </a>
+  <br />
+  <sub><a href="https://github.com/phnx-labs/linear-cli/releases/download/v0.1.0/LinearDemo.mp4">Watch with audio (MP4, 1.4 MB)</a></sub>
 </p>
 
 ## Install
