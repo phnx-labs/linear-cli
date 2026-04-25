@@ -13,6 +13,10 @@ Documentation polish on top of v0.1.0. No code changes beyond the version bump.
 - Hero demo video (1080p, 17s, with audio) embedded in README, sourced from the v0.1.0 release asset
 - `assets/flow.svg` — replaces the ASCII flow diagram with a dark-grid SVG showing the human-files / agent-implements / human-reviews loop
 - "Zero supply chain attack surface" section in README, with matching badge
+- "Works with" harness logos in README (Claude / Codex / Gemini / Cursor) under `assets/harnesses/`
+
+### Fixed
+- Replaced personal email and handle in `assets/flow.svg` with example values
 
 ## [0.1.0] - 2026-04-24
 
