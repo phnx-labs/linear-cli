@@ -22,16 +22,27 @@ Only the latest minor release receives security fixes.
 
 ## How linear-cli handles your API key
 
-`linear-cli` writes its config to `~/.linear-cli/config.json` with mode `0600`
-(readable only by your user). That file contains your Linear API key.
+`linear-cli` resolves the API key in this order:
 
-We chose a config file rather than environment variables because:
+1. Config file — `~/.linear-cli/config.json` (mode `0600`, readable only by your user)
+2. Environment variable — `LINEAR_API_KEY`
+3. macOS Keychain — generic password under service `linear-api-key`
 
-- Config files have explicit permissions; env vars leak through `ps`, `/proc/<pid>/environ`,
-  and child processes you didn't intend to share with.
-- An API key in your shell history or `.zshrc` is harder to rotate.
+The config file is the default `linear setup` writes to. The env var and Keychain
+paths exist so you can avoid storing the key on disk in plaintext if you'd rather
+not.
 
-If you'd prefer Keychain or a secrets manager, please open an issue with your use case.
+A few tradeoffs to know:
+
+- **Config file**: explicit `0600` permissions, but the key sits on disk. Rotate
+  by re-running `linear setup --api-key <new-key>` (overwrites in place).
+- **Env var**: convenient, but env vars leak through `ps`, `/proc/<pid>/environ`,
+  and any child process you spawn. Don't put `LINEAR_API_KEY=...` in `.zshrc`
+  or `.bashrc` — load it per-shell from a secrets manager (e.g. `pass`,
+  `1password-cli`, `op read`) so it isn't sitting in your dotfiles or history.
+- **Keychain (macOS)**: most paranoid. Store with
+  `security add-generic-password -a "$USER" -s linear-api-key -w <key>` and
+  `linear-cli` will pick it up if the config and env are both empty.
 
 ## Scope of API key access
 
