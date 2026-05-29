@@ -28,7 +28,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
