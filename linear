@@ -28,7 +28,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
@@ -52,6 +52,9 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
+    # Volatile cfg (e.g. --team override) opts out of persistence.
+    if cfg.get("__volatile__"):
+        return
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
 
@@ -201,6 +204,28 @@ def get_viewer_id(api_key: str, cfg: dict) -> str | None:
     return vid
 
 
+def resolve_team_id_by_key(api_key: str, value: str) -> str | None:
+    """Resolve --team to a team ID. Accepts team key (e.g. 'ANT') or UUID."""
+    if not value:
+        return None
+    if len(value) == 36 and value.count("-") == 4:
+        return value
+    data = gql(api_key, """
+        query($key: String!) {
+            teams(filter: { key: { eqIgnoreCase: $key } }) {
+                nodes { id name key }
+            }
+        }
+    """, {"key": value})
+    if check_errors(data):
+        return None
+    nodes = (data.get("data") or {}).get("teams", {}).get("nodes", [])
+    if not nodes:
+        print(f"Warning: team '{value}' not found.", file=sys.stderr)
+        return None
+    return nodes[0]["id"]
+
+
 def resolve_user_id_by_email(api_key: str, email: str) -> str | None:
     """Look up a user by email address. Returns user ID or None."""
     data = gql(api_key, """
@@ -272,6 +297,114 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     nodes = [n for n in nodes if n.get("startsAt") and n["startsAt"] >= active_ends]
     nodes.sort(key=lambda n: n["startsAt"])
     return nodes[0]["id"] if nodes else None
+
+
+def list_team_projects(api_key: str, team_id: str) -> list[dict]:
+    """All projects accessible to a team. Sorted most-recently-updated first."""
+    data = gql(api_key, """
+        query($teamId: String!) {
+            team(id: $teamId) {
+                projects(first: 100) {
+                    nodes {
+                        id name state progress
+                        startDate targetDate updatedAt
+                        lead { name }
+                    }
+                }
+            }
+        }
+    """, {"teamId": team_id})
+    if check_errors(data):
+        return []
+    projects = (
+        ((data.get("data") or {}).get("team") or {})
+        .get("projects", {}).get("nodes", [])
+    )
+    projects.sort(key=lambda p: p.get("updatedAt") or "", reverse=True)
+    return projects
+
+
+def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
+    """Resolve --project to a projectId. Accepts UUID or name. On ambiguity,
+    picks the most-recently-active match and warns to stderr."""
+    if not value:
+        return None
+    # Looks like a UUID? Pass through.
+    if len(value) == 36 and value.count("-") == 4:
+        return value
+    projects = list_team_projects(api_key, team_id)
+    matches = [p for p in projects if p["name"].lower() == value.lower()]
+    if not matches:
+        # Substring fallback so 'phoenix' matches 'Phoenix Horizon'.
+        matches = [p for p in projects if value.lower() in p["name"].lower()]
+    if not matches:
+        print(f"Warning: project '{value}' not found; skipping.", file=sys.stderr)
+        return None
+    if len(matches) > 1:
+        print(f"Note: '{value}' matched {len(matches)} projects; "
+              f"picked '{matches[0]['name']}' (most recent).", file=sys.stderr)
+    return matches[0]["id"]
+
+
+def resolve_milestone_id(api_key: str, team_id: str, name: str,
+                         project_id: str | None) -> str | None:
+    """Resolve --milestone to a projectMilestoneId. If project_id is given,
+    look only there. Else search all team projects and pick the
+    most-recently-updated match. Returns None and warns on no match."""
+    if not name:
+        return None
+    if len(name) == 36 and name.count("-") == 4:
+        return name
+
+    if project_id:
+        data = gql(api_key, """
+            query($id: String!) {
+                project(id: $id) {
+                    projectMilestones(first: 100) {
+                        nodes { id name updatedAt }
+                    }
+                }
+            }
+        """, {"id": project_id})
+        if check_errors(data):
+            return None
+        nodes = (
+            ((data.get("data") or {}).get("project") or {})
+            .get("projectMilestones", {}).get("nodes", [])
+        )
+    else:
+        projects = list_team_projects(api_key, team_id)
+        nodes = []
+        for p in projects:
+            data = gql(api_key, """
+                query($id: String!) {
+                    project(id: $id) {
+                        projectMilestones(first: 100) {
+                            nodes { id name updatedAt }
+                        }
+                    }
+                }
+            """, {"id": p["id"]})
+            if check_errors(data):
+                continue
+            for m in (((data.get("data") or {}).get("project") or {})
+                      .get("projectMilestones", {}).get("nodes", [])):
+                m["_projectName"] = p["name"]
+                nodes.append(m)
+
+    matches = [m for m in nodes if m["name"].lower() == name.lower()]
+    if not matches:
+        matches = [m for m in nodes if name.lower() in m["name"].lower()]
+    if not matches:
+        print(f"Warning: milestone '{name}' not found; skipping.", file=sys.stderr)
+        return None
+    matches.sort(key=lambda m: m.get("updatedAt") or "", reverse=True)
+    if len(matches) > 1:
+        proj = matches[0].get("_projectName", "")
+        suffix = f" in project '{proj}'" if proj else ""
+        print(f"Note: '{name}' matched {len(matches)} milestones; "
+              f"picked '{matches[0]['name']}'{suffix} (most recent).", file=sys.stderr)
+    return matches[0]["id"]
 
 
 def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
@@ -425,6 +558,41 @@ def parse_priority(value: str) -> int:
     raise SystemExit(
         f"Invalid --priority '{value}'. Use: urgent, high, medium, low, or none."
     )
+
+
+def derive_title(description: str) -> str:
+    """Pull a sensible title out of a description body. First sentence or first
+    line, stripped of markdown bullets/headers, capped at 80 chars."""
+    text = description.strip()
+    # First newline-bounded line
+    first_line = text.split("\n", 1)[0].strip()
+    # Strip leading markdown noise: headers, bullets, blockquotes
+    while first_line and first_line[0] in "#*->":
+        first_line = first_line[1:].lstrip()
+    # First sentence within that line
+    for sep in (". ", "! ", "? "):
+        idx = first_line.find(sep)
+        if 0 < idx < 80:
+            first_line = first_line[: idx + 1]
+            break
+    if len(first_line) > 80:
+        first_line = first_line[:79].rstrip() + "…"
+    return first_line or "Untitled"
+
+
+def read_description(inline: str | None, path: str | None) -> str | None:
+    """Resolve description from --description (inline), --description-file PATH,
+    or stdin via --description-file -. Inline wins if both are given."""
+    if inline is not None:
+        return inline
+    if path is None:
+        return None
+    if path == "-":
+        return sys.stdin.read()
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--description-file: {path} not found")
+    return p.read_text()
 
 
 def parse_due_date(value: str) -> str | None:
@@ -591,6 +759,13 @@ def list_tasks(args, cfg, api_key, team_id):
 
     if args.label and not explicit_agent:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
+
+    if getattr(args, "query", None):
+        q = args.query.replace('"', '\\"')
+        filters.append(
+            f'or: [ {{ title: {{ containsIgnoreCase: "{q}" }} }}, '
+            f'{{ description: {{ containsIgnoreCase: "{q}" }} }} ]'
+        )
 
     if args.status:
         status = args.status.lower()
@@ -921,8 +1096,8 @@ def cmd_update(args, cfg, api_key, team_id):
             print("Status update failed.")
         did_something = True
 
-    # Labels
-    if args.label:
+    # Labels (add via --label, remove via --unlabel)
+    if args.label or args.unlabel:
         label_data = gql(api_key, """
             query($teamId: ID!) {
                 issueLabels(
@@ -950,12 +1125,15 @@ def cmd_update(args, cfg, api_key, team_id):
                 }}
             }}""")
             current_ids = []
+            current_names_by_id = {}
             if not check_errors(issue_data):
-                current_ids = [l["id"] for l in issue_data["data"]["issue"]["labels"]["nodes"]]
+                for l in issue_data["data"]["issue"]["labels"]["nodes"]:
+                    current_ids.append(l["id"])
+                    current_names_by_id[l["id"]] = l["name"]
 
             label_ids = list(current_ids)
             added = []
-            for lbl in args.label:
+            for lbl in args.label or []:
                 if lbl in label_map:
                     if label_map[lbl] not in label_ids:
                         label_ids.append(label_map[lbl])
@@ -963,7 +1141,15 @@ def cmd_update(args, cfg, api_key, team_id):
                 else:
                     print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
 
-            if added:
+            removed = []
+            for lbl in args.unlabel or []:
+                if lbl in label_map and label_map[lbl] in label_ids:
+                    label_ids.remove(label_map[lbl])
+                    removed.append(lbl)
+                else:
+                    print(f"Warning: label '{lbl}' not on this issue, skipping.", file=sys.stderr)
+
+            if added or removed:
                 data = gql(api_key, """
                     mutation($id: String!, $labelIds: [String!]!) {
                         issueUpdate(id: $id, input: { labelIds: $labelIds }) {
@@ -973,7 +1159,12 @@ def cmd_update(args, cfg, api_key, team_id):
                 """, {"id": issue["id"], "labelIds": label_ids})
 
                 if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
-                    print(f"Labels added to {args.identifier}: {', '.join(added)}")
+                    parts = []
+                    if added:
+                        parts.append(f"added {', '.join(added)}")
+                    if removed:
+                        parts.append(f"removed {', '.join(removed)}")
+                    print(f"Labels on {args.identifier}: {'; '.join(parts)}")
                 else:
                     print("Label update failed.")
                 did_something = True
@@ -1006,6 +1197,105 @@ def cmd_update(args, cfg, api_key, team_id):
                 did_something = True
             else:
                 print("Cycle update failed.")
+
+    # Title / description / estimate: batched in one mutation
+    title_desc_input: dict = {}
+    if args.title is not None:
+        title_desc_input["title"] = args.title
+    description = read_description(args.description, args.description_file)
+    if description is not None:
+        title_desc_input["description"] = description
+    if args.estimate is not None:
+        title_desc_input["estimate"] = args.estimate
+    if args.parent is not None:
+        if args.parent.lower() == "none":
+            title_desc_input["parentId"] = None
+        else:
+            parent_issue = resolve_issue(api_key, team_id, args.parent)
+            if parent_issue:
+                title_desc_input["parentId"] = parent_issue["id"]
+            else:
+                print(f"Warning: parent '{args.parent}' not found; skipping.", file=sys.stderr)
+    update_project_id = None
+    if args.project is not None:
+        if args.project.lower() == "none":
+            title_desc_input["projectId"] = None
+        else:
+            update_project_id = resolve_project_id(api_key, team_id, args.project)
+            if update_project_id:
+                title_desc_input["projectId"] = update_project_id
+    if args.milestone is not None:
+        if args.milestone.lower() == "none":
+            title_desc_input["projectMilestoneId"] = None
+        else:
+            mid = resolve_milestone_id(api_key, team_id, args.milestone, update_project_id)
+            if mid:
+                title_desc_input["projectMilestoneId"] = mid
+    if title_desc_input:
+        data = gql(api_key, """
+            mutation($id: String!, $input: IssueUpdateInput!) {
+                issueUpdate(id: $id, input: $input) {
+                    success
+                    issue { identifier title }
+                }
+            }
+        """, {"id": issue["id"], "input": title_desc_input})
+        if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+            i = data["data"]["issueUpdate"]["issue"]
+            changed = ", ".join(title_desc_input.keys())
+            print(f"{i['identifier']} -> updated: {changed}")
+            did_something = True
+        else:
+            print("Title/description update failed.")
+
+    # Priority: --priority urgent|high|medium|low|none
+    if args.priority is not None:
+        pri = parse_priority(args.priority)
+        data = gql(api_key, """
+            mutation($id: String!, $priority: Int!) {
+                issueUpdate(id: $id, input: { priority: $priority }) {
+                    success
+                    issue { identifier priority }
+                }
+            }
+        """, {"id": issue["id"], "priority": pri})
+        if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+            i = data["data"]["issueUpdate"]["issue"]
+            name = PRIORITY_MAP.get(i.get("priority", 0), "-")
+            print(f"{i['identifier']} -> priority: {name}")
+            did_something = True
+        else:
+            print("Priority update failed.")
+
+    # Assign: --assign email | none
+    if args.assign is not None:
+        if args.assign.lower() == "none":
+            assignee_id = None
+        elif "@" in args.assign:
+            assignee_id = resolve_user_id_by_email(api_key, args.assign.strip())
+            if not assignee_id:
+                print(f"Warning: user '{args.assign}' not found; skipping reassign.", file=sys.stderr)
+                assignee_id = ...
+        else:
+            print(f"Warning: --assign expects an email or 'none'; got '{args.assign}'. Skipping.", file=sys.stderr)
+            assignee_id = ...
+
+        if assignee_id is not ...:
+            data = gql(api_key, """
+                mutation($id: String!, $assigneeId: String) {
+                    issueUpdate(id: $id, input: { assigneeId: $assigneeId }) {
+                        success
+                        issue { identifier assignee { name } }
+                    }
+                }
+            """, {"id": issue["id"], "assigneeId": assignee_id})
+            if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+                i = data["data"]["issueUpdate"]["issue"]
+                asg = (i.get("assignee") or {}).get("name") or "unassigned"
+                print(f"{i['identifier']} -> assignee: {asg}")
+                did_something = True
+            else:
+                print("Assign update failed.")
 
     # Due date: --due-date YYYY-MM-DD | none
     if args.due_date is not None:
@@ -1045,7 +1335,7 @@ def cmd_update(args, cfg, api_key, team_id):
         did_something = True
 
     if not did_something:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --due-date, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --title, --description, --due-date, or --comment.")
         sys.exit(1)
 
 
@@ -1053,51 +1343,86 @@ def cmd_update(args, cfg, api_key, team_id):
 # create
 # ---------------------------------------------------------------------------
 
-def cmd_create(args, cfg, api_key, team_id):
-    input_obj: dict = {
-        "teamId": team_id,
-        "title": args.title,
-    }
+def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
+                        verbose: bool = True) -> tuple[dict | None, str | None]:
+    """Build an IssueCreateInput from a flat fields dict (keys match flag names:
+    title, description, description_file, priority, estimate, parent, project,
+    milestone, status, cycle, assign, due_date, label).
 
-    if args.description:
-        input_obj["description"] = args.description
+    Returns (input_obj, None) on success or (None, error) on hard failure.
+    Smart defaults applied silently. Warnings go to stderr when verbose=True.
+    """
+    def warn(msg):
+        if verbose:
+            print(f"Warning: {msg}", file=sys.stderr)
 
-    if args.due_date:
-        due = parse_due_date(args.due_date)
-        if due is not None:
-            input_obj["dueDate"] = due
+    description = read_description(fields.get("description"), fields.get("description_file"))
 
-    # Priority: default Medium (3) so tickets land with a sensible weight.
-    priority = parse_priority(args.priority) if args.priority is not None else 3
+    title = fields.get("title")
+    if not title:
+        if not description:
+            return None, "no title or description"
+        title = derive_title(description)
+
+    input_obj: dict = {"teamId": team_id, "title": title}
+    if description:
+        input_obj["description"] = description
+
+    if fields.get("due_date"):
+        try:
+            due = parse_due_date(fields["due_date"])
+            if due is not None:
+                input_obj["dueDate"] = due
+        except SystemExit as e:
+            return None, str(e)
+
+    try:
+        priority = parse_priority(fields["priority"]) if fields.get("priority") is not None else 3
+    except SystemExit as e:
+        return None, str(e)
     input_obj["priority"] = priority
 
-    # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
-    # Explicit --status always wins.
-    desired_status = args.status
+    if fields.get("estimate") is not None:
+        input_obj["estimate"] = fields["estimate"]
+
+    if fields.get("parent"):
+        parent_issue = resolve_issue(api_key, team_id, fields["parent"])
+        if parent_issue:
+            input_obj["parentId"] = parent_issue["id"]
+        else:
+            warn(f"parent '{fields['parent']}' not found; creating without parent.")
+
+    project_id = None
+    if fields.get("project"):
+        project_id = resolve_project_id(api_key, team_id, fields["project"])
+        if project_id:
+            input_obj["projectId"] = project_id
+
+    if fields.get("milestone"):
+        mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id)
+        if mid:
+            input_obj["projectMilestoneId"] = mid
+
+    desired_status = fields.get("status")
     if not desired_status:
         desired_status = "Backlog" if priority == 4 else "Todo"
-
     states = get_states(api_key, team_id, cfg)
     sid = resolve_state_id(states, desired_status)
     if sid:
         input_obj["stateId"] = sid
     else:
-        print(f"Warning: state '{desired_status}' not found; letting Linear pick the default.", file=sys.stderr)
+        warn(f"state '{desired_status}' not found; letting Linear pick the default.")
 
-    # Cycle: default "active". Explicit "none" skips cycle assignment.
-    cycle_choice = (args.cycle or "active").lower()
+    cycle_choice = (fields.get("cycle") or "active").lower()
     if cycle_choice in ("active", "next"):
         cid = get_cycle_id(api_key, team_id, cycle_choice)
         if cid:
             input_obj["cycleId"] = cid
         else:
-            print(f"Warning: no {cycle_choice} cycle found; creating without cycle.", file=sys.stderr)
-    # "none" -> no cycleId (backlog behavior)
+            warn(f"no {cycle_choice} cycle found; creating without cycle.")
 
-    # Assign: default = API key owner. "none" -> unassigned. An email -> lookup.
-    assign_arg = args.assign
+    assign_arg = fields.get("assign")
     if assign_arg is None:
-        # Default behavior: assign to the caller (API key owner).
         vid = get_viewer_id(api_key, cfg)
         if vid:
             input_obj["assigneeId"] = vid
@@ -1108,11 +1433,14 @@ def cmd_create(args, cfg, api_key, team_id):
         if uid:
             input_obj["assigneeId"] = uid
         else:
-            print(f"Warning: user '{assign_arg}' not found; leaving unassigned.", file=sys.stderr)
+            warn(f"user '{assign_arg}' not found; leaving unassigned.")
     else:
-        print(f"Warning: --assign expects an email or 'none'; got '{assign_arg}'. Ignoring.", file=sys.stderr)
+        warn(f"--assign expects an email or 'none'; got '{assign_arg}'. Ignoring.")
 
-    if args.label:
+    label_names = fields.get("label") or []
+    if isinstance(label_names, str):
+        label_names = [label_names]
+    if label_names:
         label_data = gql(api_key, """
             query($teamId: ID!) {
                 issueLabels(
@@ -1128,19 +1456,21 @@ def cmd_create(args, cfg, api_key, team_id):
                 }
             }
         """, {"teamId": team_id})
-
         if not check_errors(label_data):
-            all_labels = label_data["data"]["issueLabels"]["nodes"]
-            label_map = {l["name"]: l["id"] for l in all_labels}
+            label_map = {l["name"]: l["id"] for l in label_data["data"]["issueLabels"]["nodes"]}
             label_ids = []
-            for lbl in args.label:
+            for lbl in label_names:
                 if lbl in label_map:
                     label_ids.append(label_map[lbl])
                 else:
-                    print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
+                    warn(f"label '{lbl}' not found, skipping.")
             if label_ids:
                 input_obj["labelIds"] = label_ids
 
+    return input_obj, None
+
+
+def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str | None]:
     data = gql(api_key, """
         mutation($input: IssueCreateInput!) {
             issueCreate(input: $input) {
@@ -1149,18 +1479,88 @@ def cmd_create(args, cfg, api_key, team_id):
             }
         }
     """, {"input": input_obj})
-
-    if check_errors(data):
-        return
-
+    if data.get("errors"):
+        return None, data["errors"][0].get("message", "unknown error")
     result = data["data"]["issueCreate"]
-    if result["success"]:
-        i = result["issue"]
-        cyc = (i.get("cycle") or {}).get("name") or "no cycle"
-        asg = (i.get("assignee") or {}).get("name") or "unassigned"
-        print(f"Created {i['identifier']}: {i['title']}  [{cyc} | {asg}]")
+    if not result["success"]:
+        return None, "create failed"
+    return result["issue"], None
+
+
+def cmd_create(args, cfg, api_key, team_id):
+    if args.from_file:
+        return _bulk_create(args.from_file, cfg, api_key, team_id)
+
+    fields = {
+        "title": args.title,
+        "description": args.description,
+        "description_file": args.description_file,
+        "priority": args.priority,
+        "estimate": args.estimate,
+        "parent": args.parent,
+        "project": args.project,
+        "milestone": args.milestone,
+        "status": args.status,
+        "cycle": args.cycle,
+        "assign": args.assign,
+        "due_date": args.due_date,
+        "label": args.label or [],
+    }
+    input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
+    if err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    issue, err = _send_issue_create(api_key, input_obj)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return
+    cyc = (issue.get("cycle") or {}).get("name") or "no cycle"
+    asg = (issue.get("assignee") or {}).get("name") or "unassigned"
+    print(f"Created {issue['identifier']}: {issue['title']}  [{cyc} | {asg}]")
+
+
+def _bulk_create(path: str, cfg, api_key, team_id):
+    """Bulk create from JSONL. Each line is a JSON object with field names
+    matching the single-create flags. Continue-on-error; tab-separated output:
+    OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON."""
+    if path == "-":
+        stream = sys.stdin
     else:
-        print("Create failed.")
+        if not Path(path).exists():
+            print(f"--from-file: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        stream = open(path)
+
+    ok_count = 0
+    err_count = 0
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            fields = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"ERROR\t-\t<unparseable>\t{e}")
+            err_count += 1
+            continue
+
+        title_hint = fields.get("title") or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
+        input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False)
+        if err:
+            print(f"ERROR\t-\t{title_hint}\t{err}")
+            err_count += 1
+            continue
+        issue, err = _send_issue_create(api_key, input_obj)
+        if err:
+            print(f"ERROR\t-\t{title_hint}\t{err}")
+            err_count += 1
+            continue
+        print(f"OK\t{issue['identifier']}\t{issue['title']}")
+        ok_count += 1
+
+    if path != "-":
+        stream.close()
+    print(f"\n{ok_count} created, {err_count} failed.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1608,120 @@ def cmd_cycles(args, cfg, api_key, team_id):
 
 
 # ---------------------------------------------------------------------------
+# projects, labels, users (discovery)
+# ---------------------------------------------------------------------------
+
+def cmd_projects(args, cfg, api_key, team_id):
+    """List projects, or show one project's detail with its milestones."""
+    projects = list_team_projects(api_key, team_id)
+    if not projects:
+        print("No projects found.")
+        return
+
+    if args.name:
+        matches = [p for p in projects if args.name.lower() in p["name"].lower()]
+        if not matches:
+            print(f"No project matching '{args.name}'.")
+            return
+        p = matches[0]
+        data = gql(api_key, """
+            query($id: String!) {
+                project(id: $id) {
+                    name state progress
+                    description
+                    startDate targetDate
+                    lead { name email }
+                    projectMilestones(first: 50) {
+                        nodes { name description targetDate sortOrder }
+                    }
+                }
+            }
+        """, {"id": p["id"]})
+        if check_errors(data):
+            return
+        proj = (data.get("data") or {}).get("project") or {}
+        if args.json:
+            print(json.dumps(proj, indent=2))
+            return
+        lead = (proj.get("lead") or {}).get("name") or "-"
+        print(f"{proj['name']}")
+        print(f"  State:    {proj.get('state', '-')}")
+        print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
+        print(f"  Lead:     {lead}")
+        print(f"  Target:   {proj.get('targetDate') or '-'}")
+        milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
+        if milestones:
+            milestones.sort(key=lambda m: m.get("sortOrder") or 0)
+            print(f"\nMilestones ({len(milestones)}):")
+            for m in milestones:
+                tgt = m.get("targetDate") or "-"
+                print(f"  - {m['name']:30s}  target: {tgt}")
+        return
+
+    if args.json:
+        print(json.dumps(projects, indent=2))
+        return
+
+    print(f"{len(projects)} project(s):")
+    for p in projects:
+        progress = int((p.get("progress") or 0) * 100)
+        state = p.get("state") or "-"
+        lead = (p.get("lead") or {}).get("name") or "-"
+        print(f"  {p['name']:40s}  {state:12s}  {progress:>3}%  lead: {lead}")
+
+
+def cmd_labels(args, cfg, api_key, team_id):
+    """List labels available to the team."""
+    data = gql(api_key, """
+        query($teamId: ID!) {
+            issueLabels(
+                filter: {
+                    or: [
+                        { team: { id: { eq: $teamId } } }
+                        { team: { null: true } }
+                    ]
+                }
+                first: 200
+            ) {
+                nodes { id name description color }
+            }
+        }
+    """, {"teamId": team_id})
+    if check_errors(data):
+        return
+    labels = data["data"]["issueLabels"]["nodes"]
+    labels.sort(key=lambda l: l["name"].lower())
+    if args.json:
+        print(json.dumps(labels, indent=2))
+        return
+    print(f"{len(labels)} label(s):")
+    for l in labels:
+        desc = l.get("description") or ""
+        print(f"  {l['name']:30s}  {desc}")
+
+
+def cmd_users(args, cfg, api_key, team_id):
+    """List assignable users."""
+    data = gql(api_key, """
+        {
+            users(filter: { active: { eq: true } }, first: 200) {
+                nodes { id name email displayName }
+            }
+        }
+    """)
+    if check_errors(data):
+        return
+    users = data["data"]["users"]["nodes"]
+    users.sort(key=lambda u: u["name"].lower())
+    if args.json:
+        print(json.dumps(users, indent=2))
+        return
+    print(f"{len(users)} user(s):")
+    for u in users:
+        print(f"  {u['name']:25s}  {u.get('email') or '-'}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1217,6 +1731,8 @@ def main():
         description="Task management CLI for AI agent teams",
     )
     parser.add_argument("--version", action="version", version=f"linear-cli {__version__}")
+    parser.add_argument("--team", default=None,
+                        help="Override team for this invocation (key like 'ANT' or UUID)")
     sub = parser.add_subparsers(dest="command")
 
     # setup
@@ -1233,6 +1749,7 @@ def main():
     p_tasks.add_argument("--label", help="Filter by any label")
     p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
     p_tasks.add_argument("--cycle", default="active", choices=["active", "next"])
+    p_tasks.add_argument("--query", help="Search title + description (case-insensitive)")
     p_tasks.add_argument("--json", action="store_true", help="JSON output")
 
     # update (all mutations on an issue)
@@ -1247,6 +1764,25 @@ def main():
     p_update.add_argument("--proof", action="append",
                           help="Proof of completion (repeatable). File path, URL, or text.")
     p_update.add_argument("--label", action="append", help="Add label(s) (repeatable)")
+    p_update.add_argument("--unlabel", action="append",
+                          help="Remove label(s) (repeatable)")
+    p_update.add_argument("--priority", type=str, default=None,
+                          help="urgent, high, medium, low, or none")
+    p_update.add_argument("--assign", default=None,
+                          help="Reassign: email address, or 'none' to unassign")
+    p_update.add_argument("--estimate", type=int, default=None,
+                          help="Story-point estimate (integer)")
+    p_update.add_argument("--parent", default=None,
+                          help="Set parent issue (e.g. ANT-42), or 'none' to detach")
+    p_update.add_argument("--project", default=None,
+                          help="Move to project (name or ID), or 'none' to detach")
+    p_update.add_argument("--milestone", default=None,
+                          help="Set milestone (name), or 'none' to detach")
+    p_update.add_argument("--title", default=None, help="Rename the issue")
+    p_update.add_argument("--description", default=None,
+                          help="Replace the issue description")
+    p_update.add_argument("--description-file", dest="description_file", default=None,
+                          help="Read description from a file path, or '-' for stdin")
     p_update.add_argument("--due-date", dest="due_date",
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
@@ -1254,11 +1790,14 @@ def main():
 
     # create
     p_create = sub.add_parser("create", help="Create a new issue")
-    p_create.add_argument("title", help="Issue title")
+    p_create.add_argument("title", nargs="?", default=None,
+                          help="Issue title (optional if --description provided)")
     p_create.add_argument("--label", action="append", help="Label(s) to add (repeatable)")
     p_create.add_argument("--priority", type=str, default=None,
                           help="urgent, high, medium (default), low, or none")
     p_create.add_argument("--description", help="Issue description")
+    p_create.add_argument("--description-file", dest="description_file", default=None,
+                          help="Read description from a file path, or '-' for stdin")
     p_create.add_argument("--status", help="Initial status (default: Todo)")
     p_create.add_argument("--cycle", default="active",
                           choices=["active", "next", "none"],
@@ -1267,10 +1806,34 @@ def main():
                           help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
                           help="Assignee: email address, or 'none' (default: API key owner)")
+    p_create.add_argument("--estimate", type=int, default=None,
+                          help="Story-point estimate (integer)")
+    p_create.add_argument("--from-file", dest="from_file", default=None,
+                          help="Bulk create from JSONL (one issue per line). '-' for stdin.")
+    p_create.add_argument("--parent", default=None,
+                          help="Parent issue identifier for sub-issues (e.g. ANT-42)")
+    p_create.add_argument("--project", default=None,
+                          help="Project name or ID")
+    p_create.add_argument("--milestone", default=None,
+                          help="Project milestone name (resolved within --project if set)")
 
     # cycles (list all cycles for the team)
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
     p_cycles.add_argument("--json", action="store_true", help="JSON output")
+
+    # projects (list / detail with milestones)
+    p_projects = sub.add_parser("projects", help="List projects or show detail + milestones")
+    p_projects.add_argument("name", nargs="?",
+                            help="Project name (substring match) for detail view")
+    p_projects.add_argument("--json", action="store_true", help="JSON output")
+
+    # labels
+    p_labels = sub.add_parser("labels", help="List available labels")
+    p_labels.add_argument("--json", action="store_true", help="JSON output")
+
+    # users
+    p_users = sub.add_parser("users", help="List assignable users")
+    p_users.add_argument("--json", action="store_true", help="JSON output")
 
     args = parser.parse_args()
 
@@ -1291,6 +1854,16 @@ def main():
     if not api_key:
         print("No API key configured. Run: linear setup", file=sys.stderr)
         sys.exit(1)
+
+    if args.team:
+        override = resolve_team_id_by_key(api_key, args.team)
+        if not override:
+            sys.exit(1)
+        team_id = override
+        # Use a volatile cfg copy — don't pollute on-disk config with the
+        # other team's states cache.
+        cfg = {**cfg, "states": {}, "__volatile__": True}
+
     if not team_id:
         print("No team configured. Run: linear setup", file=sys.stderr)
         sys.exit(1)
@@ -1303,6 +1876,12 @@ def main():
         cmd_create(args, cfg, api_key, team_id)
     elif args.command == "cycles":
         cmd_cycles(args, cfg, api_key, team_id)
+    elif args.command == "projects":
+        cmd_projects(args, cfg, api_key, team_id)
+    elif args.command == "labels":
+        cmd_labels(args, cfg, api_key, team_id)
+    elif args.command == "users":
+        cmd_users(args, cfg, api_key, team_id)
 
 
 if __name__ == "__main__":

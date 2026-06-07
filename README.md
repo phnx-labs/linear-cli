@@ -6,7 +6,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
 [![Supply chain: 0 attack surface](https://img.shields.io/badge/supply%20chain-0%20attack%20surface-brightgreen.svg)](#zero-supply-chain-attack-surface)
-[![Single file](https://img.shields.io/badge/single%20file-43%20KB-brightgreen.svg)](./linear)
+[![Single file](https://img.shields.io/badge/single%20file-67%20KB-brightgreen.svg)](./linear)
 [![Team CLI](https://img.shields.io/badge/team-CLI-a3e635.svg)](#why-the-mcp-server-isnt-always-the-answer)
 
 Issue tracking from the shell — for humans and their agents. Query your queue, claim tasks, report progress, close with proof. Works the same whether you're typing or a subagent is.
@@ -56,16 +56,30 @@ Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents
 linear tasks                         # your queue in the active cycle
 linear tasks --board                 # whole team board
 linear tasks ANT-42                   # detail view
+linear tasks --query "auth refresh"  # search title + description
 linear tasks --json | jq             # machine-readable
 
 linear update ANT-42 --pickup         # claim (In Progress)
 linear update ANT-42 --comment "..."  # progress note
 linear update ANT-42 --done --proof https://pr/123 --proof "deployed"
-linear update ANT-42 --due-date 2026-05-01    # set due (or 'none' to clear)
+linear update ANT-42 --priority urgent --assign someone@x.com
+linear update ANT-42 --title "Renamed"  --description "Rewritten body"
+linear update ANT-42 --project "Foo" --milestone "v1.0"
+linear update ANT-42 --unlabel agent:claude --label agent:codex   # hand off
 
 linear create "Fix auth bug" --label security --priority high
-linear create "Ship v0.2" --due-date 2026-05-01
+linear create --description "Paragraph dump — title is derived from this."
+linear create "Sub-task" --parent ANT-42 --estimate 3
+linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
+linear create --from-file plan.jsonl  # bulk: one JSON object per line
+
+linear projects                       # list projects + progress
+linear projects "Phoenix"             # detail view with milestones
+linear labels                         # available labels
+linear users                          # assignable users (for --assign lookup)
 linear cycles
+
+linear --team ENG tasks               # one-shot override (multi-team workspace)
 ```
 
 Full help: `linear <command> --help`.
@@ -121,7 +135,7 @@ Every symbol is in the Python standard library. No `pip install`. No `npm instal
 
 | Tool | Runtime | Deps | Install footprint | Last published |
 |------|---------|------|-------------------|----------------|
-| **linear-cli** (this) | Python 3.9+ stdlib | **0** | 43 KB, 1 file | active |
+| **linear-cli** (this) | Python 3.9+ stdlib | **0** | 67 KB, 1 file | active |
 | [`@linear/cli`](https://www.npmjs.com/package/@linear/cli) (official) | Node | 0 | 5 MB npm pkg | Nov 2021 (abandoned) |
 | [Linearis](https://github.com/czottmann/linearis) | Node | `@linear/sdk` + `commander` | 27 MB `node_modules` | 2025 |
 | [schpet/linear-cli](https://github.com/schpet/linear-cli) | Deno | 25+ imports (cliffy, graphql-codegen, unified, valibot…) | Deno + codegen | active |
@@ -138,7 +152,7 @@ This is the boring superpower of having no dependencies.
 
 Every notable CLI supply chain attack of the last few years — `event-stream`, `colors`/`faker`, `ua-parser-js`, `node-ipc`, the `xz` backdoor, `polyfill.io`, the dozens of [npm typosquats](https://socket.dev) caught monthly — happened through a compromised dependency, not the tool itself. linear-cli has none. The full audit surface is:
 
-- The 1263 lines of Python in this repo (read it: [`linear`](./linear))
+- The ~1700 lines of Python in this repo (read it: [`linear`](./linear))
 - Python's standard library
 - Linear's own GraphQL API at `api.linear.app`
 
