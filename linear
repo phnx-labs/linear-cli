@@ -1496,6 +1496,120 @@ def cmd_cycles(args, cfg, api_key, team_id):
 
 
 # ---------------------------------------------------------------------------
+# projects, labels, users (discovery)
+# ---------------------------------------------------------------------------
+
+def cmd_projects(args, cfg, api_key, team_id):
+    """List projects, or show one project's detail with its milestones."""
+    projects = list_team_projects(api_key, team_id)
+    if not projects:
+        print("No projects found.")
+        return
+
+    if args.name:
+        matches = [p for p in projects if args.name.lower() in p["name"].lower()]
+        if not matches:
+            print(f"No project matching '{args.name}'.")
+            return
+        p = matches[0]
+        data = gql(api_key, """
+            query($id: String!) {
+                project(id: $id) {
+                    name state progress
+                    description
+                    startDate targetDate
+                    lead { name email }
+                    projectMilestones(first: 50) {
+                        nodes { name description targetDate sortOrder }
+                    }
+                }
+            }
+        """, {"id": p["id"]})
+        if check_errors(data):
+            return
+        proj = (data.get("data") or {}).get("project") or {}
+        if args.json:
+            print(json.dumps(proj, indent=2))
+            return
+        lead = (proj.get("lead") or {}).get("name") or "-"
+        print(f"{proj['name']}")
+        print(f"  State:    {proj.get('state', '-')}")
+        print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
+        print(f"  Lead:     {lead}")
+        print(f"  Target:   {proj.get('targetDate') or '-'}")
+        milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
+        if milestones:
+            milestones.sort(key=lambda m: m.get("sortOrder") or 0)
+            print(f"\nMilestones ({len(milestones)}):")
+            for m in milestones:
+                tgt = m.get("targetDate") or "-"
+                print(f"  - {m['name']:30s}  target: {tgt}")
+        return
+
+    if args.json:
+        print(json.dumps(projects, indent=2))
+        return
+
+    print(f"{len(projects)} project(s):")
+    for p in projects:
+        progress = int((p.get("progress") or 0) * 100)
+        state = p.get("state") or "-"
+        lead = (p.get("lead") or {}).get("name") or "-"
+        print(f"  {p['name']:40s}  {state:12s}  {progress:>3}%  lead: {lead}")
+
+
+def cmd_labels(args, cfg, api_key, team_id):
+    """List labels available to the team."""
+    data = gql(api_key, """
+        query($teamId: ID!) {
+            issueLabels(
+                filter: {
+                    or: [
+                        { team: { id: { eq: $teamId } } }
+                        { team: { null: true } }
+                    ]
+                }
+                first: 200
+            ) {
+                nodes { id name description color }
+            }
+        }
+    """, {"teamId": team_id})
+    if check_errors(data):
+        return
+    labels = data["data"]["issueLabels"]["nodes"]
+    labels.sort(key=lambda l: l["name"].lower())
+    if args.json:
+        print(json.dumps(labels, indent=2))
+        return
+    print(f"{len(labels)} label(s):")
+    for l in labels:
+        desc = l.get("description") or ""
+        print(f"  {l['name']:30s}  {desc}")
+
+
+def cmd_users(args, cfg, api_key, team_id):
+    """List assignable users."""
+    data = gql(api_key, """
+        {
+            users(filter: { active: { eq: true } }, first: 200) {
+                nodes { id name email displayName }
+            }
+        }
+    """)
+    if check_errors(data):
+        return
+    users = data["data"]["users"]["nodes"]
+    users.sort(key=lambda u: u["name"].lower())
+    if args.json:
+        print(json.dumps(users, indent=2))
+        return
+    print(f"{len(users)} user(s):")
+    for u in users:
+        print(f"  {u['name']:25s}  {u.get('email') or '-'}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1590,6 +1704,20 @@ def main():
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
     p_cycles.add_argument("--json", action="store_true", help="JSON output")
 
+    # projects (list / detail with milestones)
+    p_projects = sub.add_parser("projects", help="List projects or show detail + milestones")
+    p_projects.add_argument("name", nargs="?",
+                            help="Project name (substring match) for detail view")
+    p_projects.add_argument("--json", action="store_true", help="JSON output")
+
+    # labels
+    p_labels = sub.add_parser("labels", help="List available labels")
+    p_labels.add_argument("--json", action="store_true", help="JSON output")
+
+    # users
+    p_users = sub.add_parser("users", help="List assignable users")
+    p_users.add_argument("--json", action="store_true", help="JSON output")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1621,6 +1749,12 @@ def main():
         cmd_create(args, cfg, api_key, team_id)
     elif args.command == "cycles":
         cmd_cycles(args, cfg, api_key, team_id)
+    elif args.command == "projects":
+        cmd_projects(args, cfg, api_key, team_id)
+    elif args.command == "labels":
+        cmd_labels(args, cfg, api_key, team_id)
+    elif args.command == "users":
+        cmd_users(args, cfg, api_key, team_id)
 
 
 if __name__ == "__main__":
