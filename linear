@@ -321,6 +321,67 @@ def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
     return matches[0]["id"]
 
 
+def resolve_milestone_id(api_key: str, team_id: str, name: str,
+                         project_id: str | None) -> str | None:
+    """Resolve --milestone to a projectMilestoneId. If project_id is given,
+    look only there. Else search all team projects and pick the
+    most-recently-updated match. Returns None and warns on no match."""
+    if not name:
+        return None
+    if len(name) == 36 and name.count("-") == 4:
+        return name
+
+    if project_id:
+        data = gql(api_key, """
+            query($id: String!) {
+                project(id: $id) {
+                    projectMilestones(first: 100) {
+                        nodes { id name updatedAt }
+                    }
+                }
+            }
+        """, {"id": project_id})
+        if check_errors(data):
+            return None
+        nodes = (
+            ((data.get("data") or {}).get("project") or {})
+            .get("projectMilestones", {}).get("nodes", [])
+        )
+    else:
+        projects = list_team_projects(api_key, team_id)
+        nodes = []
+        for p in projects:
+            data = gql(api_key, """
+                query($id: String!) {
+                    project(id: $id) {
+                        projectMilestones(first: 100) {
+                            nodes { id name updatedAt }
+                        }
+                    }
+                }
+            """, {"id": p["id"]})
+            if check_errors(data):
+                continue
+            for m in (((data.get("data") or {}).get("project") or {})
+                      .get("projectMilestones", {}).get("nodes", [])):
+                m["_projectName"] = p["name"]
+                nodes.append(m)
+
+    matches = [m for m in nodes if m["name"].lower() == name.lower()]
+    if not matches:
+        matches = [m for m in nodes if name.lower() in m["name"].lower()]
+    if not matches:
+        print(f"Warning: milestone '{name}' not found; skipping.", file=sys.stderr)
+        return None
+    matches.sort(key=lambda m: m.get("updatedAt") or "", reverse=True)
+    if len(matches) > 1:
+        proj = matches[0].get("_projectName", "")
+        suffix = f" in project '{proj}'" if proj else ""
+        print(f"Note: '{name}' matched {len(matches)} milestones; "
+              f"picked '{matches[0]['name']}'{suffix} (most recent).", file=sys.stderr)
+    return matches[0]["id"]
+
+
 def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
     """Return all cycles for a team, most recent first."""
     data = gql(api_key, """
@@ -1123,13 +1184,21 @@ def cmd_update(args, cfg, api_key, team_id):
                 title_desc_input["parentId"] = parent_issue["id"]
             else:
                 print(f"Warning: parent '{args.parent}' not found; skipping.", file=sys.stderr)
+    update_project_id = None
     if args.project is not None:
         if args.project.lower() == "none":
             title_desc_input["projectId"] = None
         else:
-            pid = resolve_project_id(api_key, team_id, args.project)
-            if pid:
-                title_desc_input["projectId"] = pid
+            update_project_id = resolve_project_id(api_key, team_id, args.project)
+            if update_project_id:
+                title_desc_input["projectId"] = update_project_id
+    if args.milestone is not None:
+        if args.milestone.lower() == "none":
+            title_desc_input["projectMilestoneId"] = None
+        else:
+            mid = resolve_milestone_id(api_key, team_id, args.milestone, update_project_id)
+            if mid:
+                title_desc_input["projectMilestoneId"] = mid
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1279,10 +1348,16 @@ def cmd_create(args, cfg, api_key, team_id):
         else:
             print(f"Warning: parent '{args.parent}' not found; creating without parent.", file=sys.stderr)
 
+    project_id = None
     if args.project:
-        pid = resolve_project_id(api_key, team_id, args.project)
-        if pid:
-            input_obj["projectId"] = pid
+        project_id = resolve_project_id(api_key, team_id, args.project)
+        if project_id:
+            input_obj["projectId"] = project_id
+
+    if args.milestone:
+        mid = resolve_milestone_id(api_key, team_id, args.milestone, project_id)
+        if mid:
+            input_obj["projectMilestoneId"] = mid
 
     # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
     # Explicit --status always wins.
@@ -1472,6 +1547,8 @@ def main():
                           help="Set parent issue (e.g. ANT-42), or 'none' to detach")
     p_update.add_argument("--project", default=None,
                           help="Move to project (name or ID), or 'none' to detach")
+    p_update.add_argument("--milestone", default=None,
+                          help="Set milestone (name), or 'none' to detach")
     p_update.add_argument("--title", default=None, help="Rename the issue")
     p_update.add_argument("--description", default=None,
                           help="Replace the issue description")
@@ -1506,6 +1583,8 @@ def main():
                           help="Parent issue identifier for sub-issues (e.g. ANT-42)")
     p_create.add_argument("--project", default=None,
                           help="Project name or ID")
+    p_create.add_argument("--milestone", default=None,
+                          help="Project milestone name (resolved within --project if set)")
 
     # cycles (list all cycles for the team)
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
