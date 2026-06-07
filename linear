@@ -1343,81 +1343,86 @@ def cmd_update(args, cfg, api_key, team_id):
 # create
 # ---------------------------------------------------------------------------
 
-def cmd_create(args, cfg, api_key, team_id):
-    description = read_description(args.description, args.description_file)
+def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
+                        verbose: bool = True) -> tuple[dict | None, str | None]:
+    """Build an IssueCreateInput from a flat fields dict (keys match flag names:
+    title, description, description_file, priority, estimate, parent, project,
+    milestone, status, cycle, assign, due_date, label).
 
-    title = args.title
+    Returns (input_obj, None) on success or (None, error) on hard failure.
+    Smart defaults applied silently. Warnings go to stderr when verbose=True.
+    """
+    def warn(msg):
+        if verbose:
+            print(f"Warning: {msg}", file=sys.stderr)
+
+    description = read_description(fields.get("description"), fields.get("description_file"))
+
+    title = fields.get("title")
     if not title:
         if not description:
-            print("Give me at least a title or a description.", file=sys.stderr)
-            sys.exit(1)
+            return None, "no title or description"
         title = derive_title(description)
 
-    input_obj: dict = {
-        "teamId": team_id,
-        "title": title,
-    }
-
+    input_obj: dict = {"teamId": team_id, "title": title}
     if description:
         input_obj["description"] = description
 
-    if args.due_date:
-        due = parse_due_date(args.due_date)
-        if due is not None:
-            input_obj["dueDate"] = due
+    if fields.get("due_date"):
+        try:
+            due = parse_due_date(fields["due_date"])
+            if due is not None:
+                input_obj["dueDate"] = due
+        except SystemExit as e:
+            return None, str(e)
 
-    # Priority: default Medium (3) so tickets land with a sensible weight.
-    priority = parse_priority(args.priority) if args.priority is not None else 3
+    try:
+        priority = parse_priority(fields["priority"]) if fields.get("priority") is not None else 3
+    except SystemExit as e:
+        return None, str(e)
     input_obj["priority"] = priority
 
-    if args.estimate is not None:
-        input_obj["estimate"] = args.estimate
+    if fields.get("estimate") is not None:
+        input_obj["estimate"] = fields["estimate"]
 
-    if args.parent:
-        parent_issue = resolve_issue(api_key, team_id, args.parent)
+    if fields.get("parent"):
+        parent_issue = resolve_issue(api_key, team_id, fields["parent"])
         if parent_issue:
             input_obj["parentId"] = parent_issue["id"]
         else:
-            print(f"Warning: parent '{args.parent}' not found; creating without parent.", file=sys.stderr)
+            warn(f"parent '{fields['parent']}' not found; creating without parent.")
 
     project_id = None
-    if args.project:
-        project_id = resolve_project_id(api_key, team_id, args.project)
+    if fields.get("project"):
+        project_id = resolve_project_id(api_key, team_id, fields["project"])
         if project_id:
             input_obj["projectId"] = project_id
 
-    if args.milestone:
-        mid = resolve_milestone_id(api_key, team_id, args.milestone, project_id)
+    if fields.get("milestone"):
+        mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id)
         if mid:
             input_obj["projectMilestoneId"] = mid
 
-    # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
-    # Explicit --status always wins.
-    desired_status = args.status
+    desired_status = fields.get("status")
     if not desired_status:
         desired_status = "Backlog" if priority == 4 else "Todo"
-
     states = get_states(api_key, team_id, cfg)
     sid = resolve_state_id(states, desired_status)
     if sid:
         input_obj["stateId"] = sid
     else:
-        print(f"Warning: state '{desired_status}' not found; letting Linear pick the default.", file=sys.stderr)
+        warn(f"state '{desired_status}' not found; letting Linear pick the default.")
 
-    # Cycle: default "active". Explicit "none" skips cycle assignment.
-    cycle_choice = (args.cycle or "active").lower()
+    cycle_choice = (fields.get("cycle") or "active").lower()
     if cycle_choice in ("active", "next"):
         cid = get_cycle_id(api_key, team_id, cycle_choice)
         if cid:
             input_obj["cycleId"] = cid
         else:
-            print(f"Warning: no {cycle_choice} cycle found; creating without cycle.", file=sys.stderr)
-    # "none" -> no cycleId (backlog behavior)
+            warn(f"no {cycle_choice} cycle found; creating without cycle.")
 
-    # Assign: default = API key owner. "none" -> unassigned. An email -> lookup.
-    assign_arg = args.assign
+    assign_arg = fields.get("assign")
     if assign_arg is None:
-        # Default behavior: assign to the caller (API key owner).
         vid = get_viewer_id(api_key, cfg)
         if vid:
             input_obj["assigneeId"] = vid
@@ -1428,11 +1433,14 @@ def cmd_create(args, cfg, api_key, team_id):
         if uid:
             input_obj["assigneeId"] = uid
         else:
-            print(f"Warning: user '{assign_arg}' not found; leaving unassigned.", file=sys.stderr)
+            warn(f"user '{assign_arg}' not found; leaving unassigned.")
     else:
-        print(f"Warning: --assign expects an email or 'none'; got '{assign_arg}'. Ignoring.", file=sys.stderr)
+        warn(f"--assign expects an email or 'none'; got '{assign_arg}'. Ignoring.")
 
-    if args.label:
+    label_names = fields.get("label") or []
+    if isinstance(label_names, str):
+        label_names = [label_names]
+    if label_names:
         label_data = gql(api_key, """
             query($teamId: ID!) {
                 issueLabels(
@@ -1448,19 +1456,21 @@ def cmd_create(args, cfg, api_key, team_id):
                 }
             }
         """, {"teamId": team_id})
-
         if not check_errors(label_data):
-            all_labels = label_data["data"]["issueLabels"]["nodes"]
-            label_map = {l["name"]: l["id"] for l in all_labels}
+            label_map = {l["name"]: l["id"] for l in label_data["data"]["issueLabels"]["nodes"]}
             label_ids = []
-            for lbl in args.label:
+            for lbl in label_names:
                 if lbl in label_map:
                     label_ids.append(label_map[lbl])
                 else:
-                    print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
+                    warn(f"label '{lbl}' not found, skipping.")
             if label_ids:
                 input_obj["labelIds"] = label_ids
 
+    return input_obj, None
+
+
+def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str | None]:
     data = gql(api_key, """
         mutation($input: IssueCreateInput!) {
             issueCreate(input: $input) {
@@ -1469,18 +1479,88 @@ def cmd_create(args, cfg, api_key, team_id):
             }
         }
     """, {"input": input_obj})
-
-    if check_errors(data):
-        return
-
+    if data.get("errors"):
+        return None, data["errors"][0].get("message", "unknown error")
     result = data["data"]["issueCreate"]
-    if result["success"]:
-        i = result["issue"]
-        cyc = (i.get("cycle") or {}).get("name") or "no cycle"
-        asg = (i.get("assignee") or {}).get("name") or "unassigned"
-        print(f"Created {i['identifier']}: {i['title']}  [{cyc} | {asg}]")
+    if not result["success"]:
+        return None, "create failed"
+    return result["issue"], None
+
+
+def cmd_create(args, cfg, api_key, team_id):
+    if args.from_file:
+        return _bulk_create(args.from_file, cfg, api_key, team_id)
+
+    fields = {
+        "title": args.title,
+        "description": args.description,
+        "description_file": args.description_file,
+        "priority": args.priority,
+        "estimate": args.estimate,
+        "parent": args.parent,
+        "project": args.project,
+        "milestone": args.milestone,
+        "status": args.status,
+        "cycle": args.cycle,
+        "assign": args.assign,
+        "due_date": args.due_date,
+        "label": args.label or [],
+    }
+    input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
+    if err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    issue, err = _send_issue_create(api_key, input_obj)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return
+    cyc = (issue.get("cycle") or {}).get("name") or "no cycle"
+    asg = (issue.get("assignee") or {}).get("name") or "unassigned"
+    print(f"Created {issue['identifier']}: {issue['title']}  [{cyc} | {asg}]")
+
+
+def _bulk_create(path: str, cfg, api_key, team_id):
+    """Bulk create from JSONL. Each line is a JSON object with field names
+    matching the single-create flags. Continue-on-error; tab-separated output:
+    OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON."""
+    if path == "-":
+        stream = sys.stdin
     else:
-        print("Create failed.")
+        if not Path(path).exists():
+            print(f"--from-file: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        stream = open(path)
+
+    ok_count = 0
+    err_count = 0
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            fields = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"ERROR\t-\t<unparseable>\t{e}")
+            err_count += 1
+            continue
+
+        title_hint = fields.get("title") or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
+        input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False)
+        if err:
+            print(f"ERROR\t-\t{title_hint}\t{err}")
+            err_count += 1
+            continue
+        issue, err = _send_issue_create(api_key, input_obj)
+        if err:
+            print(f"ERROR\t-\t{title_hint}\t{err}")
+            err_count += 1
+            continue
+        print(f"OK\t{issue['identifier']}\t{issue['title']}")
+        ok_count += 1
+
+    if path != "-":
+        stream.close()
+    print(f"\n{ok_count} created, {err_count} failed.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1728,6 +1808,8 @@ def main():
                           help="Assignee: email address, or 'none' (default: API key owner)")
     p_create.add_argument("--estimate", type=int, default=None,
                           help="Story-point estimate (integer)")
+    p_create.add_argument("--from-file", dest="from_file", default=None,
+                          help="Bulk create from JSONL (one issue per line). '-' for stdin.")
     p_create.add_argument("--parent", default=None,
                           help="Parent issue identifier for sub-issues (e.g. ANT-42)")
     p_create.add_argument("--project", default=None,
