@@ -956,8 +956,8 @@ def cmd_update(args, cfg, api_key, team_id):
             print("Status update failed.")
         did_something = True
 
-    # Labels
-    if args.label:
+    # Labels (add via --label, remove via --unlabel)
+    if args.label or args.unlabel:
         label_data = gql(api_key, """
             query($teamId: ID!) {
                 issueLabels(
@@ -985,12 +985,15 @@ def cmd_update(args, cfg, api_key, team_id):
                 }}
             }}""")
             current_ids = []
+            current_names_by_id = {}
             if not check_errors(issue_data):
-                current_ids = [l["id"] for l in issue_data["data"]["issue"]["labels"]["nodes"]]
+                for l in issue_data["data"]["issue"]["labels"]["nodes"]:
+                    current_ids.append(l["id"])
+                    current_names_by_id[l["id"]] = l["name"]
 
             label_ids = list(current_ids)
             added = []
-            for lbl in args.label:
+            for lbl in args.label or []:
                 if lbl in label_map:
                     if label_map[lbl] not in label_ids:
                         label_ids.append(label_map[lbl])
@@ -998,7 +1001,15 @@ def cmd_update(args, cfg, api_key, team_id):
                 else:
                     print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
 
-            if added:
+            removed = []
+            for lbl in args.unlabel or []:
+                if lbl in label_map and label_map[lbl] in label_ids:
+                    label_ids.remove(label_map[lbl])
+                    removed.append(lbl)
+                else:
+                    print(f"Warning: label '{lbl}' not on this issue, skipping.", file=sys.stderr)
+
+            if added or removed:
                 data = gql(api_key, """
                     mutation($id: String!, $labelIds: [String!]!) {
                         issueUpdate(id: $id, input: { labelIds: $labelIds }) {
@@ -1008,7 +1019,12 @@ def cmd_update(args, cfg, api_key, team_id):
                 """, {"id": issue["id"], "labelIds": label_ids})
 
                 if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
-                    print(f"Labels added to {args.identifier}: {', '.join(added)}")
+                    parts = []
+                    if added:
+                        parts.append(f"added {', '.join(added)}")
+                    if removed:
+                        parts.append(f"removed {', '.join(removed)}")
+                    print(f"Labels on {args.identifier}: {'; '.join(parts)}")
                 else:
                     print("Label update failed.")
                 did_something = True
@@ -1364,6 +1380,8 @@ def main():
     p_update.add_argument("--proof", action="append",
                           help="Proof of completion (repeatable). File path, URL, or text.")
     p_update.add_argument("--label", action="append", help="Add label(s) (repeatable)")
+    p_update.add_argument("--unlabel", action="append",
+                          help="Remove label(s) (repeatable)")
     p_update.add_argument("--priority", type=str, default=None,
                           help="urgent, high, medium, low, or none")
     p_update.add_argument("--assign", default=None,
