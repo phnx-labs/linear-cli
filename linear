@@ -1067,6 +1067,15 @@ def cmd_update(args, cfg, api_key, team_id):
         title_desc_input["description"] = description
     if args.estimate is not None:
         title_desc_input["estimate"] = args.estimate
+    if args.parent is not None:
+        if args.parent.lower() == "none":
+            title_desc_input["parentId"] = None
+        else:
+            parent_issue = resolve_issue(api_key, team_id, args.parent)
+            if parent_issue:
+                title_desc_input["parentId"] = parent_issue["id"]
+            else:
+                print(f"Warning: parent '{args.parent}' not found; skipping.", file=sys.stderr)
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1208,6 +1217,13 @@ def cmd_create(args, cfg, api_key, team_id):
 
     if args.estimate is not None:
         input_obj["estimate"] = args.estimate
+
+    if args.parent:
+        parent_issue = resolve_issue(api_key, team_id, args.parent)
+        if parent_issue:
+            input_obj["parentId"] = parent_issue["id"]
+        else:
+            print(f"Warning: parent '{args.parent}' not found; creating without parent.", file=sys.stderr)
 
     # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
     # Explicit --status always wins.
@@ -1393,6 +1409,8 @@ def main():
                           help="Reassign: email address, or 'none' to unassign")
     p_update.add_argument("--estimate", type=int, default=None,
                           help="Story-point estimate (integer)")
+    p_update.add_argument("--parent", default=None,
+                          help="Set parent issue (e.g. ANT-42), or 'none' to detach")
     p_update.add_argument("--title", default=None, help="Rename the issue")
     p_update.add_argument("--description", default=None,
                           help="Replace the issue description")
@@ -1423,6 +1441,8 @@ def main():
                           help="Assignee: email address, or 'none' (default: API key owner)")
     p_create.add_argument("--estimate", type=int, default=None,
                           help="Story-point estimate (integer)")
+    p_create.add_argument("--parent", default=None,
+                          help="Parent issue identifier for sub-issues (e.g. ANT-42)")
 
     # cycles (list all cycles for the team)
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
