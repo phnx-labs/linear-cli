@@ -1007,6 +1007,29 @@ def cmd_update(args, cfg, api_key, team_id):
             else:
                 print("Cycle update failed.")
 
+    # Title / description: --title TEXT | --description TEXT
+    title_desc_input: dict = {}
+    if args.title is not None:
+        title_desc_input["title"] = args.title
+    if args.description is not None:
+        title_desc_input["description"] = args.description
+    if title_desc_input:
+        data = gql(api_key, """
+            mutation($id: String!, $input: IssueUpdateInput!) {
+                issueUpdate(id: $id, input: $input) {
+                    success
+                    issue { identifier title }
+                }
+            }
+        """, {"id": issue["id"], "input": title_desc_input})
+        if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+            i = data["data"]["issueUpdate"]["issue"]
+            changed = ", ".join(title_desc_input.keys())
+            print(f"{i['identifier']} -> updated: {changed}")
+            did_something = True
+        else:
+            print("Title/description update failed.")
+
     # Priority: --priority urgent|high|medium|low|none
     if args.priority is not None:
         pri = parse_priority(args.priority)
@@ -1094,7 +1117,7 @@ def cmd_update(args, cfg, api_key, team_id):
         did_something = True
 
     if not did_something:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --due-date, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --title, --description, --due-date, or --comment.")
         sys.exit(1)
 
 
@@ -1300,6 +1323,9 @@ def main():
                           help="urgent, high, medium, low, or none")
     p_update.add_argument("--assign", default=None,
                           help="Reassign: email address, or 'none' to unassign")
+    p_update.add_argument("--title", default=None, help="Rename the issue")
+    p_update.add_argument("--description", default=None,
+                          help="Replace the issue description")
     p_update.add_argument("--due-date", dest="due_date",
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
