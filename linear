@@ -427,6 +427,21 @@ def parse_priority(value: str) -> int:
     )
 
 
+def read_description(inline: str | None, path: str | None) -> str | None:
+    """Resolve description from --description (inline), --description-file PATH,
+    or stdin via --description-file -. Inline wins if both are given."""
+    if inline is not None:
+        return inline
+    if path is None:
+        return None
+    if path == "-":
+        return sys.stdin.read()
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--description-file: {path} not found")
+    return p.read_text()
+
+
 def parse_due_date(value: str) -> str | None:
     """Accept YYYY-MM-DD, or 'none' to clear. Returns the validated string,
     or None when clearing. Linear's dueDate is a TimelessDate (date-only)."""
@@ -1007,12 +1022,13 @@ def cmd_update(args, cfg, api_key, team_id):
             else:
                 print("Cycle update failed.")
 
-    # Title / description: --title TEXT | --description TEXT
+    # Title / description: --title TEXT | --description TEXT | --description-file PATH
     title_desc_input: dict = {}
     if args.title is not None:
         title_desc_input["title"] = args.title
-    if args.description is not None:
-        title_desc_input["description"] = args.description
+    description = read_description(args.description, args.description_file)
+    if description is not None:
+        title_desc_input["description"] = description
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1131,8 +1147,9 @@ def cmd_create(args, cfg, api_key, team_id):
         "title": args.title,
     }
 
-    if args.description:
-        input_obj["description"] = args.description
+    description = read_description(args.description, args.description_file)
+    if description:
+        input_obj["description"] = description
 
     if args.due_date:
         due = parse_due_date(args.due_date)
@@ -1326,6 +1343,8 @@ def main():
     p_update.add_argument("--title", default=None, help="Rename the issue")
     p_update.add_argument("--description", default=None,
                           help="Replace the issue description")
+    p_update.add_argument("--description-file", dest="description_file", default=None,
+                          help="Read description from a file path, or '-' for stdin")
     p_update.add_argument("--due-date", dest="due_date",
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
@@ -1338,6 +1357,8 @@ def main():
     p_create.add_argument("--priority", type=str, default=None,
                           help="urgent, high, medium (default), low, or none")
     p_create.add_argument("--description", help="Issue description")
+    p_create.add_argument("--description-file", dest="description_file", default=None,
+                          help="Read description from a file path, or '-' for stdin")
     p_create.add_argument("--status", help="Initial status (default: Todo)")
     p_create.add_argument("--cycle", default="active",
                           choices=["active", "next", "none"],
