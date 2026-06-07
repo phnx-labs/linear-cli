@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-07
+
+Broad expansion of the create/update surface to cover the fields agents actually
+need — projects, milestones, sub-issues, story points, reassignment — plus
+discovery commands and bulk create. Symmetry fix: every field settable on
+`create` is now changeable on `update` with the same flag.
+
+### Added
+- `--project NAME|ID` and `--milestone NAME` on `create` and `update`. Name resolution with smart-pick on ambiguity (most-recently-updated match) — no flag dance required
+- `--parent ANT-N` on `create` and `update` for sub-issues; `none` on update detaches
+- `--estimate N` on `create` and `update` (story points)
+- `--title` and `--description` on `update` (rename / replace body)
+- `--description-file PATH` on `create` and `update`, with `-` for stdin (multi-paragraph markdown without shell-escape pain)
+- `--unlabel NAME` on `update` (repeatable) — mirrors `--label` add semantics for clean agent hand-off
+- `--priority` and `--assign` on `update` (symmetry fix — both were `create`-only)
+- `--query "text"` on `tasks` — case-insensitive search across title + description; composes with all existing filters
+- `--from-file plan.jsonl` on `create` — bulk creation, one JSON object per line, `-` for stdin. Continue-on-error; tab-separated output
+- `--team KEY` global override (top-level flag, stateless — doesn't mutate config)
+- `linear projects` — list projects in the team with status, progress, lead
+- `linear projects <name>` — detail view with milestones inline
+- `linear labels` — list available labels for the team
+- `linear users` — list active users (for `--assign` lookup)
+
+### Changed
+- `linear create` title argument is now **optional**: if only `--description` is provided, the title is derived from its first sentence/line (markdown noise stripped, capped at 80 chars). Only true error case: neither title nor description given
+- `cmd_create` internally refactored: shared `_build_create_input` + `_send_issue_create` helpers used by both single and bulk paths — no duplicated resolution logic
+
 ## [0.1.2] - 2026-04-26
 
 ### Fixed
@@ -42,6 +69,7 @@ First public release.
 - Auto-migration from `~/.agents/linear.json` if present
 - Single-file Python distribution (~43 KB), zero third-party dependencies
 
+[0.2.0]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.2.0
 [0.1.2]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/phnx-labs/linear-cli/releases/tag/v0.1.0

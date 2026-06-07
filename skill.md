@@ -10,14 +10,17 @@ You have access to the `linear` CLI — a Linear task manager built for AI agent
 ## Core workflow
 
 ```
-linear tasks                        # your assigned queue in the active cycle
-linear tasks --board                # whole team board, grouped by assignee/agent
-linear tasks ANT-42                  # detail view for one issue
-linear update ANT-42 --pickup        # move to In Progress
-linear update ANT-42 --comment "..."  # drop a progress note
+linear tasks                          # your assigned queue in the active cycle
+linear tasks --board                  # whole team board, grouped by assignee/agent
+linear tasks ANT-42                    # detail view for one issue
+linear update ANT-42 --pickup          # move to In Progress
+linear update ANT-42 --comment "..."    # drop a progress note
 linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
 linear create "Title" --label foo --priority high --description "..."
-linear cycles                       # list cycles
+linear cycles                         # list cycles
+linear projects                       # list projects (with milestones via `linear projects "Name"`)
+linear labels                         # list available labels
+linear users                          # list assignable users
 ```
 
 ## Filters
@@ -26,8 +29,50 @@ linear cycles                       # list cycles
 linear tasks --status todo         # backlog | todo | progress | done | open
 linear tasks --label security      # by any label
 linear tasks --cycle next          # active | next
+linear tasks --query "auth"        # search title + description
 linear tasks --json                # machine-readable
 linear tasks --all                 # ignore default agent filter
+```
+
+## Editing existing issues
+
+Everything you can set on `create` can be changed on `update` with the same flag. Examples:
+
+```
+linear update ANT-42 --priority urgent --assign someone@x.com
+linear update ANT-42 --title "Renamed" --description "Rewritten body"
+linear update ANT-42 --project "Phoenix" --milestone "v1.0"
+linear update ANT-42 --estimate 3 --parent ANT-10
+linear update ANT-42 --label agent:codex --unlabel agent:claude   # hand off
+linear update ANT-42 --project none                               # detach
+```
+
+## Creating issues — what's required
+
+Only one thing: a title OR a description. Everything else has a sensible default.
+
+```
+linear create "Fix auth bug"                          # minimum
+linear create --description "Long paragraph..."       # title derived from first line/sentence
+linear create --description-file plan.md              # multi-paragraph markdown
+echo "..." | linear create --description-file -       # stdin
+linear create "Sub-task" --parent ANT-42 --estimate 3
+linear create "Item" --project "Phoenix" --milestone "v1.0"
+linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
+```
+
+Bulk output is tab-separated for easy parsing:
+```
+OK    ANT-42  Fix auth
+ERROR  -      Other       project 'Foo' not found
+```
+Bad lines don't stop the run.
+
+## Multi-team workspaces
+
+```
+linear --team ENG tasks       # one-shot override, doesn't mutate config
+linear --team OPS create ...
 ```
 
 ## Output mode for agent use
