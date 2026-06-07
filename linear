@@ -1007,6 +1007,55 @@ def cmd_update(args, cfg, api_key, team_id):
             else:
                 print("Cycle update failed.")
 
+    # Priority: --priority urgent|high|medium|low|none
+    if args.priority is not None:
+        pri = parse_priority(args.priority)
+        data = gql(api_key, """
+            mutation($id: String!, $priority: Int!) {
+                issueUpdate(id: $id, input: { priority: $priority }) {
+                    success
+                    issue { identifier priority }
+                }
+            }
+        """, {"id": issue["id"], "priority": pri})
+        if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+            i = data["data"]["issueUpdate"]["issue"]
+            name = PRIORITY_MAP.get(i.get("priority", 0), "-")
+            print(f"{i['identifier']} -> priority: {name}")
+            did_something = True
+        else:
+            print("Priority update failed.")
+
+    # Assign: --assign email | none
+    if args.assign is not None:
+        if args.assign.lower() == "none":
+            assignee_id = None
+        elif "@" in args.assign:
+            assignee_id = resolve_user_id_by_email(api_key, args.assign.strip())
+            if not assignee_id:
+                print(f"Warning: user '{args.assign}' not found; skipping reassign.", file=sys.stderr)
+                assignee_id = ...
+        else:
+            print(f"Warning: --assign expects an email or 'none'; got '{args.assign}'. Skipping.", file=sys.stderr)
+            assignee_id = ...
+
+        if assignee_id is not ...:
+            data = gql(api_key, """
+                mutation($id: String!, $assigneeId: String) {
+                    issueUpdate(id: $id, input: { assigneeId: $assigneeId }) {
+                        success
+                        issue { identifier assignee { name } }
+                    }
+                }
+            """, {"id": issue["id"], "assigneeId": assignee_id})
+            if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+                i = data["data"]["issueUpdate"]["issue"]
+                asg = (i.get("assignee") or {}).get("name") or "unassigned"
+                print(f"{i['identifier']} -> assignee: {asg}")
+                did_something = True
+            else:
+                print("Assign update failed.")
+
     # Due date: --due-date YYYY-MM-DD | none
     if args.due_date is not None:
         due = parse_due_date(args.due_date)
@@ -1045,7 +1094,7 @@ def cmd_update(args, cfg, api_key, team_id):
         did_something = True
 
     if not did_something:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --due-date, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --due-date, or --comment.")
         sys.exit(1)
 
 
@@ -1247,6 +1296,10 @@ def main():
     p_update.add_argument("--proof", action="append",
                           help="Proof of completion (repeatable). File path, URL, or text.")
     p_update.add_argument("--label", action="append", help="Add label(s) (repeatable)")
+    p_update.add_argument("--priority", type=str, default=None,
+                          help="urgent, high, medium, low, or none")
+    p_update.add_argument("--assign", default=None,
+                          help="Reassign: email address, or 'none' to unassign")
     p_update.add_argument("--due-date", dest="due_date",
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
