@@ -274,6 +274,53 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     return nodes[0]["id"] if nodes else None
 
 
+def list_team_projects(api_key: str, team_id: str) -> list[dict]:
+    """All projects accessible to a team. Sorted most-recently-updated first."""
+    data = gql(api_key, """
+        query($teamId: String!) {
+            team(id: $teamId) {
+                projects(first: 100) {
+                    nodes {
+                        id name state progress
+                        startDate targetDate updatedAt
+                        lead { name }
+                    }
+                }
+            }
+        }
+    """, {"teamId": team_id})
+    if check_errors(data):
+        return []
+    projects = (
+        ((data.get("data") or {}).get("team") or {})
+        .get("projects", {}).get("nodes", [])
+    )
+    projects.sort(key=lambda p: p.get("updatedAt") or "", reverse=True)
+    return projects
+
+
+def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
+    """Resolve --project to a projectId. Accepts UUID or name. On ambiguity,
+    picks the most-recently-active match and warns to stderr."""
+    if not value:
+        return None
+    # Looks like a UUID? Pass through.
+    if len(value) == 36 and value.count("-") == 4:
+        return value
+    projects = list_team_projects(api_key, team_id)
+    matches = [p for p in projects if p["name"].lower() == value.lower()]
+    if not matches:
+        # Substring fallback so 'phoenix' matches 'Phoenix Horizon'.
+        matches = [p for p in projects if value.lower() in p["name"].lower()]
+    if not matches:
+        print(f"Warning: project '{value}' not found; skipping.", file=sys.stderr)
+        return None
+    if len(matches) > 1:
+        print(f"Note: '{value}' matched {len(matches)} projects; "
+              f"picked '{matches[0]['name']}' (most recent).", file=sys.stderr)
+    return matches[0]["id"]
+
+
 def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
     """Return all cycles for a team, most recent first."""
     data = gql(api_key, """
@@ -1076,6 +1123,13 @@ def cmd_update(args, cfg, api_key, team_id):
                 title_desc_input["parentId"] = parent_issue["id"]
             else:
                 print(f"Warning: parent '{args.parent}' not found; skipping.", file=sys.stderr)
+    if args.project is not None:
+        if args.project.lower() == "none":
+            title_desc_input["projectId"] = None
+        else:
+            pid = resolve_project_id(api_key, team_id, args.project)
+            if pid:
+                title_desc_input["projectId"] = pid
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1224,6 +1278,11 @@ def cmd_create(args, cfg, api_key, team_id):
             input_obj["parentId"] = parent_issue["id"]
         else:
             print(f"Warning: parent '{args.parent}' not found; creating without parent.", file=sys.stderr)
+
+    if args.project:
+        pid = resolve_project_id(api_key, team_id, args.project)
+        if pid:
+            input_obj["projectId"] = pid
 
     # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
     # Explicit --status always wins.
@@ -1411,6 +1470,8 @@ def main():
                           help="Story-point estimate (integer)")
     p_update.add_argument("--parent", default=None,
                           help="Set parent issue (e.g. ANT-42), or 'none' to detach")
+    p_update.add_argument("--project", default=None,
+                          help="Move to project (name or ID), or 'none' to detach")
     p_update.add_argument("--title", default=None, help="Rename the issue")
     p_update.add_argument("--description", default=None,
                           help="Replace the issue description")
@@ -1443,6 +1504,8 @@ def main():
                           help="Story-point estimate (integer)")
     p_create.add_argument("--parent", default=None,
                           help="Parent issue identifier for sub-issues (e.g. ANT-42)")
+    p_create.add_argument("--project", default=None,
+                          help="Project name or ID")
 
     # cycles (list all cycles for the team)
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
