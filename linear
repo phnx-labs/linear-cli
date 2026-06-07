@@ -52,6 +52,9 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
+    # Volatile cfg (e.g. --team override) opts out of persistence.
+    if cfg.get("__volatile__"):
+        return
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
 
@@ -199,6 +202,28 @@ def get_viewer_id(api_key: str, cfg: dict) -> str | None:
             cfg["viewerEmail"] = viewer["email"]
         save_config(cfg)
     return vid
+
+
+def resolve_team_id_by_key(api_key: str, value: str) -> str | None:
+    """Resolve --team to a team ID. Accepts team key (e.g. 'ANT') or UUID."""
+    if not value:
+        return None
+    if len(value) == 36 and value.count("-") == 4:
+        return value
+    data = gql(api_key, """
+        query($key: String!) {
+            teams(filter: { key: { eqIgnoreCase: $key } }) {
+                nodes { id name key }
+            }
+        }
+    """, {"key": value})
+    if check_errors(data):
+        return None
+    nodes = (data.get("data") or {}).get("teams", {}).get("nodes", [])
+    if not nodes:
+        print(f"Warning: team '{value}' not found.", file=sys.stderr)
+        return None
+    return nodes[0]["id"]
 
 
 def resolve_user_id_by_email(api_key: str, email: str) -> str | None:
@@ -1626,6 +1651,8 @@ def main():
         description="Task management CLI for AI agent teams",
     )
     parser.add_argument("--version", action="version", version=f"linear-cli {__version__}")
+    parser.add_argument("--team", default=None,
+                        help="Override team for this invocation (key like 'ANT' or UUID)")
     sub = parser.add_subparsers(dest="command")
 
     # setup
@@ -1745,6 +1772,16 @@ def main():
     if not api_key:
         print("No API key configured. Run: linear setup", file=sys.stderr)
         sys.exit(1)
+
+    if args.team:
+        override = resolve_team_id_by_key(api_key, args.team)
+        if not override:
+            sys.exit(1)
+        team_id = override
+        # Use a volatile cfg copy — don't pollute on-disk config with the
+        # other team's states cache.
+        cfg = {**cfg, "states": {}, "__volatile__": True}
+
     if not team_id:
         print("No team configured. Run: linear setup", file=sys.stderr)
         sys.exit(1)
