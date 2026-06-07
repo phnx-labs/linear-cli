@@ -735,6 +735,13 @@ def list_tasks(args, cfg, api_key, team_id):
     if args.label and not explicit_agent:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
 
+    if getattr(args, "query", None):
+        q = args.query.replace('"', '\\"')
+        filters.append(
+            f'or: [ {{ title: {{ containsIgnoreCase: "{q}" }} }}, '
+            f'{{ description: {{ containsIgnoreCase: "{q}" }} }} ]'
+        )
+
     if args.status:
         status = args.status.lower()
         if status == "open":
@@ -1635,6 +1642,7 @@ def main():
     p_tasks.add_argument("--label", help="Filter by any label")
     p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
     p_tasks.add_argument("--cycle", default="active", choices=["active", "next"])
+    p_tasks.add_argument("--query", help="Search title + description (case-insensitive)")
     p_tasks.add_argument("--json", action="store_true", help="JSON output")
 
     # update (all mutations on an issue)
