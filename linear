@@ -427,6 +427,26 @@ def parse_priority(value: str) -> int:
     )
 
 
+def derive_title(description: str) -> str:
+    """Pull a sensible title out of a description body. First sentence or first
+    line, stripped of markdown bullets/headers, capped at 80 chars."""
+    text = description.strip()
+    # First newline-bounded line
+    first_line = text.split("\n", 1)[0].strip()
+    # Strip leading markdown noise: headers, bullets, blockquotes
+    while first_line and first_line[0] in "#*->":
+        first_line = first_line[1:].lstrip()
+    # First sentence within that line
+    for sep in (". ", "! ", "? "):
+        idx = first_line.find(sep)
+        if 0 < idx < 80:
+            first_line = first_line[: idx + 1]
+            break
+    if len(first_line) > 80:
+        first_line = first_line[:79].rstrip() + "…"
+    return first_line or "Untitled"
+
+
 def read_description(inline: str | None, path: str | None) -> str | None:
     """Resolve description from --description (inline), --description-file PATH,
     or stdin via --description-file -. Inline wins if both are given."""
@@ -1142,12 +1162,20 @@ def cmd_update(args, cfg, api_key, team_id):
 # ---------------------------------------------------------------------------
 
 def cmd_create(args, cfg, api_key, team_id):
+    description = read_description(args.description, args.description_file)
+
+    title = args.title
+    if not title:
+        if not description:
+            print("Give me at least a title or a description.", file=sys.stderr)
+            sys.exit(1)
+        title = derive_title(description)
+
     input_obj: dict = {
         "teamId": team_id,
-        "title": args.title,
+        "title": title,
     }
 
-    description = read_description(args.description, args.description_file)
     if description:
         input_obj["description"] = description
 
@@ -1352,7 +1380,8 @@ def main():
 
     # create
     p_create = sub.add_parser("create", help="Create a new issue")
-    p_create.add_argument("title", help="Issue title")
+    p_create.add_argument("title", nargs="?", default=None,
+                          help="Issue title (optional if --description provided)")
     p_create.add_argument("--label", action="append", help="Label(s) to add (repeatable)")
     p_create.add_argument("--priority", type=str, default=None,
                           help="urgent, high, medium (default), low, or none")
