@@ -1058,13 +1058,15 @@ def cmd_update(args, cfg, api_key, team_id):
             else:
                 print("Cycle update failed.")
 
-    # Title / description: --title TEXT | --description TEXT | --description-file PATH
+    # Title / description / estimate: batched in one mutation
     title_desc_input: dict = {}
     if args.title is not None:
         title_desc_input["title"] = args.title
     description = read_description(args.description, args.description_file)
     if description is not None:
         title_desc_input["description"] = description
+    if args.estimate is not None:
+        title_desc_input["estimate"] = args.estimate
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1203,6 +1205,9 @@ def cmd_create(args, cfg, api_key, team_id):
     # Priority: default Medium (3) so tickets land with a sensible weight.
     priority = parse_priority(args.priority) if args.priority is not None else 3
     input_obj["priority"] = priority
+
+    if args.estimate is not None:
+        input_obj["estimate"] = args.estimate
 
     # Status: default "Todo" for actionable tickets; "Backlog" only for Low priority.
     # Explicit --status always wins.
@@ -1386,6 +1391,8 @@ def main():
                           help="urgent, high, medium, low, or none")
     p_update.add_argument("--assign", default=None,
                           help="Reassign: email address, or 'none' to unassign")
+    p_update.add_argument("--estimate", type=int, default=None,
+                          help="Story-point estimate (integer)")
     p_update.add_argument("--title", default=None, help="Rename the issue")
     p_update.add_argument("--description", default=None,
                           help="Replace the issue description")
@@ -1414,6 +1421,8 @@ def main():
                           help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
                           help="Assignee: email address, or 'none' (default: API key owner)")
+    p_create.add_argument("--estimate", type=int, default=None,
+                          help="Story-point estimate (integer)")
 
     # cycles (list all cycles for the team)
     p_cycles = sub.add_parser("cycles", help="List all cycles for the team")
