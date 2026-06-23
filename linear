@@ -7,10 +7,15 @@ and see the full team board.
 
 Commands:
     setup               Configure Linear connection
-    tasks               List/view/board tasks
-    update              Modify an issue (status, comment)
+    tasks               List/view/board tasks (paginated; --cycle all|none,
+                        --assignee me|none|email)
+    update              Modify an issue (status, comment, relations)
     create              Create a new issue
     cycles              List cycles for the team
+    projects            List projects / milestones
+    labels              List labels
+    users               List assignable users
+    states              List the team's workflow states
 
 Config: ~/.linear-cli/config.json
 """
@@ -28,7 +33,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
@@ -668,6 +673,76 @@ def format_issue_row(node: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Paginated issue fetch
+# ---------------------------------------------------------------------------
+
+# Linear caps a connection at 50 nodes by default and 250 max per page. Without
+# following pageInfo, any list silently truncates — which breaks "search before
+# you create" and produces duplicate tickets. paginate_issues walks every page.
+_PAGE_SIZE = 100
+_MAX_PAGES = 100  # 10k-issue safety rail; warns if ever hit (no silent caps).
+
+
+def paginate_issues(api_key: str, filter_str: str) -> list[dict] | None:
+    """Fetch every issue matching a root-level filter, following pagination.
+
+    `filter_str` is the inner body of the GraphQL `filter:` object (no braces).
+    The opaque cursor is passed as a variable; only the static filter is
+    interpolated. Returns None on API error (caller already printed it).
+    """
+    nodes: list[dict] = []
+    cursor: str | None = None
+    pages = 0
+    query = f"""query($cursor: String) {{
+        issues(first: {_PAGE_SIZE}, after: $cursor, filter: {{ {filter_str} }}) {{
+            pageInfo {{ hasNextPage endCursor }}
+            nodes {{ {ISSUE_FIELDS} }}
+        }}
+    }}"""
+    while True:
+        data = gql(api_key, query, {"cursor": cursor})
+        if check_errors(data):
+            return None
+        conn = (data.get("data") or {}).get("issues") or {}
+        nodes.extend(conn.get("nodes", []))
+        pages += 1
+        page_info = conn.get("pageInfo") or {}
+        cursor = page_info.get("endCursor")
+        if not page_info.get("hasNextPage"):
+            break
+        if pages >= _MAX_PAGES:
+            print(
+                f"Warning: stopped after {pages * _PAGE_SIZE} issues "
+                f"(pagination safety rail). Narrow your filter to see the rest.",
+                file=sys.stderr,
+            )
+            break
+    return nodes
+
+
+def resolve_cycle_meta(api_key: str, team_id: str, which: str) -> dict | None:
+    """Resolve 'active'/'next' to {id, name, startsAt, endsAt}. None when none."""
+    cid = get_cycle_id(api_key, team_id, which)
+    if not cid:
+        return None
+    data = gql(
+        api_key,
+        "query($id: String!) { cycle(id: $id) { id name startsAt endsAt } }",
+        {"id": cid},
+    )
+    fallback = f"{which.capitalize()} cycle"
+    if check_errors(data):
+        return {"id": cid, "name": fallback, "startsAt": None, "endsAt": None}
+    c = (data.get("data") or {}).get("cycle") or {}
+    return {
+        "id": cid,
+        "name": c.get("name") or fallback,
+        "startsAt": c.get("startsAt"),
+        "endsAt": c.get("endsAt"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # setup
 # ---------------------------------------------------------------------------
 
@@ -739,9 +814,30 @@ def cmd_tasks(args, cfg, api_key, team_id):
 def list_tasks(args, cfg, api_key, team_id):
     """Default view: my agent's tasks + tasks with no agent:* label (unowned).
     `--agent X` narrows to a specific agent. `--all` shows literally every task.
+    `--cycle` scopes to the active cycle (default), next cycle, the whole team
+    (`all`, cross-cycle + backlog), or the backlog only (`none`).
+    `--assignee EMAIL|me|none` filters by who the issue is assigned to.
     Tasks are sorted by priority, then due date (earliest first), then id.
+    Results are fully paginated — no silent truncation at Linear's 50-issue cap.
     """
-    filters = []
+    filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
+
+    # Cycle scope. active/next resolve to a concrete cycle id (and a header
+    # name); `all` drops the cycle filter; `none` lists the backlog.
+    scope = args.cycle
+    cycle_meta = None
+    if scope in ("active", "next"):
+        cycle_meta = resolve_cycle_meta(api_key, team_id, scope)
+        if not cycle_meta:
+            print(f"No {scope} cycle found.")
+            return
+        filters.append(f'cycle: {{ id: {{ eq: "{cycle_meta["id"]}" }} }}')
+        scope_label = cycle_meta["name"]
+    elif scope == "none":
+        filters.append("cycle: { null: true }")
+        scope_label = "Backlog (no cycle)"
+    else:  # "all"
+        scope_label = "All issues"
 
     # Resolve which agent filter to apply (if any). `--all` overrides config default.
     if args.all:
@@ -759,6 +855,21 @@ def list_tasks(args, cfg, api_key, team_id):
 
     if args.label and not explicit_agent:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
+
+    # Assignee filter: 'me' = API-key owner, 'none' = unassigned, else email.
+    assignee = getattr(args, "assignee", None)
+    if assignee:
+        if assignee.lower() == "none":
+            filters.append("assignee: { null: true }")
+        else:
+            if assignee.lower() == "me":
+                uid = get_viewer_id(api_key, cfg)
+            else:
+                uid = resolve_user_id_by_email(api_key, assignee)
+            if not uid:
+                print(f"Could not resolve assignee '{assignee}'.", file=sys.stderr)
+                return
+            filters.append(f'assignee: {{ id: {{ eq: "{uid}" }} }}')
 
     if getattr(args, "query", None):
         q = args.query.replace('"', '\\"')
@@ -784,38 +895,10 @@ def list_tasks(args, cfg, api_key, team_id):
         filters.append('state: { type: { nin: ["completed", "canceled"] } }')
 
     filter_str = ", ".join(filters)
-    if filter_str:
-        filter_str = f", {filter_str}"
 
-    cycle_field = "activeCycle" if args.cycle != "next" else "nextCycle"
-
-    query = f"""{{
-        team(id: "{team_id}") {{
-            {cycle_field} {{
-                name startsAt endsAt
-                issues(filter: {{
-                    team: {{ id: {{ eq: "{team_id}" }} }}
-                    {filter_str}
-                }}) {{
-                    nodes {{ {ISSUE_FIELDS} }}
-                }}
-            }}
-        }}
-    }}"""
-
-    data = gql(api_key, query)
-    if check_errors(data):
+    nodes = paginate_issues(api_key, filter_str)
+    if nodes is None:
         return
-
-    team = data.get("data", {}).get("team", {})
-    cycle = team.get(cycle_field)
-    if not cycle:
-        which = "active" if cycle_field == "activeCycle" else "next"
-        print(f"No {which} cycle found.")
-        return
-
-    nodes = cycle.get("issues", {}).get("nodes", [])
-    cycle_name = cycle.get("name", "Cycle")
 
     # Apply agent ownership filter client-side so "my tasks + unowned" is expressible.
     if explicit_agent:
@@ -833,21 +916,19 @@ def list_tasks(args, cfg, api_key, team_id):
 
         nodes = [n for n in nodes if match(n)]
 
+    nodes.sort(key=issue_sort_key)
+
     if args.json:
         print(json.dumps({
-            "cycle": {
-                "name": cycle_name,
-                "startsAt": cycle.get("startsAt"),
-                "endsAt": cycle.get("endsAt"),
-            },
+            "scope": scope,
+            "cycle": cycle_meta,
+            "count": len(nodes),
             "issues": nodes,
         }, indent=2))
         return
 
-    nodes.sort(key=issue_sort_key)
-
     if not nodes:
-        print(f"No matching tasks in {cycle_name}.")
+        print(f"No matching tasks in {scope_label}.")
         return
 
     header_note = ""
@@ -855,7 +936,7 @@ def list_tasks(args, cfg, api_key, team_id):
         owned = sum(1 for n in nodes if any(l["name"] == f"agent:{explicit_agent}" for l in n.get("labels", {}).get("nodes", [])))
         unowned = len(nodes) - owned
         header_note = f"  ({owned} yours, {unowned} unowned)"
-    print(f"{cycle_name} -- {len(nodes)} task(s){header_note}")
+    print(f"{scope_label} -- {len(nodes)} task(s){header_note}")
     print()
     for n in nodes:
         print(format_issue_row(n))
@@ -961,12 +1042,17 @@ def show_issue_detail(args, api_key, team_id):
             number: {{ eq: {number} }}
         }}) {{
             nodes {{
-                id identifier title description
+                id identifier title description url
                 state {{ name }}
-                priority
+                priority estimate dueDate
                 labels {{ nodes {{ name }} }}
                 assignee {{ name }}
+                project {{ name }}
+                cycle {{ name }}
+                parent {{ identifier title }}
                 createdAt updatedAt
+                relations {{ nodes {{ type relatedIssue {{ identifier title }} }} }}
+                inverseRelations {{ nodes {{ type issue {{ identifier title }} }} }}
                 comments {{ nodes {{ body createdAt user {{ name }} }} }}
             }}
         }}
@@ -996,6 +1082,33 @@ def show_issue_detail(args, api_key, team_id):
     print(f"  Priority: {pri}")
     print(f"  Labels:   {labels or '-'}")
     print(f"  Assignee: {assignee_name}")
+    if n.get("estimate") is not None:
+        print(f"  Estimate: {n['estimate']}")
+    if n.get("dueDate"):
+        print(f"  Due:      {n['dueDate']}")
+    if n.get("project"):
+        print(f"  Project:  {n['project']['name']}")
+    if n.get("cycle"):
+        print(f"  Cycle:    {n['cycle']['name']}")
+    if n.get("parent"):
+        print(f"  Parent:   {n['parent']['identifier']}  {n['parent']['title']}")
+    if n.get("url"):
+        print(f"  URL:      {n['url']}")
+
+    # Relations: forward edges (this blocks / relates to X) + inverse (X blocks this).
+    rel_lines = []
+    for r in (n.get("relations") or {}).get("nodes", []):
+        other = r.get("relatedIssue") or {}
+        verb = {"blocks": "Blocks", "related": "Related to", "duplicate": "Duplicate of"}.get(r.get("type"), r.get("type"))
+        rel_lines.append(f"  {verb}: {other.get('identifier', '?')}  {other.get('title', '')}")
+    for r in (n.get("inverseRelations") or {}).get("nodes", []):
+        other = r.get("issue") or {}
+        if r.get("type") == "blocks":
+            rel_lines.append(f"  Blocked by: {other.get('identifier', '?')}  {other.get('title', '')}")
+    if rel_lines:
+        print("  Relations:")
+        for line in rel_lines:
+            print(f"  {line}")
     print()
 
     desc = n.get("description", "")
@@ -1095,6 +1208,38 @@ def cmd_update(args, cfg, api_key, team_id):
         else:
             print("Status update failed.")
         did_something = True
+
+    # Issue relations. Linear models all of these as one relation with a
+    # direction: "A blocks B" is the same edge as "B blocked-by A", so
+    # --blocked-by just flips which side is the issueId. type is blocks|related.
+    rel_specs = []
+    for ident in (args.blocks or []):
+        rel_specs.append(("blocks", ident, "forward", "blocks"))
+    for ident in (args.blocked_by or []):
+        rel_specs.append(("blocked by", ident, "inverse", "blocks"))
+    for ident in (args.relates or []):
+        rel_specs.append(("related to", ident, "forward", "related"))
+    for verb, ident, direction, rel_type in rel_specs:
+        other = resolve_issue(api_key, team_id, ident)
+        if not other:
+            print(f"Related issue {ident} not found, skipping.", file=sys.stderr)
+            continue
+        if direction == "forward":
+            issue_id, related_id = issue["id"], other["id"]
+        else:
+            issue_id, related_id = other["id"], issue["id"]
+        rel_data = gql(api_key, """
+            mutation($input: IssueRelationCreateInput!) {
+                issueRelationCreate(input: $input) { success }
+            }
+        """, {"input": {"issueId": issue_id, "relatedIssueId": related_id, "type": rel_type}})
+        if check_errors(rel_data):
+            continue
+        if (rel_data.get("data") or {}).get("issueRelationCreate", {}).get("success"):
+            print(f"{args.identifier} {verb} {other['identifier']}")
+            did_something = True
+        else:
+            print(f"Failed to link {args.identifier} {verb} {ident}.", file=sys.stderr)
 
     # Labels (add via --label, remove via --unlabel)
     if args.label or args.unlabel:
@@ -1721,6 +1866,30 @@ def cmd_users(args, cfg, api_key, team_id):
         print(f"  {u['name']:25s}  {u.get('email') or '-'}")
 
 
+def cmd_states(args, cfg, api_key, team_id):
+    """List the team's workflow states — the valid values for --status / --done.
+
+    Without this, agents guess state names and only learn they were wrong when a
+    mutation fails. Bypasses the cfg cache so the list is always current.
+    """
+    fresh = {**cfg, "states": None}
+    states = get_states(api_key, team_id, fresh)
+    if not states:
+        return
+    # Order by workflow type, then name, so the progression reads top-to-bottom.
+    type_order = {"backlog": 0, "unstarted": 1, "started": 2, "completed": 3, "canceled": 4}
+    items = sorted(states.items(), key=lambda kv: (type_order.get(kv[1]["type"], 9), kv[0]))
+    if args.json:
+        print(json.dumps(
+            [{"name": name, "type": meta["type"], "id": meta["id"]} for name, meta in items],
+            indent=2,
+        ))
+        return
+    print(f"{len(items)} workflow state(s):")
+    for name, meta in items:
+        print(f"  {name:20s}  {meta['type']}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1748,7 +1917,12 @@ def main():
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
     p_tasks.add_argument("--label", help="Filter by any label")
     p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
-    p_tasks.add_argument("--cycle", default="active", choices=["active", "next"])
+    p_tasks.add_argument("--cycle", default="active",
+                         choices=["active", "next", "all", "none"],
+                         help="Scope: active cycle (default), next, all (whole "
+                              "team, cross-cycle + backlog), or none (backlog only)")
+    p_tasks.add_argument("--assignee",
+                         help="Filter by assignee: email, 'me', or 'none' (unassigned)")
     p_tasks.add_argument("--query", help="Search title + description (case-insensitive)")
     p_tasks.add_argument("--json", action="store_true", help="JSON output")
 
@@ -1787,6 +1961,12 @@ def main():
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
                           help="Move issue: active cycle, next cycle, or remove from cycle")
+    p_update.add_argument("--blocks", action="append",
+                          help="Mark this issue as blocking another (e.g. ANT-42). Repeatable.")
+    p_update.add_argument("--blocked-by", dest="blocked_by", action="append",
+                          help="Mark this issue as blocked by another (e.g. ANT-42). Repeatable.")
+    p_update.add_argument("--relates", action="append",
+                          help="Mark a non-blocking 'related' link to another issue. Repeatable.")
 
     # create
     p_create = sub.add_parser("create", help="Create a new issue")
@@ -1835,6 +2015,10 @@ def main():
     p_users = sub.add_parser("users", help="List assignable users")
     p_users.add_argument("--json", action="store_true", help="JSON output")
 
+    # states (workflow states for the team)
+    p_states = sub.add_parser("states", help="List the team's workflow states")
+    p_states.add_argument("--json", action="store_true", help="JSON output")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1882,6 +2066,8 @@ def main():
         cmd_labels(args, cfg, api_key, team_id)
     elif args.command == "users":
         cmd_users(args, cfg, api_key, team_id)
+    elif args.command == "states":
+        cmd_states(args, cfg, api_key, team_id)
 
 
 if __name__ == "__main__":
