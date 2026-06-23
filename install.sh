@@ -1,14 +1,16 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# POSIX sh (not bash): runs under dash too, so `sh install.sh` and
+# `curl ... | sh` both work — agents-cli's `cli install` invokes us via `sh`.
+set -eu
 
 REPO="phnx-labs/linear-cli"
 BRANCH="${LINEAR_CLI_BRANCH:-main}"
 URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/linear"
 
 pick_install_dir() {
-  if [[ -w "/usr/local/bin" ]]; then
+  if [ -w "/usr/local/bin" ]; then
     echo "/usr/local/bin"
-  elif [[ -w "/opt/homebrew/bin" ]]; then
+  elif [ -w "/opt/homebrew/bin" ]; then
     echo "/opt/homebrew/bin"
   else
     mkdir -p "$HOME/.local/bin"
