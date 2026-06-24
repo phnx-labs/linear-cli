@@ -33,7 +33,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
@@ -1103,8 +1103,10 @@ def show_issue_detail(args, api_key, team_id):
         rel_lines.append(f"  {verb}: {other.get('identifier', '?')}  {other.get('title', '')}")
     for r in (n.get("inverseRelations") or {}).get("nodes", []):
         other = r.get("issue") or {}
-        if r.get("type") == "blocks":
-            rel_lines.append(f"  Blocked by: {other.get('identifier', '?')}  {other.get('title', '')}")
+        # "related"/"duplicate" are symmetric, so they must render from the
+        # inverse side too; "blocks" inverts to "blocked by".
+        verb = {"blocks": "Blocked by", "related": "Related to", "duplicate": "Duplicate of"}.get(r.get("type"), r.get("type"))
+        rel_lines.append(f"  {verb}: {other.get('identifier', '?')}  {other.get('title', '')}")
     if rel_lines:
         print("  Relations:")
         for line in rel_lines:
