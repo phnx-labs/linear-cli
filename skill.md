@@ -32,9 +32,11 @@ truncated first page. Always search before creating, to avoid duplicates.
 ```
 linear tasks --status todo         # backlog | todo | progress | done | open
 linear tasks --label security      # by any label
-linear tasks --cycle active        # active (default) | next | all | none
+linear tasks --cycle active        # active (default) | next | all | none/backlog
 linear tasks --cycle all           # whole team: every cycle + backlog
 linear tasks --cycle none          # backlog only (issues in no cycle)
+linear tasks --cycle "Q2W11"       # a specific cycle by name, number, or id
+linear tasks --since 2026-06-01    # only issues created on/after a date
 linear tasks --assignee me         # by assignee: me | none | someone@x.com
 linear tasks --query "auth"        # search title + description
 linear tasks --json                # machine-readable
@@ -61,6 +63,35 @@ linear update ANT-42 --project none                               # detach
 Relations are read back in the detail view (`linear tasks ANT-42`) as
 Blocks / Blocked by / Related to. Use `--blocked-by` before picking up a task to
 record what it depends on.
+
+## Bulk update — one change, many tickets
+
+`update` accepts multiple identifiers, or reads them from stdin (xargs-style).
+Single-ticket invocations are unchanged; with 2+ ids you get `[i/n]` progress and
+an error roll-up at the end (one bad ticket never aborts the batch).
+
+```
+linear update ANT-1 ANT-2 ANT-3 --cycle none          # pull several out of the cycle
+linear update ANT-1 ANT-2 --label triage --priority high
+linear tasks --cycle all --json | jq -r '.issues[].identifier' \
+  | linear update --stdin --comment "swept into triage"
+```
+
+## Managing cycles and labels
+
+CRUD from the shell instead of dropping to raw GraphQL. Both resolve the target
+by fuzzy name, number, or UUID. `delete` archives (Linear has no hard delete).
+
+```
+linear cycles --ids                                   # list with UUIDs
+linear cycles create --name "Jul W1" --starts 2026-07-01 --ends 2026-07-07
+linear cycles update "Jul W1" --name "Jul Week 1"     # or --starts/--ends
+linear cycles delete "Jul Week 1"
+
+linear labels create triage --color "#ff8800" --description "needs triage"
+linear labels update triage --name needs-triage       # or --color/--description
+linear labels delete needs-triage
+```
 
 ## Creating issues — what's required
 
