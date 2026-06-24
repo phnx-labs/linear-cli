@@ -21,18 +21,27 @@ linear cycles                         # list cycles
 linear projects                       # list projects (with milestones via `linear projects "Name"`)
 linear labels                         # list available labels
 linear users                          # list assignable users
+linear states                         # the team's workflow states (valid --status values)
 ```
 
 ## Filters
 
+Lists are fully paginated — `linear tasks` returns the *whole* cycle/team, not a
+truncated first page. Always search before creating, to avoid duplicates.
+
 ```
 linear tasks --status todo         # backlog | todo | progress | done | open
 linear tasks --label security      # by any label
-linear tasks --cycle next          # active | next
+linear tasks --cycle active        # active (default) | next | all | none
+linear tasks --cycle all           # whole team: every cycle + backlog
+linear tasks --cycle none          # backlog only (issues in no cycle)
+linear tasks --assignee me         # by assignee: me | none | someone@x.com
 linear tasks --query "auth"        # search title + description
 linear tasks --json                # machine-readable
 linear tasks --all                 # ignore default agent filter
 ```
+
+If unsure of a status name, run `linear states` instead of guessing.
 
 ## Editing existing issues
 
@@ -43,9 +52,15 @@ linear update ANT-42 --priority urgent --assign someone@x.com
 linear update ANT-42 --title "Renamed" --description "Rewritten body"
 linear update ANT-42 --project "Phoenix" --milestone "v1.0"
 linear update ANT-42 --estimate 3 --parent ANT-10
+linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9            # relations
+linear update ANT-42 --relates ANT-5                              # non-blocking link
 linear update ANT-42 --label agent:codex --unlabel agent:claude   # hand off
 linear update ANT-42 --project none                               # detach
 ```
+
+Relations are read back in the detail view (`linear tasks ANT-42`) as
+Blocks / Blocked by / Related to. Use `--blocked-by` before picking up a task to
+record what it depends on.
 
 ## Creating issues — what's required
 
@@ -87,6 +102,7 @@ linear tasks --json | jq '.issues[] | {id: .identifier, title, state: .state.nam
 
 - `linear tasks` without flags returns issues assigned to the identity that owns the API key.
 - If `cfg.agent` is set at setup time (e.g. `claude`, `codex`), `linear tasks` additionally filters by a matching label — the "agent lane" pattern. Override with `--all`.
+- Default scope is the active cycle. Use `--cycle all` to search the whole team (e.g. before creating, to avoid duplicates), `--cycle none` for the backlog, or `--assignee <email>` to query someone else's queue.
 - `linear update <id> --pickup` = claim the task. Follow with `--done --proof` when shipped.
 
 ## Proof-of-completion

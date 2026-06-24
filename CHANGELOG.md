@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-24
+
+Closes the load-bearing read gaps for agent workflows. The headline is
+pagination: lists no longer silently truncate at Linear's 50-issue page cap —
+on a real cycle this surfaced 137 tasks where the old code showed 50, the exact
+cause of "search before you create" missing existing tickets and filing
+duplicates.
+
+### Added
+- Full pagination on every issue list (`tasks`, `--query`, `--board`) — follows
+  `pageInfo` to the end instead of stopping at the first 50 results
+- `tasks --cycle all` (whole team: every cycle + backlog) and `--cycle none`
+  (backlog only) — previously listing was locked to the active/next cycle
+- `tasks --assignee me|none|<email>` — filter by real assignee, not just the
+  `agent:` label lane
+- `linear states` — list the team's workflow states, so agents stop guessing
+  status names and learning they were wrong only when a mutation fails
+- `update --blocks`, `--blocked-by`, `--relates` (repeatable) — create issue
+  relations via `issueRelationCreate`
+- Detail view (`tasks ANT-N`) now shows relations (Blocks / Blocked by / Related
+  to / Duplicate of), plus project, cycle, parent, url, estimate, and due date
+
+### Changed
+- `tasks --json` shape: `{ scope, cycle, count, issues }` (the `issues` array is
+  unchanged; `cycle` is null for `all`/`none` scopes)
+- Detail-view query enriched — `--json` no longer drops project/cycle/parent/
+  url/estimate/dueDate/relations
+
 ## [0.2.0] - 2026-06-07
 
 Broad expansion of the create/update surface to cover the fields agents actually
