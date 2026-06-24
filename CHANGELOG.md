@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-23
+
+Finishes the shell-native management story for cycles and labels, completes the
+pagination sweep, and makes `update` a batch tool. Closes the remaining open
+issues (#3, #4, #5, #6, #7, #8).
+
+### Added
+- `cycles create|update|delete` — manage cycles from the shell instead of
+  dropping to raw GraphQL (`cycleCreate` / `cycleUpdate` / `cycleArchive`).
+  `cycles --ids` (and `--json`) surface the cycle UUIDs. (#4)
+- `labels create|update|delete` — label CRUD via `issueLabelCreate` /
+  `issueLabelUpdate` / `issueLabelDelete`, with fuzzy id-or-name resolution, for
+  cleaning up accidental/one-off labels. (#5)
+- `tasks --cycle <name|id>` — scope the list to any specific cycle by fuzzy name,
+  number, or UUID (on top of the existing `active|next|all|none`). `backlog` is
+  now an accepted alias for `none`. (#6)
+- `tasks --since YYYY-MM-DD` — floor the list to issues created on/after a date. (#6)
+- Bulk `update`: pass multiple identifiers (`update RUSH-1 RUSH-2 --cycle none`)
+  or pipe them with `--stdin` (`... | linear update --stdin --label x`). Per-issue
+  `[i/n]` progress, errors rolled up at the end (one bad ticket never aborts the
+  batch), single-ticket output unchanged. (#7)
+
+### Fixed
+- `tasks --board` no longer queries the non-existent `team.nextCycle` field —
+  `--board --cycle next` (and every board view) now resolves the cycle the same
+  way as the list view, so it returns results instead of a GraphQL error. (#3)
+- `tasks --board` is now fully paginated and accepts all cycle scopes; it
+  previously hit the old single-page `activeCycle.issues` path and silently
+  capped at 50. (#8)
+- Pagination now also covers `cycles`, `labels`, `users`, and `projects` (and
+  the label lookups used by `update`/`create`), via a shared `paginate_connection`
+  helper — no list silently truncates at Linear's default page size. (#8)
+
 ## [0.3.1] - 2026-06-24
 
 ### Fixed

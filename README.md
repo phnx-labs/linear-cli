@@ -59,6 +59,8 @@ linear tasks ANT-42                   # detail view
 linear tasks --query "auth refresh"  # search title + description
 linear tasks --cycle all             # whole team: every cycle + backlog
 linear tasks --cycle none            # the backlog (issues in no cycle)
+linear tasks --cycle "Q2W11"         # a specific cycle by name, number, or id
+linear tasks --since 2026-06-01      # only issues created on/after a date
 linear tasks --assignee me           # by assignee: me | none | someone@x.com
 linear tasks --json | jq             # machine-readable
 
@@ -70,6 +72,9 @@ linear update ANT-42 --title "Renamed"  --description "Rewritten body"
 linear update ANT-42 --project "Foo" --milestone "v1.0"
 linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9   # relations
 linear update ANT-42 --unlabel agent:claude --label agent:codex   # hand off
+linear update ANT-1 ANT-2 ANT-3 --cycle none             # bulk: many ids at once
+linear tasks --cycle all --json | jq -r '.issues[].identifier' \
+  | linear update --stdin --label triage                 # bulk via stdin (xargs-style)
 
 linear create "Fix auth bug" --label security --priority high
 linear create --description "Paragraph dump — title is derived from this."
@@ -80,9 +85,15 @@ linear create --from-file plan.jsonl  # bulk: one JSON object per line
 linear projects                       # list projects + progress
 linear projects "Phoenix"             # detail view with milestones
 linear labels                         # available labels
+linear labels create triage --color "#ff8800"            # label CRUD ...
+linear labels update triage --name needs-triage          # ... rename ...
+linear labels delete needs-triage                        # ... delete
 linear users                          # assignable users (for --assign lookup)
 linear states                         # the team's workflow states (valid --status values)
-linear cycles
+linear cycles                         # list cycles (add --ids for UUIDs)
+linear cycles create --name "Jul W1" --starts 2026-07-01 --ends 2026-07-07
+linear cycles update "Jul W1" --name "Jul Week 1"        # by name or id
+linear cycles delete "Jul Week 1"                        # archive a cycle
 
 linear --team ENG tasks               # one-shot override (multi-team workspace)
 ```
