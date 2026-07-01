@@ -21,6 +21,7 @@ linear cycles                         # list cycles
 linear projects                       # list projects (with milestones via `linear projects "Name"`)
 linear labels                         # list available labels
 linear users                          # list assignable users
+linear agents                         # agent members you can --delegate to (auto-detected)
 linear states                         # the team's workflow states (valid --status values)
 ```
 
@@ -56,7 +57,7 @@ linear update ANT-42 --project "Phoenix" --milestone "v1.0"
 linear update ANT-42 --estimate 3 --parent ANT-10
 linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9            # relations
 linear update ANT-42 --relates ANT-5                              # non-blocking link
-linear update ANT-42 --label agent:codex --unlabel agent:claude   # hand off
+linear update ANT-42 --delegate codex                             # hand to an agent (see: linear agents)
 linear update ANT-42 --project none                               # detach
 ```
 

@@ -71,7 +71,8 @@ linear update ANT-42 --priority urgent --assign someone@x.com
 linear update ANT-42 --title "Renamed"  --description "Rewritten body"
 linear update ANT-42 --project "Foo" --milestone "v1.0"
 linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9   # relations
-linear update ANT-42 --unlabel agent:claude --label agent:codex   # hand off
+linear update ANT-42 --delegate claude                   # hand to an agent (delegate)
+linear update ANT-42 --delegate none                     # clear the delegate
 linear update ANT-1 ANT-2 ANT-3 --cycle none             # bulk: many ids at once
 linear tasks --cycle all --json | jq -r '.issues[].identifier' \
   | linear update --stdin --label triage                 # bulk via stdin (xargs-style)
@@ -80,6 +81,7 @@ linear create "Fix auth bug" --label security --priority high
 linear create --description "Paragraph dump — title is derived from this."
 linear create "Sub-task" --parent ANT-42 --estimate 3
 linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
+linear create "Ship it" --delegate droid    # create + hand to an agent
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
 
 linear projects                       # list projects + progress
@@ -89,6 +91,8 @@ linear labels create triage --color "#ff8800"            # label CRUD ...
 linear labels update triage --name needs-triage          # ... rename ...
 linear labels delete needs-triage                        # ... delete
 linear users                          # assignable users (for --assign lookup)
+linear agents                         # agent members you can --delegate to (auto-detected)
+linear agents --refresh               # re-detect after installing/removing an agent app
 linear states                         # the team's workflow states (valid --status values)
 linear cycles                         # list cycles (add --ids for UUIDs)
 linear cycles create --name "Jul W1" --starts 2026-07-01 --ends 2026-07-07
@@ -202,6 +206,10 @@ If you want the MCP, use it. If you want a subagent to burn through 50 tickets w
 Yes. If your agent has its own Linear account (many teams provision one seat per agent — e.g. `claude@yourcompany.com`, `codex@yourcompany.com`), run `linear setup --api-key <agent's own key>` without `--agent`. Then `linear tasks` returns tickets assigned *directly to the agent's user*. No labels, no filtering — the assignee IS the lane.
 
 Use `--agent <label>` when you want multiple agents to share one Linear seat; skip it when each agent has its own. To query any assignee on demand, `linear tasks --assignee me|none|<email>`.
+
+### What about Linear's native agents (app users)?
+
+If you install agents as Linear **app** integrations (Settings → API → Applications, authorized with `actor=app`), they appear as first-class members. `linear agents` auto-detects them (cached, refreshed every 6h; `--refresh` to force). Hand work to one with `linear update <ID> --delegate <name>` — delegation is the supported path, since Linear silently ignores an app user set as a plain `assigneeId`. The human stays the assignee; the agent becomes the delegate.
 
 ### How do I rotate the API key?
 
