@@ -22,6 +22,12 @@ an agent (Linear silently ignores an app user in `assigneeId`).
   then sets `delegateId`. The human stays the assignee; the agent becomes the
   delegate.
 
+### Changed
+- Docs and the hero flow diagram (`assets/flow.svg`) now teach delegation instead
+  of the retired `agent:*` lane-label hand-off — `--label agent:foo` examples are
+  replaced with `--delegate <name>`; the diagram shows the ticket carrying both an
+  assignee (human) and a delegate (agent).
+
 ### Notes
 - Agent roster caching reuses the volatile-config guard, so `--team` overrides
   never persist another workspace's roster.
