@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img" aria-label="How a Linear ticket becomes a PR: a human files the ticket and stays the assignee, an agent picks it up by lane label and ships a PR plus proof, then the human reviews. linear-cli is the contract between them.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img" aria-label="How a Linear ticket becomes a PR: a human files the ticket, stays the assignee, and delegates it to an agent that implements and ships a PR plus proof, then the human reviews. linear-cli is the contract between them.">
   <defs>
     <radialGradient id="bgVignette" cx="50%" cy="42%" r="80%">
       <stop offset="0%"  stop-color="#0d0d0d"/>
@@ -101,7 +101,7 @@
 
   <text x="106" y="456" class="mono-sm-muted">$</text>
   <text x="124" y="456" class="mono-sm">linear create &quot;Fix auth bug&quot; \</text>
-  <text x="124" y="478" class="mono-sm-accent">    --label agent:claude</text>
+  <text x="124" y="478" class="mono-sm-accent">    --delegate claude</text>
 
   <!-- LINEAR TICKET CARD -->
   <g filter="url(#softShadow)">
@@ -131,11 +131,11 @@
   <text x="476" y="424" class="mono-sm-muted">assignee</text>
   <text x="558" y="424" class="mono-sm">dario</text>
 
-  <!-- labels row -->
-  <text x="476" y="446" class="mono-sm-muted">labels</text>
-  <text x="546" y="446" class="mono-sm-accent" filter="url(#limeGlow)">agent:claude</text>
-  <text x="652" y="446" class="mono-sm-muted">·</text>
-  <text x="664" y="446" class="mono-sm">Bug</text>
+  <!-- delegate row -->
+  <text x="476" y="446" class="mono-sm-muted">delegate</text>
+  <text x="558" y="446" class="mono-sm-accent" filter="url(#limeGlow)">claude</text>
+  <text x="622" y="446" class="mono-sm-muted">·</text>
+  <text x="634" y="446" class="mono-sm-muted">Bug</text>
 
   <text x="476" y="478" class="mono-faint">cycle: Q2W4 · 50 tasks</text>
 
@@ -154,7 +154,7 @@
   <text x="878" y="400" text-anchor="middle" class="cardtitle" style="font-size:18px; fill:#B6E84A;">C</text>
 
   <text x="918" y="388" class="mono-sm">claude</text>
-  <text x="918" y="406" class="mono-sm-muted">--agent claude · lane</text>
+  <text x="918" y="406" class="mono-sm-muted">delegate · linear agents</text>
 
   <text x="846" y="456" class="mono-sm-muted">$</text>
   <text x="864" y="456" class="mono-sm">linear update ANT-505 \</text>
@@ -243,8 +243,8 @@
   </g>
 
   <!-- footer notes -->
-  <text x="80" y="824" class="nodedesc">The agent never owns the ticket — it picks up by lane label, ships, and posts proof. The human stays accountable.</text>
-  <text x="80" y="848" class="nodedesc">Same flow whether the agent has its own Linear seat (assignee = agent) or shares yours (assignee = you, label = agent).</text>
+  <text x="80" y="824" class="nodedesc">The agent never owns the ticket — it's delegated the work, ships, and posts proof. The human stays the assignee, and accountable.</text>
+  <text x="80" y="848" class="nodedesc">Agents are Linear app members: the human is always the assignee, the agent the delegate. `linear agents` lists them; `--delegate` hands off.</text>
 
   <text x="1520" y="848" text-anchor="end" class="mono-faint">linear-cli · phnx-labs/linear-cli</text>
 </svg>

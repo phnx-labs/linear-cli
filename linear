@@ -16,6 +16,7 @@ Commands:
     projects            List projects / milestones
     labels              List / create / update / delete labels
     users               List assignable users
+    agents              List agent members you can --delegate to (auto-detected)
     states              List the team's workflow states
 
 Config: ~/.linear-cli/config.json
@@ -29,16 +30,21 @@ import mimetypes
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
 API_URL = "https://api.linear.app/graphql"
+
+# How long a cached agent roster stays fresh before an auto-refresh. Agent apps
+# (Claude, Codex, Kimi, …) are installed/removed rarely, so a periodic refresh
+# keeps `--delegate <name>` resolving without a per-call lookup.
+AGENTS_TTL_SECONDS = 6 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +253,60 @@ def resolve_user_id_by_email(api_key: str, email: str) -> str | None:
     if not nodes:
         return None
     return nodes[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Agent detection (Linear app users you can delegate to)
+# ---------------------------------------------------------------------------
+
+def get_agents(api_key: str, cfg: dict, force: bool = False) -> list[dict]:
+    """Return the workspace's agent members — Linear app users (Claude, Codex,
+    Kimi, Antigravity, Grok, Droid, …). Detected via the `app` user flag, cached
+    in config, and auto-refreshed every AGENTS_TTL_SECONDS so the roster tracks
+    apps installed/removed without a manual step. Pass force=True to refresh now.
+    """
+    cached = cfg.get("agents")
+    fetched = cfg.get("agentsFetchedAt")
+    if cached is not None and not force and fetched:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(fetched)).total_seconds()
+            if age < AGENTS_TTL_SECONDS:
+                return cached
+        except ValueError:
+            pass  # unparseable timestamp — fall through and refresh
+
+    data = gql(api_key, """
+        query {
+            users(filter: { app: { eq: true }, active: { eq: true } }, first: 100) {
+                nodes { id name }
+            }
+        }
+    """)
+    if check_errors(data):
+        return cached or []  # keep serving the stale roster on a transient error
+
+    nodes = (data.get("data") or {}).get("users", {}).get("nodes", []) or []
+    agents = sorted(
+        [{"id": n["id"], "name": n["name"]} for n in nodes],
+        key=lambda a: a["name"].lower(),
+    )
+    cfg["agents"] = agents
+    cfg["agentsFetchedAt"] = datetime.now(timezone.utc).isoformat()
+    save_config(cfg)
+    return agents
+
+
+def resolve_agent_id(api_key: str, cfg: dict, name: str) -> str | None:
+    """Resolve an agent name (e.g. 'claude') to its Linear user id, case- and
+    space-insensitive. On a cache miss, refreshes once — a freshly-installed
+    agent shouldn't have to wait out the TTL to be delegatable."""
+    want = name.strip().lower()
+    for force in (False, True):
+        for agent in get_agents(api_key, cfg, force=force):
+            if agent["name"].lower() == want:
+                return agent["id"]
+        # only bother with the forced refresh if the first pass missed
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1628,6 +1688,36 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True) -> bool:
             else:
                 print("Assign update failed.")
 
+    # Delegate: --delegate <agent-name> | none. Agents can't be plain assignees
+    # (Linear silently ignores an app user in assigneeId); delegation is the
+    # supported path — the human stays assignee, the agent becomes delegate.
+    if getattr(args, "delegate", None) is not None:
+        if args.delegate.lower() == "none":
+            delegate_id = None
+        else:
+            delegate_id = resolve_agent_id(api_key, cfg, args.delegate)
+            if not delegate_id:
+                names = ", ".join(a["name"] for a in get_agents(api_key, cfg)) or "none installed"
+                print(f"Warning: agent '{args.delegate}' not found. Available agents: {names}", file=sys.stderr)
+                delegate_id = ...
+
+        if delegate_id is not ...:
+            data = gql(api_key, """
+                mutation($id: String!, $delegateId: String) {
+                    issueUpdate(id: $id, input: { delegateId: $delegateId }) {
+                        success
+                        issue { identifier delegate { name } }
+                    }
+                }
+            """, {"id": issue["id"], "delegateId": delegate_id})
+            if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
+                i = data["data"]["issueUpdate"]["issue"]
+                dg = (i.get("delegate") or {}).get("name") or "no agent"
+                print(f"{i['identifier']} -> delegate: {dg}")
+                did_something = True
+            else:
+                print("Delegate update failed.")
+
     # Due date: --due-date YYYY-MM-DD | none
     if args.due_date is not None:
         due = parse_due_date(args.due_date)
@@ -1664,7 +1754,7 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True) -> bool:
         did_something = True
 
     if not did_something and single:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --title, --description, --due-date, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --delegate, --title, --description, --due-date, or --comment.")
     return did_something
 
 
@@ -1766,6 +1856,15 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     else:
         warn(f"--assign expects an email or 'none'; got '{assign_arg}'. Ignoring.")
 
+    delegate_arg = fields.get("delegate")
+    if delegate_arg and delegate_arg.lower() != "none":
+        did = resolve_agent_id(api_key, cfg, delegate_arg)
+        if did:
+            input_obj["delegateId"] = did
+        else:
+            names = ", ".join(a["name"] for a in get_agents(api_key, cfg)) or "none installed"
+            warn(f"agent '{delegate_arg}' not found; creating without delegate. Available: {names}")
+
     label_names = fields.get("label") or []
     if isinstance(label_names, str):
         label_names = [label_names]
@@ -1788,7 +1887,7 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
         mutation($input: IssueCreateInput!) {
             issueCreate(input: $input) {
                 success
-                issue { identifier title state { name } cycle { name } assignee { name } }
+                issue { identifier title state { name } cycle { name } assignee { name } delegate { name } }
             }
         }
     """, {"input": input_obj})
@@ -1816,6 +1915,7 @@ def cmd_create(args, cfg, api_key, team_id):
         "status": args.status,
         "cycle": args.cycle,
         "assign": args.assign,
+        "delegate": args.delegate,
         "due_date": args.due_date,
         "label": args.label or [],
     }
@@ -1829,7 +1929,9 @@ def cmd_create(args, cfg, api_key, team_id):
         return
     cyc = (issue.get("cycle") or {}).get("name") or "no cycle"
     asg = (issue.get("assignee") or {}).get("name") or "unassigned"
-    print(f"Created {issue['identifier']}: {issue['title']}  [{cyc} | {asg}]")
+    dg = (issue.get("delegate") or {}).get("name")
+    meta = f"{cyc} | {asg}" + (f" | delegate: {dg}" if dg else "")
+    print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
 
 
 def _bulk_create(path: str, cfg, api_key, team_id):
@@ -2211,6 +2313,26 @@ def cmd_states(args, cfg, api_key, team_id):
         print(f"  {name:20s}  {meta['type']}")
 
 
+def cmd_agents(args, cfg, api_key, team_id):
+    """List the workspace's agent members — the app users you can `--delegate` to.
+
+    Auto-detected from Linear (the `app` user flag), cached, and refreshed every
+    6h. `--refresh` forces an immediate re-fetch — run it after installing or
+    removing an agent app so the roster (and `--delegate <name>`) stays current.
+    """
+    agents = get_agents(api_key, cfg, force=args.refresh)
+    if args.json:
+        print(json.dumps(agents, indent=2))
+        return
+    if not agents:
+        print("No agent members found. Install agent apps in Linear "
+              "(Settings -> API -> Applications), then: linear agents --refresh")
+        return
+    print(f"{len(agents)} agent(s)  (auto-refreshes every 6h; --refresh to force):")
+    for a in agents:
+        print(f"  {a['name']:20s}  delegate: linear update <ID> --delegate {a['name'].lower()}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2271,6 +2393,9 @@ def main():
                           help="urgent, high, medium, low, or none")
     p_update.add_argument("--assign", default=None,
                           help="Reassign: email address, or 'none' to unassign")
+    p_update.add_argument("--delegate", default=None,
+                          help="Delegate to an agent by name (e.g. --delegate claude); "
+                               "'none' to clear. See: linear agents")
     p_update.add_argument("--estimate", type=int, default=None,
                           help="Story-point estimate (integer)")
     p_update.add_argument("--parent", default=None,
@@ -2313,6 +2438,8 @@ def main():
                           help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
                           help="Assignee: email address, or 'none' (default: API key owner)")
+    p_create.add_argument("--delegate", default=None,
+                          help="Delegate the new issue to an agent by name (e.g. --delegate claude)")
     p_create.add_argument("--estimate", type=int, default=None,
                           help="Story-point estimate (integer)")
     p_create.add_argument("--from-file", dest="from_file", default=None,
@@ -2367,6 +2494,12 @@ def main():
     p_users = sub.add_parser("users", help="List assignable users")
     p_users.add_argument("--json", action="store_true", help="JSON output")
 
+    # agents (app users you can delegate to; auto-detected + cached)
+    p_agents = sub.add_parser("agents", help="List agent members you can --delegate to")
+    p_agents.add_argument("--refresh", action="store_true",
+                          help="Force an immediate re-fetch (after installing/removing an agent app)")
+    p_agents.add_argument("--json", action="store_true", help="JSON output")
+
     # states (workflow states for the team)
     p_states = sub.add_parser("states", help="List the team's workflow states")
     p_states.add_argument("--json", action="store_true", help="JSON output")
@@ -2418,6 +2551,8 @@ def main():
         cmd_labels(args, cfg, api_key, team_id)
     elif args.command == "users":
         cmd_users(args, cfg, api_key, team_id)
+    elif args.command == "agents":
+        cmd_agents(args, cfg, api_key, team_id)
     elif args.command == "states":
         cmd_states(args, cfg, api_key, team_id)
 

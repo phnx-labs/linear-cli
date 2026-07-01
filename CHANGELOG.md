@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-01
+
+Makes the CLI aware of Linear's agent members (app users like Claude, Codex,
+Kimi, …) and adds first-class delegation — the supported way to hand an issue to
+an agent (Linear silently ignores an app user in `assigneeId`).
+
+### Added
+- `agents` — list the workspace's agent members, auto-detected via the Linear
+  `app` user flag. The roster is cached in config and auto-refreshed every 6h;
+  `agents --refresh` forces an immediate re-fetch after installing/removing an
+  agent app. `--json` for scripting.
+- `update --delegate <name>` and `create --delegate <name>` — delegate an issue
+  to an agent by name (case-insensitive, e.g. `--delegate claude`), or `none` to
+  clear. Resolves the name against the cached roster (refreshing once on a miss),
+  then sets `delegateId`. The human stays the assignee; the agent becomes the
+  delegate.
+
+### Changed
+- Docs and the hero flow diagram (`assets/flow.svg`) now teach delegation instead
+  of the retired `agent:*` lane-label hand-off — `--label agent:foo` examples are
+  replaced with `--delegate <name>`; the diagram shows the ticket carrying both an
+  assignee (human) and a delegate (agent).
+
+### Notes
+- Agent roster caching reuses the volatile-config guard, so `--team` overrides
+  never persist another workspace's roster.
+
 ## [0.4.0] - 2026-06-23
 
 Finishes the shell-native management story for cycles and labels, completes the
