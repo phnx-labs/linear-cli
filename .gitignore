@@ -5,3 +5,4 @@ __pycache__/
 demo/node_modules/
 demo/out/
 demo/dist/
+.agents/worktrees/
