@@ -67,7 +67,7 @@ linear tasks --json | jq             # machine-readable
 linear update ANT-42 --pickup         # claim (In Progress)
 linear update ANT-42 --comment "..."  # progress note
 linear update ANT-42 --done --proof https://pr/123 --proof "deployed"
-linear update ANT-42 --priority urgent --assign someone@x.com
+linear update ANT-42 --priority urgent --assign bisma      # human by name or email
 linear update ANT-42 --title "Renamed"  --description "Rewritten body"
 linear update ANT-42 --project "Foo" --milestone "v1.0"
 linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9   # relations
@@ -97,7 +97,7 @@ linear labels                         # available labels
 linear labels create triage --color "#ff8800"            # label CRUD ...
 linear labels update triage --name needs-triage          # ... rename ...
 linear labels delete needs-triage                        # ... delete
-linear users                          # assignable users (for --assign lookup)
+linear users                          # humans (--assign) + agents (--delegate), grouped
 linear agents                         # agent members you can --delegate to (auto-detected)
 linear agents --refresh               # re-detect after installing/removing an agent app
 linear states                         # the team's workflow states (valid --status values)

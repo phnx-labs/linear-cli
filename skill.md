@@ -21,7 +21,7 @@ linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
 linear milestones list "Name"         # a project's milestones
 linear labels                         # list available labels
-linear users                          # list assignable users
+linear users                          # humans (--assign) + agents (--delegate), grouped
 linear agents                         # agent members you can --delegate to (auto-detected)
 linear states                         # the team's workflow states (valid --status values)
 ```
@@ -52,7 +52,7 @@ If unsure of a status name, run `linear states` instead of guessing.
 Everything you can set on `create` can be changed on `update` with the same flag. Examples:
 
 ```
-linear update ANT-42 --priority urgent --assign someone@x.com
+linear update ANT-42 --priority urgent --assign bisma        # human by name or email
 linear update ANT-42 --title "Renamed" --description "Rewritten body"
 linear update ANT-42 --project "Phoenix" --milestone "v1.0"
 linear update ANT-42 --parent ANT-10             # nest under a parent (prints a tip)

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-07
+
+Brings the human side to parity with the agent side: humans are assignable by
+name just as agents are delegatable by name, and `users` no longer buries the
+two people among the app users.
+
+### Changed
+- `users` now **groups** its output into **Humans** (assign with `--assign`) and
+  **Agents** (delegate with `--delegate`), using Linear's `app` user flag — the
+  same flag `agents` uses. No more mixing real people with OAuth app users.
+  `--json` still emits the flat list, now including the `app` field per user.
+- `--assign` (on `create` and `update`) accepts a **human's name or displayName**
+  (case-insensitive), not just an email — so `--assign bisma` works like
+  `--delegate claude`. Email and `none` still work. Agents (app users) are
+  excluded from name resolution on purpose: an unmatched name warns and points at
+  `linear users`, steering agent hand-offs to `--delegate`.
+
 ## [0.8.0] - 2026-07-07
 
 Trims the issue surface to what this workspace actually uses, and discourages
