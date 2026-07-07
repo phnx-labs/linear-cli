@@ -13,7 +13,8 @@ Commands:
                         bulk via multiple ids or --stdin
     create              Create a new issue
     cycles              List / create / update / delete cycles
-    projects            List projects / milestones
+    projects            List / show / create / archive / delete projects
+    milestones          List / create / move / retarget / delete milestones
     labels              List / create / update / delete labels
     users               List assignable users
     agents              List agent members you can --delegate to (auto-detected)
@@ -25,6 +26,7 @@ Config: ~/.linear-cli/config.json
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import mimetypes
 import os
@@ -35,7 +37,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
+
+# Sentinel for "flag not supplied" — distinct from None, which means an explicit
+# clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
+# the result down without re-deriving whether the flag was present.
+_UNSET = object()
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
@@ -373,7 +380,7 @@ def list_team_projects(api_key: str, team_id: str) -> list[dict]:
             projects(first: 100, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
-                    id name state progress
+                    id name state progress scope
                     startDate targetDate updatedAt
                     lead { name }
                 }
@@ -387,9 +394,26 @@ def list_team_projects(api_key: str, team_id: str) -> list[dict]:
     return projects
 
 
-def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
-    """Resolve --project to a projectId. Accepts UUID or name. On ambiguity,
-    picks the most-recently-active match and warns to stderr."""
+def _suggest(value: str, names: list[str]) -> str:
+    """A ' Did you mean: a, b?' hint for a name that didn't resolve — fuzzy
+    close-matches first, then substring, so a typo or partial name is actionable
+    instead of a dead end."""
+    close = difflib.get_close_matches(value, names, n=3, cutoff=0.5)
+    if not close:
+        close = [n for n in names if value.lower() in n.lower()][:3]
+    return f" Did you mean: {', '.join(close)}?" if close else ""
+
+
+def resolve_project_id(api_key: str, team_id: str, value: str,
+                       strict: bool = False) -> str | None:
+    """Resolve --project to a projectId. Accepts UUID or name (exact match
+    preferred, then substring). On ambiguity, picks the most-recently-active
+    match and notes it to stderr.
+
+    On no match: when strict, raise LookupError with close-match suggestions so
+    the caller aborts instead of silently proceeding — a mistyped or not-yet-
+    created project must never no-op an issue create/update (RUSH-1496). When
+    not strict, warn to stderr and return None."""
     if not value:
         return None
     # Looks like a UUID? Pass through.
@@ -401,7 +425,10 @@ def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
         # Substring fallback so 'phoenix' matches 'Phoenix Horizon'.
         matches = [p for p in projects if value.lower() in p["name"].lower()]
     if not matches:
-        print(f"Warning: project '{value}' not found; skipping.", file=sys.stderr)
+        msg = f"project '{value}' not found.{_suggest(value, [p['name'] for p in projects])}"
+        if strict:
+            raise LookupError(msg)
+        print(f"Warning: {msg} Skipping.", file=sys.stderr)
         return None
     if len(matches) > 1:
         print(f"Note: '{value}' matched {len(matches)} projects; "
@@ -410,10 +437,15 @@ def resolve_project_id(api_key: str, team_id: str, value: str) -> str | None:
 
 
 def resolve_milestone_id(api_key: str, team_id: str, name: str,
-                         project_id: str | None) -> str | None:
+                         project_id: str | None,
+                         strict: bool = False) -> str | None:
     """Resolve --milestone to a projectMilestoneId. If project_id is given,
     look only there. Else search all team projects and pick the
-    most-recently-updated match. Returns None and warns on no match."""
+    most-recently-updated match.
+
+    On no match: when strict, raise LookupError with suggestions (so a batch
+    aborts rather than silently dropping the milestone); else warn and return
+    None."""
     if not name:
         return None
     if len(name) == 36 and name.count("-") == 4:
@@ -459,7 +491,10 @@ def resolve_milestone_id(api_key: str, team_id: str, name: str,
     if not matches:
         matches = [m for m in nodes if name.lower() in m["name"].lower()]
     if not matches:
-        print(f"Warning: milestone '{name}' not found; skipping.", file=sys.stderr)
+        msg = f"milestone '{name}' not found.{_suggest(name, [m['name'] for m in nodes])}"
+        if strict:
+            raise LookupError(msg)
+        print(f"Warning: {msg} Skipping.", file=sys.stderr)
         return None
     matches.sort(key=lambda m: m.get("updatedAt") or "", reverse=True)
     if len(matches) > 1:
@@ -955,6 +990,20 @@ def cycle_date_to_iso(value: str, flag: str) -> str:
     return f"{v}T00:00:00.000Z"
 
 
+def parse_timeless_date(value: str, flag: str) -> str | None:
+    """Project/milestone start/target dates are Linear TimelessDate — a bare
+    YYYY-MM-DD, no time or zone. 'none'/'' clears (returns None). Exits on a
+    malformed date so a typo can't be sent as-is."""
+    v = str(value or "").strip()
+    if v.lower() in ("", "none"):
+        return None
+    try:
+        date.fromisoformat(v[:10])
+    except ValueError:
+        raise SystemExit(f"Invalid {flag} '{value}'. Use YYYY-MM-DD (e.g. 2026-06-10).")
+    return v[:10]
+
+
 # ---------------------------------------------------------------------------
 # setup
 # ---------------------------------------------------------------------------
@@ -1372,12 +1421,31 @@ def cmd_update(args, cfg, api_key, team_id):
         print("No issue identifier given.", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve --project / --milestone ONCE, up front and strictly. An unknown
+    # name aborts the whole run with a non-zero exit instead of silently no-op'ing
+    # every issue in a batch while reporting success (RUSH-1496); resolving once
+    # also avoids a per-issue project lookup on bulk updates.
+    project_id = _UNSET
+    milestone_id = _UNSET
+    try:
+        if args.project is not None:
+            project_id = (None if args.project.lower() == "none"
+                          else resolve_project_id(api_key, team_id, args.project, strict=True))
+        if args.milestone is not None:
+            scope = project_id if project_id not in (_UNSET, None) else None
+            milestone_id = (None if args.milestone.lower() == "none"
+                            else resolve_milestone_id(api_key, team_id, args.milestone, scope, strict=True))
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     if len(identifiers) == 1:
         issue = resolve_issue(api_key, team_id, identifiers[0])
         if not issue:
             print(f"Issue {identifiers[0]} not found.")
             sys.exit(1)
-        ok = _apply_update(args, cfg, api_key, team_id, issue, single=True)
+        ok = _apply_update(args, cfg, api_key, team_id, issue, single=True,
+                           project_id=project_id, milestone_id=milestone_id)
         if not ok:
             sys.exit(1)
         return
@@ -1393,7 +1461,8 @@ def cmd_update(args, cfg, api_key, team_id):
             continue
         print(f"[{i}/{total}] {issue['identifier']}")
         try:
-            if _apply_update(args, cfg, api_key, team_id, issue, single=False):
+            if _apply_update(args, cfg, api_key, team_id, issue, single=False,
+                             project_id=project_id, milestone_id=milestone_id):
                 succeeded += 1
             else:
                 failed.append(ident)
@@ -1410,11 +1479,16 @@ def cmd_update(args, cfg, api_key, team_id):
         sys.exit(1)
 
 
-def _apply_update(args, cfg, api_key, team_id, issue, single=True) -> bool:
+def _apply_update(args, cfg, api_key, team_id, issue, single=True,
+                  project_id=_UNSET, milestone_id=_UNSET) -> bool:
     """Apply every requested change to one resolved issue. Returns True if at
     least one change was made. Never mutates `args` (so it is safe to call in a
     loop) and never calls sys.exit (so a failure on one issue can be rolled up
-    by the bulk caller). Hard per-issue failures return False."""
+    by the bulk caller). Hard per-issue failures return False.
+
+    project_id / milestone_id are pre-resolved once by cmd_update: _UNSET means
+    the flag was absent (leave the field alone), None means clear it, a string
+    means set it."""
     identifier = issue.get("identifier") or args.identifier
     did_something = False
 
@@ -1618,21 +1692,11 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True) -> bool:
                 title_desc_input["parentId"] = parent_issue["id"]
             else:
                 print(f"Warning: parent '{args.parent}' not found; skipping.", file=sys.stderr)
-    update_project_id = None
-    if args.project is not None:
-        if args.project.lower() == "none":
-            title_desc_input["projectId"] = None
-        else:
-            update_project_id = resolve_project_id(api_key, team_id, args.project)
-            if update_project_id:
-                title_desc_input["projectId"] = update_project_id
-    if args.milestone is not None:
-        if args.milestone.lower() == "none":
-            title_desc_input["projectMilestoneId"] = None
-        else:
-            mid = resolve_milestone_id(api_key, team_id, args.milestone, update_project_id)
-            if mid:
-                title_desc_input["projectMilestoneId"] = mid
+    # project_id / milestone_id are pre-resolved (strictly) by cmd_update.
+    if project_id is not _UNSET:
+        title_desc_input["projectId"] = project_id
+    if milestone_id is not _UNSET:
+        title_desc_input["projectMilestoneId"] = milestone_id
     if title_desc_input:
         data = gql(api_key, """
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1822,16 +1886,22 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
         else:
             warn(f"parent '{fields['parent']}' not found; creating without parent.")
 
+    # A named --project/--milestone that doesn't resolve is a hard error: creating
+    # the issue without it would silently ignore what the user asked for (RUSH-1496).
     project_id = None
     if fields.get("project"):
-        project_id = resolve_project_id(api_key, team_id, fields["project"])
-        if project_id:
-            input_obj["projectId"] = project_id
+        try:
+            project_id = resolve_project_id(api_key, team_id, fields["project"], strict=True)
+        except LookupError as e:
+            return None, str(e)
+        input_obj["projectId"] = project_id
 
     if fields.get("milestone"):
-        mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id)
-        if mid:
-            input_obj["projectMilestoneId"] = mid
+        try:
+            mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id, strict=True)
+        except LookupError as e:
+            return None, str(e)
+        input_obj["projectMilestoneId"] = mid
 
     desired_status = fields.get("status")
     if not desired_status:
@@ -2128,62 +2198,322 @@ def _cycle_delete(args, api_key, team_id):
 # ---------------------------------------------------------------------------
 
 def cmd_projects(args, cfg, api_key, team_id):
-    """List projects, or show one project's detail with its milestones."""
+    """List projects (default), show one's detail + milestones, or create /
+    archive / delete a project."""
+    action = getattr(args, "projects_action", None)
+    if action == "create":
+        return _project_create(args, api_key, team_id)
+    if action in ("archive", "delete"):
+        return _project_delete(args, api_key, team_id)
+    if action == "show":
+        return _project_show(args, api_key, team_id)
+
     projects = list_team_projects(api_key, team_id)
     if not projects:
         print("No projects found.")
         return
-
-    if args.name:
-        matches = [p for p in projects if args.name.lower() in p["name"].lower()]
-        if not matches:
-            print(f"No project matching '{args.name}'.")
-            return
-        p = matches[0]
-        data = gql(api_key, """
-            query($id: String!) {
-                project(id: $id) {
-                    name state progress
-                    description
-                    startDate targetDate
-                    lead { name email }
-                    projectMilestones(first: 50) {
-                        nodes { name description targetDate sortOrder }
-                    }
-                }
-            }
-        """, {"id": p["id"]})
-        if check_errors(data):
-            return
-        proj = (data.get("data") or {}).get("project") or {}
-        if args.json:
-            print(json.dumps(proj, indent=2))
-            return
-        lead = (proj.get("lead") or {}).get("name") or "-"
-        print(f"{proj['name']}")
-        print(f"  State:    {proj.get('state', '-')}")
-        print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
-        print(f"  Lead:     {lead}")
-        print(f"  Target:   {proj.get('targetDate') or '-'}")
-        milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
-        if milestones:
-            milestones.sort(key=lambda m: m.get("sortOrder") or 0)
-            print(f"\nMilestones ({len(milestones)}):")
-            for m in milestones:
-                tgt = m.get("targetDate") or "-"
-                print(f"  - {m['name']:30s}  target: {tgt}")
-        return
-
     if args.json:
         print(json.dumps(projects, indent=2))
         return
-
     print(f"{len(projects)} project(s):")
     for p in projects:
         progress = int((p.get("progress") or 0) * 100)
         state = p.get("state") or "-"
         lead = (p.get("lead") or {}).get("name") or "-"
-        print(f"  {p['name']:40s}  {state:12s}  {progress:>3}%  lead: {lead}")
+        count = int(p.get("scope") or 0)
+        print(f"  {p['name']:40s}  {state:12s}  {progress:>3}%  "
+              f"{count:>4} issue(s)  lead: {lead}")
+
+
+def _project_show(args, api_key, team_id):
+    """Detail view for one project. Accepts a UUID (queried directly) or a name
+    with exact match preferred over substring, so 'Rush' stays addressable once
+    'Rush App' / 'Rush CLI' also exist (RUSH-1497)."""
+    value = args.name
+    if len(value) == 36 and value.count("-") == 4:
+        proj_id = value
+    else:
+        projects = list_team_projects(api_key, team_id)
+        matches = [p for p in projects if p["name"].lower() == value.lower()]
+        if not matches:
+            matches = [p for p in projects if value.lower() in p["name"].lower()]
+        if not matches:
+            print(f"No project matching '{value}'.{_suggest(value, [p['name'] for p in projects])}")
+            return
+        if len(matches) > 1:
+            print(f"Note: '{value}' matched {len(matches)} projects; "
+                  f"showing '{matches[0]['name']}'. Use the exact name or id to disambiguate.",
+                  file=sys.stderr)
+        proj_id = matches[0]["id"]
+
+    data = gql(api_key, """
+        query($id: String!) {
+            project(id: $id) {
+                id name state progress scope
+                description
+                startDate targetDate
+                lead { name email }
+                projectMilestones(first: 50) {
+                    nodes { id name description targetDate sortOrder }
+                }
+            }
+        }
+    """, {"id": proj_id})
+    if check_errors(data):
+        return
+    proj = (data.get("data") or {}).get("project") or {}
+    if not proj:
+        print(f"No project with id '{proj_id}'.")
+        return
+    if args.json:
+        print(json.dumps(proj, indent=2))
+        return
+    lead = (proj.get("lead") or {}).get("name") or "-"
+    count = int(proj.get("scope") or 0)
+    print(f"{proj['name']}")
+    print(f"  State:    {proj.get('state', '-')}")
+    print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
+    print(f"  Issues:   {count}")
+    print(f"  Lead:     {lead}")
+    print(f"  Start:    {proj.get('startDate') or '-'}")
+    print(f"  Target:   {proj.get('targetDate') or '-'}")
+    print(f"  ID:       {proj.get('id')}")
+    milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
+    if milestones:
+        milestones.sort(key=lambda m: m.get("sortOrder") or 0)
+        print(f"\nMilestones ({len(milestones)}):")
+        for m in milestones:
+            tgt = m.get("targetDate") or "-"
+            print(f"  - {m['name']:30s}  target: {tgt}")
+
+
+def _project_create(args, api_key, team_id):
+    """Create a project on the current team. Lead is resolved by email; start /
+    target are TimelessDates (YYYY-MM-DD)."""
+    input_obj = {"teamIds": [team_id], "name": args.name}
+    if args.description is not None:
+        input_obj["description"] = args.description
+    if args.lead is not None:
+        lead_id = resolve_user_id_by_email(api_key, args.lead.strip())
+        if not lead_id:
+            print(f"Lead '{args.lead}' not found (pass an email).", file=sys.stderr)
+            sys.exit(1)
+        input_obj["leadId"] = lead_id
+    start = parse_timeless_date(args.start, "--start")
+    if start:
+        input_obj["startDate"] = start
+    target = parse_timeless_date(args.target, "--target")
+    if target:
+        input_obj["targetDate"] = target
+    data = gql(api_key, """
+        mutation($input: ProjectCreateInput!) {
+            projectCreate(input: $input) {
+                success
+                project { id name url }
+            }
+        }
+    """, {"input": input_obj})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("projectCreate") or {}
+    if not result.get("success"):
+        print("Project create failed.", file=sys.stderr)
+        sys.exit(1)
+    p = result["project"]
+    print(f"Created project '{p['name']}'  ({p['id']})")
+    if p.get("url"):
+        print(f"  {p['url']}")
+
+
+def _project_delete(args, api_key, team_id):
+    """Remove a project via projectDelete, which moves it to the workspace trash
+    (recoverable in Linear's UI for ~30 days). Linear exposes no distinct
+    'archive' mutation for projects, so `archive` and `delete` are the same
+    operation — both trash the project."""
+    try:
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        mutation($id: String!) { projectDelete(id: $id) { success } }
+    """, {"id": pid})
+    if check_errors(data) or not (data.get("data") or {}).get("projectDelete", {}).get("success"):
+        print("Project remove failed.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Removed project '{args.project}' (moved to trash; recoverable in Linear's UI).")
+
+
+def cmd_milestones(args, cfg, api_key, team_id):
+    """Manage project milestones: list, create, move, set-target-date, delete."""
+    action = getattr(args, "milestones_action", None)
+    if action == "create":
+        return _milestone_create(args, api_key, team_id)
+    if action == "move":
+        return _milestone_move(args, api_key, team_id)
+    if action == "set-target-date":
+        return _milestone_set_target(args, api_key, team_id)
+    if action == "delete":
+        return _milestone_delete(args, api_key, team_id)
+    return _milestone_list(args, api_key, team_id)
+
+
+def _milestone_list(args, api_key, team_id):
+    """List a project's milestones (sorted by sortOrder)."""
+    try:
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        query($id: String!) {
+            project(id: $id) {
+                name
+                projectMilestones(first: 100) {
+                    nodes { id name description targetDate sortOrder }
+                }
+            }
+        }
+    """, {"id": pid})
+    if check_errors(data):
+        return
+    proj = (data.get("data") or {}).get("project") or {}
+    nodes = (proj.get("projectMilestones") or {}).get("nodes", [])
+    nodes.sort(key=lambda m: m.get("sortOrder") or 0)
+    if args.json:
+        print(json.dumps(nodes, indent=2))
+        return
+    if not nodes:
+        print(f"No milestones in '{proj.get('name', args.project)}'.")
+        return
+    print(f"{len(nodes)} milestone(s) in '{proj.get('name', args.project)}':")
+    for m in nodes:
+        tgt = m.get("targetDate") or "-"
+        print(f"  {m['name']:30s}  target: {tgt:12s}  {m['id']}")
+
+
+def _milestone_create(args, api_key, team_id):
+    try:
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    input_obj = {"projectId": pid, "name": args.name}
+    target = parse_timeless_date(args.target, "--target")
+    if target:
+        input_obj["targetDate"] = target
+    if args.description is not None:
+        input_obj["description"] = args.description
+    data = gql(api_key, """
+        mutation($input: ProjectMilestoneCreateInput!) {
+            projectMilestoneCreate(input: $input) {
+                success
+                projectMilestone { id name targetDate }
+            }
+        }
+    """, {"input": input_obj})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("projectMilestoneCreate") or {}
+    if not result.get("success"):
+        print("Milestone create failed.", file=sys.stderr)
+        sys.exit(1)
+    m = result["projectMilestone"]
+    tgt = m.get("targetDate") or "no target"
+    print(f"Created milestone '{m['name']}'  (target: {tgt})  ({m['id']})")
+
+
+def _milestone_move(args, api_key, team_id):
+    """Move a milestone to another project via projectMilestoneUpdate(projectId)."""
+    src = None
+    if getattr(args, "from_project", None):
+        try:
+            src = resolve_project_id(api_key, team_id, args.from_project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        mid = resolve_milestone_id(api_key, team_id, args.milestone, src, strict=True)
+        dest = resolve_project_id(api_key, team_id, args.to, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        mutation($id: String!, $input: ProjectMilestoneUpdateInput!) {
+            projectMilestoneUpdate(id: $id, input: $input) {
+                success
+                projectMilestone { id name project { name } }
+            }
+        }
+    """, {"id": mid, "input": {"projectId": dest}})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("projectMilestoneUpdate") or {}
+    if not result.get("success"):
+        print("Milestone move failed.", file=sys.stderr)
+        sys.exit(1)
+    m = result["projectMilestone"]
+    proj = (m.get("project") or {}).get("name") or args.to
+    print(f"Moved milestone '{m['name']}' -> project '{proj}'.")
+
+
+def _milestone_set_target(args, api_key, team_id):
+    """Set (or clear, with 'none') a milestone's target date — the reliable path
+    that the web date-picker fought during the reorg (RUSH-1495)."""
+    scope = None
+    if getattr(args, "project", None):
+        try:
+            scope = resolve_project_id(api_key, team_id, args.project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        mid = resolve_milestone_id(api_key, team_id, args.milestone, scope, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    target = parse_timeless_date(args.date, "target date")  # None when 'none'
+    data = gql(api_key, """
+        mutation($id: String!, $input: ProjectMilestoneUpdateInput!) {
+            projectMilestoneUpdate(id: $id, input: $input) {
+                success
+                projectMilestone { id name targetDate }
+            }
+        }
+    """, {"id": mid, "input": {"targetDate": target}})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("projectMilestoneUpdate") or {}
+    if not result.get("success"):
+        print("Set target date failed.", file=sys.stderr)
+        sys.exit(1)
+    m = result["projectMilestone"]
+    print(f"Set '{m['name']}' target date -> {m.get('targetDate') or 'cleared'}.")
+
+
+def _milestone_delete(args, api_key, team_id):
+    scope = None
+    if getattr(args, "project", None):
+        try:
+            scope = resolve_project_id(api_key, team_id, args.project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        mid = resolve_milestone_id(api_key, team_id, args.milestone, scope, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        mutation($id: String!) { projectMilestoneDelete(id: $id) { success } }
+    """, {"id": mid})
+    if check_errors(data):
+        sys.exit(1)
+    if (data.get("data") or {}).get("projectMilestoneDelete", {}).get("success"):
+        print(f"Deleted milestone '{args.milestone}'.")
+    else:
+        print("Milestone delete failed.", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_labels(args, cfg, api_key, team_id):
@@ -2479,11 +2809,49 @@ def main():
     c_delete = cyc_sub.add_parser("delete", help="Archive a cycle (by id or name)")
     c_delete.add_argument("cycle", help="Cycle id, number, or name")
 
-    # projects (list / detail with milestones)
-    p_projects = sub.add_parser("projects", help="List projects or show detail + milestones")
-    p_projects.add_argument("name", nargs="?",
-                            help="Project name (substring match) for detail view")
-    p_projects.add_argument("--json", action="store_true", help="JSON output")
+    # projects (list / show / create / archive / delete)
+    p_projects = sub.add_parser("projects",
+                                help="List, show, create, archive, or delete projects")
+    p_projects.add_argument("--json", action="store_true", help="JSON output (list)")
+    proj_sub = p_projects.add_subparsers(dest="projects_action")
+    ps_show = proj_sub.add_parser("show", help="Show a project's detail + milestones")
+    ps_show.add_argument("name", help="Project name (exact match preferred) or id")
+    ps_show.add_argument("--json", action="store_true", help="JSON output")
+    ps_create = proj_sub.add_parser("create", help="Create a project")
+    ps_create.add_argument("--name", required=True, help="Project name")
+    ps_create.add_argument("--description", default=None, help="Project description")
+    ps_create.add_argument("--lead", default=None, metavar="EMAIL", help="Lead by email")
+    ps_create.add_argument("--start", default=None, metavar="YYYY-MM-DD", help="Start date")
+    ps_create.add_argument("--target", default=None, metavar="YYYY-MM-DD", help="Target date")
+    ps_archive = proj_sub.add_parser("archive", aliases=["delete"],
+                                     help="Remove a project (moves to trash; recoverable in Linear's UI)")
+    ps_archive.add_argument("project", help="Project name or id")
+
+    # milestones (list / create / move / set-target-date / delete)
+    p_ms = sub.add_parser("milestones",
+                          help="List, create, move, retarget, or delete project milestones")
+    p_ms.add_argument("--json", action="store_true", help="JSON output")
+    ms_sub = p_ms.add_subparsers(dest="milestones_action")
+    ms_list = ms_sub.add_parser("list", help="List a project's milestones")
+    ms_list.add_argument("project", help="Project name or id")
+    ms_list.add_argument("--json", action="store_true", help="JSON output")
+    ms_create = ms_sub.add_parser("create", help="Create a milestone in a project")
+    ms_create.add_argument("--project", required=True, help="Project name or id")
+    ms_create.add_argument("--name", required=True, help="Milestone name")
+    ms_create.add_argument("--target", default=None, metavar="YYYY-MM-DD", help="Target date")
+    ms_create.add_argument("--description", default=None, help="Milestone description")
+    ms_move = ms_sub.add_parser("move", help="Move a milestone to another project")
+    ms_move.add_argument("milestone", help="Milestone name or id")
+    ms_move.add_argument("--to", required=True, dest="to", help="Destination project name or id")
+    ms_move.add_argument("--from", default=None, dest="from_project",
+                         help="Source project to disambiguate a same-named milestone")
+    ms_target = ms_sub.add_parser("set-target-date", help="Set or clear a milestone's target date")
+    ms_target.add_argument("milestone", help="Milestone name or id")
+    ms_target.add_argument("date", help="YYYY-MM-DD, or 'none' to clear")
+    ms_target.add_argument("--project", default=None, help="Project to disambiguate the milestone")
+    ms_delete = ms_sub.add_parser("delete", help="Delete a milestone")
+    ms_delete.add_argument("milestone", help="Milestone name or id")
+    ms_delete.add_argument("--project", default=None, help="Project to disambiguate the milestone")
 
     # labels (list / create / update / delete)
     p_labels = sub.add_parser("labels", help="List, create, update, or delete labels")
@@ -2515,7 +2883,18 @@ def main():
     p_states = sub.add_parser("states", help="List the team's workflow states")
     p_states.add_argument("--json", action="store_true", help="JSON output")
 
-    args = parser.parse_args()
+    # Back-compat + ergonomics: `projects <name>` (a bare name, not a verb) is
+    # shorthand for `projects show <name>`. Insert the implicit `show` so the
+    # detail view keeps working alongside the create/archive/delete subcommands.
+    argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "projects":
+        _proj_verbs = {"show", "create", "archive", "delete"}
+        for _i in range(1, len(argv)):
+            if not argv[_i].startswith("-"):
+                if argv[_i] not in _proj_verbs:
+                    argv = argv[:_i] + ["show"] + argv[_i:]
+                break
+    args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
@@ -2558,6 +2937,8 @@ def main():
         cmd_cycles(args, cfg, api_key, team_id)
     elif args.command == "projects":
         cmd_projects(args, cfg, api_key, team_id)
+    elif args.command == "milestones":
+        cmd_milestones(args, cfg, api_key, team_id)
     elif args.command == "labels":
         cmd_labels(args, cfg, api_key, team_id)
     elif args.command == "users":

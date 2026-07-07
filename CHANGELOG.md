@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-07
+
+Makes the CLI own the full project lifecycle and adds milestone management, so a
+workspace can be reorganized entirely from the shell instead of the web UI. Also
+closes a silent-failure footgun where a mistyped `--project` no-op'd every issue
+in a batch while reporting success.
+
+### Added
+- `projects create --name <name> [--description ...] [--lead <email>]
+  [--start YYYY-MM-DD] [--target YYYY-MM-DD]` — create a project on the current
+  team (`projectCreate`). Prints the new project's id and URL.
+- `projects archive|delete <name|id>` — remove a project (`projectDelete`; moves
+  it to the workspace trash, recoverable in Linear's UI). Linear exposes no
+  distinct project-archive mutation, so both verbs are the same operation.
+- `projects show <name|id>` — explicit detail view. Bare `projects <name>` still
+  works (shorthand for `show`). Accepts a **project id** and prefers an **exact
+  name match** over substring, so `Rush` stays addressable once `Rush App` /
+  `Rush CLI` exist. Detail now also shows the issue count, start date, and id.
+- `milestones` command — `list <project>`, `create --project --name [--target]
+  [--description]`, `move <milestone> --to <project> [--from <project>]`,
+  `set-target-date <milestone> <YYYY-MM-DD|none> [--project]`, and
+  `delete <milestone> [--project]` (`projectMilestone{Create,Update,Delete}`).
+  Setting a milestone's target date from the CLI is reliable where the web
+  date-picker is not.
+- `projects` list now shows a per-project **issue count** (from `scope`), so a
+  bulk backfill can be verified without aggregating `tasks --json`.
+
+### Fixed
+- A named `--project` / `--milestone` that doesn't resolve is now a **hard error
+  with close-match suggestions**, not a warn-and-skip on a success exit. `update`
+  resolves the project/milestone **once, up front**; an unknown name aborts the
+  whole run (non-zero) before any issue is touched, instead of silently no-op'ing
+  every ticket in a batch while reporting success. Resolving once also removes a
+  per-issue project lookup on bulk updates.
+
 ## [0.6.0] - 2026-07-06
 
 Makes delegation legible: the CLI now **reads and displays** the delegate, so a
