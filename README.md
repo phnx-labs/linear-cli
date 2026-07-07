@@ -84,8 +84,15 @@ linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
 linear create "Ship it" --delegate droid    # create + hand to an agent
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
 
-linear projects                       # list projects + progress
-linear projects "Phoenix"             # detail view with milestones
+linear projects                       # list projects + progress + issue count
+linear projects "Phoenix"             # detail view (exact name or id) with milestones
+linear projects create --name "Phoenix" --lead you@co.com --target 2026-09-30
+linear projects archive "Old Project" # remove a project (moves to trash)
+linear milestones list "Phoenix"      # milestones in a project
+linear milestones create --project "Phoenix" --name "v1.0" --target 2026-08-15
+linear milestones set-target-date "v1.0" 2026-08-20 --project "Phoenix"
+linear milestones move "v1.0" --to "Phoenix CLI"         # across projects
+linear milestones delete "v1.0" --project "Phoenix"
 linear labels                         # available labels
 linear labels create triage --color "#ff8800"            # label CRUD ...
 linear labels update triage --name needs-triage          # ... rename ...

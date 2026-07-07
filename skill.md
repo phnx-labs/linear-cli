@@ -18,7 +18,8 @@ linear update ANT-42 --comment "..."    # drop a progress note
 linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
 linear create "Title" --label foo --priority high --description "..."
 linear cycles                         # list cycles
-linear projects                       # list projects (with milestones via `linear projects "Name"`)
+linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
+linear milestones list "Name"         # a project's milestones
 linear labels                         # list available labels
 linear users                          # list assignable users
 linear agents                         # agent members you can --delegate to (auto-detected)
@@ -92,6 +93,25 @@ linear cycles delete "Jul Week 1"
 linear labels create triage --color "#ff8800" --description "needs triage"
 linear labels update triage --name needs-triage       # or --color/--description
 linear labels delete needs-triage
+```
+
+## Managing projects and milestones
+
+Own the whole project lifecycle from the shell. `projects <name>` (or `show`)
+takes an **exact name or id**; a mistyped `--project` on `create`/`update` is a
+hard error (with suggestions), never a silent no-op.
+
+```
+linear projects                                       # list + progress + issue count
+linear projects "Rush App"                            # detail: exact name or id
+linear projects create --name "Rush App" --lead you@co.com --target 2026-09-30
+linear projects archive "Old Project"                 # remove (moves to Linear trash)
+
+linear milestones list "Rush App"
+linear milestones create --project "Rush App" --name "Alpha 25" --target 2026-08-15
+linear milestones set-target-date "Alpha 25" 2026-08-20 --project "Rush App"
+linear milestones move "Alpha 25" --to "Rush CLI" --from "Rush App"
+linear milestones delete "Alpha 25" --project "Rush CLI"
 ```
 
 ## Creating issues — what's required
