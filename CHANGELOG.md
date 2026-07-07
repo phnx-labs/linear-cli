@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-06
+
+Makes delegation legible: the CLI now **reads and displays** the delegate, so a
+handed-off issue shows who's on it. Before this, `--delegate` was write-only —
+you could hand an issue to an agent but querying it afterward only ever showed
+the human assignee.
+
+### Added
+- `delegate { name }` is now requested in the list and detail queries.
+- `tasks` / list rows render the delegate alongside the assignee as
+  `Assignee → delegate` (e.g. `Muqsit → claude`); rows with no delegate are
+  unchanged.
+- `show` prints a `Delegate:` line under `Assignee:` when the issue is delegated.
+
 ## [0.5.0] - 2026-07-01
 
 Makes the CLI aware of Linear's agent members (app users like Claude, Codex,
