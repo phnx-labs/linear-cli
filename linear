@@ -1428,10 +1428,12 @@ def cmd_update(args, cfg, api_key, team_id):
     project_id = _UNSET
     milestone_id = _UNSET
     try:
-        if args.project is not None:
+        # Truthy (not `is not None`) so an empty `--project ""` is a no-op, not a
+        # clear — only an explicit `--project none` clears the field.
+        if args.project:
             project_id = (None if args.project.lower() == "none"
                           else resolve_project_id(api_key, team_id, args.project, strict=True))
-        if args.milestone is not None:
+        if args.milestone:
             scope = project_id if project_id not in (_UNSET, None) else None
             milestone_id = (None if args.milestone.lower() == "none"
                             else resolve_milestone_id(api_key, team_id, args.milestone, scope, strict=True))
@@ -2355,7 +2357,12 @@ def cmd_milestones(args, cfg, api_key, team_id):
         return _milestone_set_target(args, api_key, team_id)
     if action == "delete":
         return _milestone_delete(args, api_key, team_id)
-    return _milestone_list(args, api_key, team_id)
+    if action == "list":
+        return _milestone_list(args, api_key, team_id)
+    print("Specify a subcommand: list <project> | create | move | "
+          "set-target-date | delete.  See `linear milestones --help`.",
+          file=sys.stderr)
+    sys.exit(1)
 
 
 def _milestone_list(args, api_key, team_id):
@@ -2816,7 +2823,10 @@ def main():
     proj_sub = p_projects.add_subparsers(dest="projects_action")
     ps_show = proj_sub.add_parser("show", help="Show a project's detail + milestones")
     ps_show.add_argument("name", help="Project name (exact match preferred) or id")
-    ps_show.add_argument("--json", action="store_true", help="JSON output")
+    # SUPPRESS: when absent, don't overwrite a parent `projects --json` (the shim
+    # can place --json before the injected `show`); when present, still sets json.
+    ps_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                         help="JSON output")
     ps_create = proj_sub.add_parser("create", help="Create a project")
     ps_create.add_argument("--name", required=True, help="Project name")
     ps_create.add_argument("--description", default=None, help="Project description")
@@ -2834,7 +2844,8 @@ def main():
     ms_sub = p_ms.add_subparsers(dest="milestones_action")
     ms_list = ms_sub.add_parser("list", help="List a project's milestones")
     ms_list.add_argument("project", help="Project name or id")
-    ms_list.add_argument("--json", action="store_true", help="JSON output")
+    ms_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                         help="JSON output")
     ms_create = ms_sub.add_parser("create", help="Create a milestone in a project")
     ms_create.add_argument("--project", required=True, help="Project name or id")
     ms_create.add_argument("--name", required=True, help="Milestone name")
