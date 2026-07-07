@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -260,6 +260,43 @@ def resolve_user_id_by_email(api_key: str, email: str) -> str | None:
     if not nodes:
         return None
     return nodes[0]["id"]
+
+
+def list_workspace_users(api_key: str) -> list[dict]:
+    """All active workspace members, carrying the `app` flag so callers can split
+    humans (assignable) from agents (delegatable). Fully paginated."""
+    query = """query($cursor: String) {
+        users(filter: { active: { eq: true } }, first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id name email displayName app }
+        }
+    }"""
+    return paginate_connection(api_key, query, ["users"]) or []
+
+
+def resolve_assignee_id(api_key: str, value: str) -> str | None:
+    """Resolve --assign to a user ID. Accepts an email, or a human's name /
+    displayName (case-insensitive) so `--assign bisma` works like `--delegate
+    claude`. Agents (app users) are excluded on purpose — delegate those instead.
+    Exact match wins over substring; ambiguous names note the pick to stderr."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    if "@" in v:
+        return resolve_user_id_by_email(api_key, v)
+    humans = [u for u in list_workspace_users(api_key) if not u.get("app")]
+    lv = v.lower()
+    matches = [u for u in humans
+               if lv in (u["name"].lower(), (u.get("displayName") or "").lower())]
+    if not matches:
+        matches = [u for u in humans
+                   if lv in u["name"].lower() or lv in (u.get("displayName") or "").lower()]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        print(f"Note: '{value}' matched {len(matches)} people; picked '{matches[0]['name']}'.",
+              file=sys.stderr)
+    return matches[0]["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -1746,14 +1783,12 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
     if args.assign is not None:
         if args.assign.lower() == "none":
             assignee_id = None
-        elif "@" in args.assign:
-            assignee_id = resolve_user_id_by_email(api_key, args.assign.strip())
-            if not assignee_id:
-                print(f"Warning: user '{args.assign}' not found; skipping reassign.", file=sys.stderr)
-                assignee_id = ...
         else:
-            print(f"Warning: --assign expects an email or 'none'; got '{args.assign}'. Skipping.", file=sys.stderr)
-            assignee_id = ...
+            assignee_id = resolve_assignee_id(api_key, args.assign)
+            if not assignee_id:
+                print(f"Warning: --assign '{args.assign}' matched no human "
+                      f"(try an email, a name, or 'linear users'); skipping reassign.", file=sys.stderr)
+                assignee_id = ...
 
         if assignee_id is not ...:
             data = gql(api_key, """
@@ -1936,14 +1971,13 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
             input_obj["assigneeId"] = vid
     elif assign_arg.lower() == "none":
         pass
-    elif "@" in assign_arg:
-        uid = resolve_user_id_by_email(api_key, assign_arg.strip())
+    else:
+        uid = resolve_assignee_id(api_key, assign_arg)
         if uid:
             input_obj["assigneeId"] = uid
         else:
-            warn(f"user '{assign_arg}' not found; leaving unassigned.")
-    else:
-        warn(f"--assign expects an email or 'none'; got '{assign_arg}'. Ignoring.")
+            warn(f"--assign '{assign_arg}' matched no human "
+                 f"(try an email, a name, or 'linear users'); leaving unassigned.")
 
     delegate_arg = fields.get("delegate")
     if delegate_arg and delegate_arg.lower() != "none":
@@ -2623,23 +2657,21 @@ def _label_delete(args, api_key, team_id):
 
 
 def cmd_users(args, cfg, api_key, team_id):
-    """List assignable users."""
-    query = """query($cursor: String) {
-        users(filter: { active: { eq: true } }, first: 100, after: $cursor) {
-            pageInfo { hasNextPage endCursor }
-            nodes { id name email displayName }
-        }
-    }"""
-    users = paginate_connection(api_key, query, ["users"])
-    if users is None:
-        return
-    users.sort(key=lambda u: u["name"].lower())
+    """List workspace members, grouped into humans (assign with --assign) and
+    agents (delegate with --delegate) — the two are distinct in Linear."""
+    users = list_workspace_users(api_key)
     if args.json:
+        users.sort(key=lambda u: u["name"].lower())
         print(json.dumps(users, indent=2))
         return
-    print(f"{len(users)} user(s):")
-    for u in users:
+    humans = sorted((u for u in users if not u.get("app")), key=lambda u: u["name"].lower())
+    agents = sorted((u for u in users if u.get("app")), key=lambda u: u["name"].lower())
+    print(f"Humans ({len(humans)})  — assign with --assign <email or name>:")
+    for u in humans:
         print(f"  {u['name']:25s}  {u.get('email') or '-'}")
+    print(f"\nAgents ({len(agents)})  — delegate with --delegate <name>:")
+    for u in agents:
+        print(f"  {u['name']:25s}  (app user)")
 
 
 def cmd_states(args, cfg, api_key, team_id):
@@ -2745,7 +2777,7 @@ def main():
     p_update.add_argument("--priority", type=str, default=None,
                           help="urgent, high, medium, low, or none")
     p_update.add_argument("--assign", default=None,
-                          help="Reassign: email address, or 'none' to unassign")
+                          help="Reassign to a human by email or name, or 'none' to unassign")
     p_update.add_argument("--delegate", default=None,
                           help="Delegate to an agent by name (e.g. --delegate claude); "
                                "'none' to clear. See: linear agents")
@@ -2788,7 +2820,7 @@ def main():
     p_create.add_argument("--due-date", dest="due_date",
                           help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
-                          help="Assignee: email address, or 'none' (default: API key owner)")
+                          help="Assign to a human by email or name, or 'none' (default: API key owner)")
     p_create.add_argument("--delegate", default=None,
                           help="Delegate the new issue to an agent by name (e.g. --delegate claude)")
     p_create.add_argument("--from-file", dest="from_file", default=None,
