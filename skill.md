@@ -55,7 +55,7 @@ Everything you can set on `create` can be changed on `update` with the same flag
 linear update ANT-42 --priority urgent --assign someone@x.com
 linear update ANT-42 --title "Renamed" --description "Rewritten body"
 linear update ANT-42 --project "Phoenix" --milestone "v1.0"
-linear update ANT-42 --estimate 3 --parent ANT-10
+linear update ANT-42 --parent ANT-10             # nest under a parent (prints a tip)
 linear update ANT-42 --blocked-by ANT-7 --blocks ANT-9            # relations
 linear update ANT-42 --relates ANT-5                              # non-blocking link
 linear update ANT-42 --delegate codex                             # hand to an agent (see: linear agents)
@@ -123,7 +123,7 @@ linear create "Fix auth bug"                          # minimum
 linear create --description "Long paragraph..."       # title derived from first line/sentence
 linear create --description-file plan.md              # multi-paragraph markdown
 echo "..." | linear create --description-file -       # stdin
-linear create "Sub-task" --parent ANT-42 --estimate 3
+linear create "Sub-task" --parent ANT-42             # nested; prints a tip nudging a flat issue
 linear create "Item" --project "Phoenix" --milestone "v1.0"
 linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
 ```
