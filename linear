@@ -35,7 +35,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
@@ -674,6 +674,7 @@ ISSUE_FIELDS = """
     identifier title description state { name type }
     priority labels { nodes { name } }
     assignee { name }
+    delegate { name }
     project { name id }
     dueDate createdAt url
 """
@@ -725,7 +726,12 @@ def format_issue_row(node: dict) -> str:
     labels = [l["name"] for l in node.get("labels", {}).get("nodes", [])]
     label_str = f"  [{', '.join(labels)}]" if labels else ""
     assignee = (node.get("assignee") or {}).get("name") or "unassigned"
-    return f"  {ident:<8} {pri:<7}  {state:<12}  {due}  {assignee:<14}  {title}{label_str}"
+    # Delegate (the agent handed the issue) rides alongside the human assignee:
+    # "Muqsit → claude". Both are distinct Linear fields; showing only assignee
+    # hid every delegation, so the column now carries whoever is actually on it.
+    delegate = (node.get("delegate") or {}).get("name")
+    who = f"{assignee} → {delegate}" if delegate else assignee
+    return f"  {ident:<8} {pri:<7}  {state:<12}  {due}  {who:<22}  {title}{label_str}"
 
 
 # ---------------------------------------------------------------------------
@@ -1248,6 +1254,7 @@ def show_issue_detail(args, api_key, team_id):
                 priority estimate dueDate
                 labels {{ nodes {{ name }} }}
                 assignee {{ name }}
+                delegate {{ name }}
                 project {{ name }}
                 cycle {{ name }}
                 parent {{ identifier title }}
@@ -1277,12 +1284,16 @@ def show_issue_detail(args, api_key, team_id):
     labels = ", ".join(l["name"] for l in n.get("labels", {}).get("nodes", []))
     assignee = n.get("assignee")
     assignee_name = assignee.get("name", "Unassigned") if assignee else "Unassigned"
+    delegate = n.get("delegate")
+    delegate_name = delegate.get("name") if delegate else None
 
     print(f"{n['identifier']}  {n['title']}")
     print(f"  Status:   {n['state']['name']}")
     print(f"  Priority: {pri}")
     print(f"  Labels:   {labels or '-'}")
     print(f"  Assignee: {assignee_name}")
+    if delegate_name:
+        print(f"  Delegate: {delegate_name}")
     if n.get("estimate") is not None:
         print(f"  Estimate: {n['estimate']}")
     if n.get("dueDate"):
