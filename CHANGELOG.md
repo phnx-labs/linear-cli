@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-07
+
+Trims the issue surface to what this workspace actually uses, and discourages
+casual issue nesting. The model stays lean: task · project · milestone · cycle ·
+label · status · priority · assignee/delegate.
+
+### Removed
+- `--estimate` on `create` and `update` (and the Estimate line in issue detail).
+  Story-point estimation isn't used here, so the flag was pure ceremony — it's
+  gone from the code, not just hidden. A stray `estimate` key in a `--from-file`
+  bulk line is now silently ignored rather than sent.
+
+### Changed
+- `--parent` (sub-issues) now prints a **non-blocking tip** to stderr when it
+  nests an issue ("prefer a top-level issue under a project/milestone unless you
+  truly need it"). It's a nudge, not a prompt — bulk (`--from-file`) and agent
+  runs stay unblocked, and the parent is still set.
+
 ## [0.7.0] - 2026-07-07
 
 Makes the CLI own the full project lifecycle and adds milestone management, so a

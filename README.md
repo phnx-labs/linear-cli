@@ -79,7 +79,7 @@ linear tasks --cycle all --json | jq -r '.issues[].identifier' \
 
 linear create "Fix auth bug" --label security --priority high
 linear create --description "Paragraph dump — title is derived from this."
-linear create "Sub-task" --parent ANT-42 --estimate 3
+linear create "Sub-task" --parent ANT-42     # nested; prints a tip nudging a flat issue
 linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
 linear create "Ship it" --delegate droid    # create + hand to an agent
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
