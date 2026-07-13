@@ -1126,6 +1126,7 @@ def list_tasks(args, cfg, api_key, team_id):
     `--cycle` scopes to the active cycle (default), next cycle, the whole team
     (`all`, cross-cycle + backlog), or the backlog only (`none`).
     `--assignee EMAIL|me|none` filters by who the issue is assigned to.
+    `--project NAME|UUID` scopes to one project (strict: unknown name aborts).
     Tasks are sorted by priority, then due date (earliest first), then id.
     Results are fully paginated — no silent truncation at Linear's 50-issue cap.
     """
@@ -1168,6 +1169,18 @@ def list_tasks(args, cfg, api_key, team_id):
 
     if args.label and not explicit_agent:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
+
+    # Project scope. Strict resolution: a mistyped project must abort, not
+    # silently drop the filter and return the whole team queue (unattended
+    # consumers act on whatever this lists).
+    project = getattr(args, "project", None)
+    if project:
+        try:
+            pid = resolve_project_id(api_key, team_id, project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return
+        filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
 
     # Assignee filter: 'me' = API-key owner, 'none' = unassigned, else email.
     assignee = getattr(args, "assignee", None)
@@ -2744,6 +2757,7 @@ def main():
     p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter, show all")
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
     p_tasks.add_argument("--label", help="Filter by any label")
+    p_tasks.add_argument("--project", help="Filter by project (name or UUID)")
     p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
     p_tasks.add_argument("--cycle", default="active", metavar="SCOPE",
                          help="Scope: active (default), next, all (whole team, "

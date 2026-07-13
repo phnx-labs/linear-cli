@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `linear tasks --project NAME|UUID` — scope the task list to one project.
+  Resolution is strict: an unknown project aborts with close-match suggestions
+  instead of silently dropping the filter and returning the whole team queue
+  (unattended consumers act on whatever this lists).
+
 ## [0.9.0] - 2026-07-07
 
 Brings the human side to parity with the agent side: humans are assignable by
