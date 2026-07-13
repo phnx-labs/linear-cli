@@ -1179,7 +1179,7 @@ def list_tasks(args, cfg, api_key, team_id):
             pid = resolve_project_id(api_key, team_id, project, strict=True)
         except LookupError as e:
             print(f"Error: {e}", file=sys.stderr)
-            return
+            sys.exit(1)
         filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
 
     # Assignee filter: 'me' = API-key owner, 'none' = unassigned, else email.
