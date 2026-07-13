@@ -40,6 +40,7 @@ linear tasks --cycle none          # backlog only (issues in no cycle)
 linear tasks --cycle "Q2W11"       # a specific cycle by name, number, or id
 linear tasks --since 2026-06-01    # only issues created on/after a date
 linear tasks --assignee me         # by assignee: me | none | someone@x.com
+linear tasks --project "Rush App"  # scope to one project (name or UUID; strict)
 linear tasks --query "auth"        # search title + description
 linear tasks --json                # machine-readable
 linear tasks --all                 # ignore default agent filter
