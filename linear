@@ -2264,7 +2264,8 @@ def _cycle_delete(args, api_key, team_id):
     if check_errors(data):
         sys.exit(1)
     if (data.get("data") or {}).get("cycleArchive", {}).get("success"):
-        print(f"Archived cycle {node.get('name') or node['id']}.")
+        label = cycle_label(node)
+        print(f"Archived cycle {label if label != 'no cycle' else node['id']}.")
     else:
         print("Cycle delete failed.", file=sys.stderr)
         sys.exit(1)
