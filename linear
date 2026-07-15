@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -356,6 +356,21 @@ def resolve_agent_id(api_key: str, cfg: dict, name: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Cycle resolution (for auto-attach on create, move on update, listing)
 # ---------------------------------------------------------------------------
+
+def cycle_label(node: dict | None) -> str:
+    """Human label for a cycle node. Linear numbered cycles have name=None, so
+    fall back to `Cycle {number}`, then to 'no cycle'. Selections feeding this
+    must request `number` alongside `name`."""
+    if not node:
+        return "no cycle"
+    name = node.get("name")
+    if name:
+        return name
+    number = node.get("number")
+    if number is not None:
+        return f"Cycle {number}"
+    return "no cycle"
+
 
 def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     """Return the active or next cycle ID for a team. Never cached (cycles rotate)."""
@@ -865,22 +880,25 @@ def paginate_issues(api_key: str, filter_str: str) -> list[dict] | None:
 
 
 def resolve_cycle_meta(api_key: str, team_id: str, which: str) -> dict | None:
-    """Resolve 'active'/'next' to {id, name, startsAt, endsAt}. None when none."""
+    """Resolve 'active'/'next' to {id, number, name, startsAt, endsAt}. None when
+    none. `name` is the real (possibly None) cycle name — numbered cycles have
+    none, so use cycle_label() for display."""
     cid = get_cycle_id(api_key, team_id, which)
     if not cid:
         return None
     data = gql(
         api_key,
-        "query($id: String!) { cycle(id: $id) { id name startsAt endsAt } }",
+        "query($id: String!) { cycle(id: $id) { id number name startsAt endsAt } }",
         {"id": cid},
     )
     fallback = f"{which.capitalize()} cycle"
     if check_errors(data):
-        return {"id": cid, "name": fallback, "startsAt": None, "endsAt": None}
+        return {"id": cid, "number": None, "name": fallback, "startsAt": None, "endsAt": None}
     c = (data.get("data") or {}).get("cycle") or {}
     return {
         "id": cid,
-        "name": c.get("name") or fallback,
+        "number": c.get("number"),
+        "name": c.get("name"),
         "startsAt": c.get("startsAt"),
         "endsAt": c.get("endsAt"),
     }
@@ -1013,7 +1031,7 @@ def build_cycle_scope(api_key: str, team_id: str,
         meta = resolve_cycle_meta(api_key, team_id, s)
         if not meta:
             return None, None, None
-        return f'cycle: {{ id: {{ eq: "{meta["id"]}" }} }}', meta["name"], meta
+        return f'cycle: {{ id: {{ eq: "{meta["id"]}" }} }}', cycle_label(meta), meta
     if s in ("none", "backlog"):
         return "cycle: { null: true }", "Backlog (no cycle)", None
     if s == "all":
@@ -1365,7 +1383,7 @@ def show_issue_detail(args, api_key, team_id):
                 assignee {{ name }}
                 delegate {{ name }}
                 project {{ name }}
-                cycle {{ name }}
+                cycle {{ number name }}
                 parent {{ identifier title }}
                 createdAt updatedAt
                 relations {{ nodes {{ type relatedIssue {{ identifier title }} }} }}
@@ -1408,7 +1426,7 @@ def show_issue_detail(args, api_key, team_id):
     if n.get("project"):
         print(f"  Project:  {n['project']['name']}")
     if n.get("cycle"):
-        print(f"  Cycle:    {n['cycle']['name']}")
+        print(f"  Cycle:    {cycle_label(n['cycle'])}")
     if n.get("parent"):
         print(f"  Parent:   {n['parent']['identifier']}  {n['parent']['title']}")
     if n.get("url"):
@@ -1722,13 +1740,13 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
                 mutation($id: String!, $cycleId: String) {
                     issueUpdate(id: $id, input: { cycleId: $cycleId }) {
                         success
-                        issue { identifier cycle { name } }
+                        issue { identifier cycle { number name } }
                     }
                 }
             """, {"id": issue["id"], "cycleId": new_cycle_id})
             if not check_errors(data) and data["data"]["issueUpdate"]["success"]:
                 i = data["data"]["issueUpdate"]["issue"]
-                cyc = (i.get("cycle") or {}).get("name") or "no cycle"
+                cyc = cycle_label(i.get("cycle"))
                 print(f"{i['identifier']} -> cycle: {cyc}")
                 did_something = True
             else:
@@ -2023,7 +2041,7 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
         mutation($input: IssueCreateInput!) {
             issueCreate(input: $input) {
                 success
-                issue { identifier title state { name } cycle { name } assignee { name } delegate { name } }
+                issue { identifier title state { name } cycle { number name } assignee { name } delegate { name } }
             }
         }
     """, {"input": input_obj})
@@ -2062,7 +2080,7 @@ def cmd_create(args, cfg, api_key, team_id):
     if err:
         print(f"Error: {err}", file=sys.stderr)
         return
-    cyc = (issue.get("cycle") or {}).get("name") or "no cycle"
+    cyc = cycle_label(issue.get("cycle"))
     asg = (issue.get("assignee") or {}).get("name") or "unassigned"
     dg = (issue.get("delegate") or {}).get("name")
     meta = f"{cyc} | {asg}" + (f" | delegate: {dg}" if dg else "")
@@ -2213,7 +2231,7 @@ def _cycle_update(args, api_key, team_id):
         mutation($id: String!, $input: CycleUpdateInput!) {
             cycleUpdate(id: $id, input: $input) {
                 success
-                cycle { id name startsAt endsAt }
+                cycle { id number name startsAt endsAt }
             }
         }
     """, {"id": node["id"], "input": input_obj})
@@ -2224,7 +2242,7 @@ def _cycle_update(args, api_key, team_id):
         print("Cycle update failed.", file=sys.stderr)
         sys.exit(1)
     c = result["cycle"]
-    print(f"Updated cycle {c.get('name')}  "
+    print(f"Updated cycle {cycle_label(c)}  "
           f"{(c.get('startsAt') or '')[:10]} → {(c.get('endsAt') or '')[:10]}  ({c['id']})")
 
 

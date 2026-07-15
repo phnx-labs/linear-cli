@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-07-15
+
+### Fixed
+
+- Cycle display for **numbered (nameless) cycles**. Linear's auto-numbered
+  cycles carry `name: null` and only a `number`, but every display site read
+  `cycle.name` — so a ticket that *was* in the active cycle rendered as `None`
+  (`tasks <id>`) or `no cycle` (`create`/`update` confirms), making cycle
+  assignment look broken when the write had actually succeeded. All cycle
+  selections now request `number` and render through a single `cycle_label()`
+  helper (`name`, else `Cycle {number}`, else `no cycle`); named cycles are
+  unchanged. `tasks --cycle active` headers now read `Cycle 20` instead of the
+  generic `Active cycle`.
+
 ## [0.10.0] - 2026-07-13
 
 ### Added
