@@ -12,7 +12,7 @@ Commands:
     update              Modify one or many issues (status, comment, relations);
                         bulk via multiple ids or --stdin
     create              Create a new issue
-    cycles              List / create / update / delete cycles
+    cycles              List / create / update cycles
     projects            List / show / create / archive / delete projects
     milestones          List / create / move / retarget / delete milestones
     labels              List / create / update / delete labels
@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -2141,14 +2141,12 @@ def _bulk_create(path: str, cfg, api_key, team_id):
 # ---------------------------------------------------------------------------
 
 def cmd_cycles(args, cfg, api_key, team_id):
-    """List cycles (default) or create / update / delete one."""
+    """List cycles (default) or create / update one."""
     action = getattr(args, "cycles_action", None)
     if action == "create":
         return _cycle_create(args, api_key, team_id)
     if action == "update":
         return _cycle_update(args, api_key, team_id)
-    if action == "delete":
-        return _cycle_delete(args, api_key, team_id)
 
     cycles = list_team_cycles(api_key, team_id)
     if not cycles:
@@ -2249,26 +2247,6 @@ def _cycle_update(args, api_key, team_id):
     c = result["cycle"]
     print(f"Updated cycle {cycle_label(c)}  "
           f"{(c.get('startsAt') or '')[:10]} → {(c.get('endsAt') or '')[:10]}  ({c['id']})")
-
-
-def _cycle_delete(args, api_key, team_id):
-    """Archive a cycle (Linear has no hard delete; cycleArchive is the removal)."""
-    node = resolve_cycle_by_value(api_key, team_id, args.cycle)
-    if not node:
-        sys.exit(1)
-    data = gql(api_key, """
-        mutation($id: String!) {
-            cycleArchive(id: $id) { success }
-        }
-    """, {"id": node["id"]})
-    if check_errors(data):
-        sys.exit(1)
-    if (data.get("data") or {}).get("cycleArchive", {}).get("success"):
-        label = cycle_label(node)
-        print(f"Archived cycle {label if label != 'no cycle' else node['id']}.")
-    else:
-        print("Cycle delete failed.", file=sys.stderr)
-        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -2870,8 +2848,9 @@ def main():
     p_create.add_argument("--milestone", default=None,
                           help="Project milestone name (resolved within --project if set)")
 
-    # cycles (list / create / update / delete)
-    p_cycles = sub.add_parser("cycles", help="List, create, update, or delete cycles")
+    # cycles (list / create / update). No delete: archiving a cycle discards
+    # sprint history, so it's intentionally not exposed here.
+    p_cycles = sub.add_parser("cycles", help="List, create, or update cycles")
     p_cycles.add_argument("--json", action="store_true", help="JSON output")
     p_cycles.add_argument("--ids", action="store_true", help="Show cycle IDs in the plain list")
     cyc_sub = p_cycles.add_subparsers(dest="cycles_action")
@@ -2884,8 +2863,6 @@ def main():
     c_update.add_argument("--name", default=None, help="New name")
     c_update.add_argument("--starts", default=None, metavar="YYYY-MM-DD", help="New start date")
     c_update.add_argument("--ends", default=None, metavar="YYYY-MM-DD", help="New end date")
-    c_delete = cyc_sub.add_parser("delete", help="Archive a cycle (by id or name)")
-    c_delete.add_argument("cycle", help="Cycle id, number, or name")
 
     # projects (list / show / create / archive / delete)
     p_projects = sub.add_parser("projects",

@@ -83,13 +83,14 @@ linear tasks --cycle all --json | jq -r '.issues[].identifier' \
 ## Managing cycles and labels
 
 CRUD from the shell instead of dropping to raw GraphQL. Both resolve the target
-by fuzzy name, number, or UUID. `delete` archives (Linear has no hard delete).
+by fuzzy name, number, or UUID. Cycles are list/create/update only — there is no
+`cycles delete`, because archiving a cycle discards its sprint history. Labels
+support `delete`.
 
 ```
 linear cycles --ids                                   # list with UUIDs
 linear cycles create --name "Jul W1" --starts 2026-07-01 --ends 2026-07-07
 linear cycles update "Jul W1" --name "Jul Week 1"     # or --starts/--ends
-linear cycles delete "Jul Week 1"
 
 linear labels create triage --color "#ff8800" --description "needs triage"
 linear labels update triage --name needs-triage       # or --color/--description

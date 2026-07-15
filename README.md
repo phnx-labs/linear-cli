@@ -105,7 +105,6 @@ linear states                         # the team's workflow states (valid --stat
 linear cycles                         # list cycles (add --ids for UUIDs)
 linear cycles create --name "Jul W1" --starts 2026-07-01 --ends 2026-07-07
 linear cycles update "Jul W1" --name "Jul Week 1"        # by name or id
-linear cycles delete "Jul Week 1"                        # archive a cycle
 
 linear --team ENG tasks               # one-shot override (multi-team workspace)
 ```
