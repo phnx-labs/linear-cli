@@ -1039,7 +1039,12 @@ def build_cycle_scope(api_key: str, team_id: str,
     node = resolve_cycle_by_value(api_key, team_id, scope)
     if not node:
         return None, None, None
-    return f'cycle: {{ id: {{ eq: "{node["id"]}" }} }}', node.get("name") or scope, node
+    # A raw-UUID lookup yields a node with neither name nor number; keep showing
+    # the user's input there rather than collapsing to "no cycle".
+    label = cycle_label(node)
+    if label == "no cycle":
+        label = scope
+    return f'cycle: {{ id: {{ eq: "{node["id"]}" }} }}', label, node
 
 
 def cycle_date_to_iso(value: str, flag: str) -> str:
@@ -2166,7 +2171,7 @@ def cmd_cycles(args, cfg, api_key, team_id):
     # Format: status marker | name (number) | startsAt -> endsAt | issue count
     for c in cycles:
         cid = c.get("id")
-        name = c.get("name") or f"Cycle {c.get('number')}"
+        name = cycle_label(c)
         starts = (c.get("startsAt") or "")[:10]
         ends = (c.get("endsAt") or "")[:10]
         history = c.get("issueCountHistory") or []
@@ -2209,7 +2214,7 @@ def _cycle_create(args, api_key, team_id):
         print("Cycle create failed.", file=sys.stderr)
         sys.exit(1)
     c = result["cycle"]
-    print(f"Created cycle {c.get('name') or c.get('number')}  "
+    print(f"Created cycle {cycle_label(c)}  "
           f"{(c.get('startsAt') or '')[:10]} → {(c.get('endsAt') or '')[:10]}  ({c['id']})")
 
 
