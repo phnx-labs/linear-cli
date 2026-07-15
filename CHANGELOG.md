@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-15
+
+### Removed
+
+- `linear cycles delete`. It mapped to Linear's `cycleArchive`, which discards a
+  cycle's sprint history (issues, velocity, the numbered slot) — a destructive,
+  rarely-needed op that doesn't belong in an agent-facing CLI. Cycles are now
+  list/create/update only. Label/milestone/project deletes are unaffected.
+
 ## [0.10.1] - 2026-07-15
 
 ### Fixed
