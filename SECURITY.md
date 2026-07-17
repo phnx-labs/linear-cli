@@ -17,8 +17,8 @@ Only the latest minor release receives security fixes.
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| 0.11.x  | Yes       |
+| < 0.11  | No        |
 
 ## How linear-cli handles your API key
 
