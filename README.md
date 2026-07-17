@@ -52,6 +52,11 @@ Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents
 
 ## Usage
 
+<p align="center">
+  <img src="assets/lifecycle.svg" alt="linear-cli task lifecycle: linear tasks (your queue) -> --pickup (claim, In Progress) -> --comment (progress) -> --done --proof (close with evidence). JSON on every read." width="100%" />
+</p>
+
+
 ```bash
 linear tasks                         # your queue in the active cycle
 linear tasks --board                 # whole team board
@@ -142,6 +147,11 @@ Drop [`skill.md`](./skill.md) into your agent's skills directory (e.g. `~/.claud
 
 ## Why this one?
 
+<p align="center">
+  <img src="assets/zero-deps.svg" alt="linear-cli is one ~76 KB Python file with zero dependencies (stdlib only) and a ~2,100-line audit surface, versus Node's node_modules, Rust's crates, and an MCP server's per-turn token cost." width="100%" />
+</p>
+
+
 The Linear CLI space already has options. Here's what's different about this one, measured — not vibes.
 
 ### Zero dependencies. Literally.
@@ -163,6 +173,11 @@ import sys
 Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno. The whole tool is one ~76 KB file you can read top-to-bottom in an hour.
 
 ### How it compares
+
+<p align="center">
+  <img src="assets/compare.svg" alt="How linear-cli compares: 0 dependencies and a 76 KB single file versus @linear/cli, Linearis, schpet, Finesssee, and Linear's MCP server — measured against each project's manifest." width="100%" />
+</p>
+
 
 | Tool | Runtime | Deps | Install footprint | Last published |
 |------|---------|------|-------------------|----------------|

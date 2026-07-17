@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" role="img" aria-label="linear-cli is one ~76 KB Python file with zero dependencies — every import is Python standard library (argparse, json, os, sys, subprocess, pathlib, urllib). 1 file, 0 deps, ~2,100 lines is the entire audit surface, versus the alternatives: Node with a 27 MB node_modules, Rust with 28 crates, Deno with 25+ imports, and Linear's MCP server at ~13k tokens injected per agent turn.">
+  <defs>
+    <radialGradient id="gCyan" cx="10%" cy="0%" r="70%"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0.10"/><stop offset="60%" stop-color="#22d3ee" stop-opacity="0"/></radialGradient>
+    <radialGradient id="gLime" cx="90%" cy="-6%" r="70%"><stop offset="0%" stop-color="#B6E84A" stop-opacity="0.13"/><stop offset="60%" stop-color="#B6E84A" stop-opacity="0"/></radialGradient>
+    <pattern id="grid" width="46" height="46" patternUnits="userSpaceOnUse"><path d="M 46 0 L 0 0 0 46" fill="none" stroke="#6b8dff" stroke-opacity="0.06" stroke-width="1"/></pattern>
+    <linearGradient id="title" x1="0" y1="0" x2="1" y2="0.4"><stop offset="0%" stop-color="#d6ff8a"/><stop offset="55%" stop-color="#B6E84A"/><stop offset="100%" stop-color="#5ad6c0"/></linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffffff" stop-opacity="0.05"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0.015"/></linearGradient>
+    <linearGradient id="term" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0c1016"/><stop offset="100%" stop-color="#070a0e"/></linearGradient>
+    <linearGradient id="tileLime" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#B6E84A" stop-opacity="0.12"/><stop offset="100%" stop-color="#B6E84A" stop-opacity="0.03"/></linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="150%"><feGaussianBlur stdDeviation="18" result="b"/><feOffset dy="14" result="o"/><feColorMatrix in="o" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.5 0" result="s"/><feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="neon" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="halo" x="-30%" y="-60%" width="160%" height="220%"><feGaussianBlur stdDeviation="7"/></filter>
+    <style><![CDATA[
+      .kick{font:600 14px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.32em;fill:#B6E84A;}
+      .h1{font:800 52px Inter,-apple-system,"SF Pro Display",system-ui,sans-serif;letter-spacing:-.02em;}
+      .sub{font:400 22px Inter,-apple-system,system-ui,sans-serif;fill:#8a90b8;}
+      .lab{font:600 12px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.24em;fill:#6b7099;}
+      .m{font:500 20px ui-monospace,"SF Mono",Menlo,monospace;fill:#eaf2ff;}
+      .mm{font:500 18px ui-monospace,"SF Mono",Menlo,monospace;fill:#7a80a8;}
+      .kw{font:500 20px ui-monospace,"SF Mono",Menlo,monospace;fill:#5ad6c0;}
+      .cap{font:500 15px Inter,-apple-system,system-ui,sans-serif;fill:#6b7099;}
+      .statv{font:800 46px Inter,-apple-system,system-ui,sans-serif;fill:#B6E84A;}
+      .statu{font:600 12px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.14em;fill:#8a90b8;text-transform:uppercase;}
+      .altname{font:600 20px ui-monospace,"SF Mono",Menlo,monospace;fill:#b8bcd8;}
+      .altcost{font:500 17px ui-monospace,"SF Mono",Menlo,monospace;fill:#7a80a8;}
+      .note{font:400 19px Inter,-apple-system,system-ui,sans-serif;fill:#7a80a8;}
+      .noteA{font:600 19px Inter,-apple-system,system-ui,sans-serif;fill:#B6E84A;}
+    ]]></style>
+  </defs>
+
+  <rect width="1600" height="920" fill="#08080f"/>
+  <rect width="1600" height="920" fill="url(#grid)"/>
+  <rect width="1600" height="920" fill="url(#gCyan)"/>
+  <rect width="1600" height="920" fill="url(#gLime)"/>
+
+  <text x="100" y="98" class="kick">LINEAR-CLI<tspan fill="#5ad6c0"> · ZERO DEPS, ZERO SUPPLY CHAIN</tspan></text>
+  <text x="98" y="162" class="h1" fill="#B6E84A" opacity="0.36" filter="url(#halo)">One file. Zero dependencies.</text>
+  <text x="98" y="162" class="h1" fill="url(#title)">One file. Zero dependencies.</text>
+  <text x="100" y="204" class="sub">Every symbol is Python standard library — no npm install, no node_modules, no crates.</text>
+
+  <!-- ===== terminal: the imports ===== -->
+  <g filter="url(#soft)"><rect x="90" y="270" width="700" height="308" rx="20" fill="url(#term)" stroke="#B6E84A" stroke-opacity="0.32" stroke-width="1.5"/></g>
+  <circle cx="122" cy="304" r="6" fill="#fb7185"/><circle cx="144" cy="304" r="6" fill="#f5c451"/><circle cx="166" cy="304" r="6" fill="#B6E84A"/>
+  <text x="758" y="310" class="lab" text-anchor="end">linear · imports</text>
+  <line x1="118" y1="326" x2="762" y2="326" stroke="#1a2230" stroke-width="1"/>
+  <text x="122" y="368" class="m"><tspan fill="#5ad6c0">$</tspan> grep -E '^(import|from)' linear | sort -u</text>
+  <text x="122" y="406" class="mm"><tspan class="kw">import</tspan> argparse  json  mimetypes  os</text>
+  <text x="122" y="438" class="mm"><tspan class="kw">import</tspan> subprocess  sys</text>
+  <text x="122" y="470" class="mm"><tspan class="kw">from</tspan> pathlib <tspan class="kw">import</tspan> Path</text>
+  <text x="122" y="502" class="mm"><tspan class="kw">from</tspan> urllib.request <tspan class="kw">import</tspan> Request, urlopen</text>
+  <text x="122" y="534" class="mm"><tspan class="kw">from</tspan> urllib.error <tspan class="kw">import</tspan> URLError</text>
+  <text x="122" y="562" class="cap">every symbol — Python standard library, nothing to install</text>
+
+  <!-- ===== stat tiles ===== -->
+  <g filter="url(#soft)"><rect x="90" y="602" width="222" height="118" rx="18" fill="url(#tileLime)" stroke="#B6E84A" stroke-opacity="0.3" stroke-width="1.2"/></g>
+  <text x="201" y="668" class="statv" text-anchor="middle" filter="url(#neon)">1</text><text x="201" y="700" class="statu" text-anchor="middle">file · ~76 KB</text>
+  <g filter="url(#soft)"><rect x="329" y="602" width="222" height="118" rx="18" fill="url(#tileLime)" stroke="#B6E84A" stroke-opacity="0.3" stroke-width="1.2"/></g>
+  <text x="440" y="668" class="statv" text-anchor="middle" filter="url(#neon)">0</text><text x="440" y="700" class="statu" text-anchor="middle">dependencies</text>
+  <g filter="url(#soft)"><rect x="568" y="602" width="222" height="118" rx="18" fill="url(#tileLime)" stroke="#B6E84A" stroke-opacity="0.3" stroke-width="1.2"/></g>
+  <text x="679" y="668" class="statv" text-anchor="middle" filter="url(#neon)" font-size="40">~2,100</text><text x="679" y="700" class="statu" text-anchor="middle">lines · audit surface</text>
+
+  <!-- ===== the alternatives (right) ===== -->
+  <g filter="url(#soft)"><rect x="838" y="270" width="672" height="450" rx="20" fill="url(#glass)" stroke="#3a425e" stroke-width="1.5"/></g>
+  <text x="870" y="316" class="lab" fill="#6b7099">THE ALTERNATIVES — WHAT YOU'D OTHERWISE AUDIT</text>
+  <line x1="870" y1="334" x2="1478" y2="334" stroke="#232a3a" stroke-width="1"/>
+
+  <text x="870" y="386" class="altname">@linear/cli <tspan class="mm" font-size="15">official</tspan></text>
+  <rect x="1250" y="366" width="228" height="30" rx="8" fill="#fb7185" fill-opacity="0.10" stroke="#fb7185" stroke-opacity="0.3"/><text x="1364" y="387" class="altcost" fill="#fb7185" text-anchor="middle">Node · abandoned 2021</text>
+
+  <text x="870" y="446" class="altname">Linearis</text>
+  <rect x="1250" y="426" width="228" height="30" rx="8" fill="#f5c451" fill-opacity="0.09" stroke="#f5c451" stroke-opacity="0.28"/><text x="1364" y="447" class="altcost" fill="#f5c451" text-anchor="middle">Node · 27 MB deps</text>
+
+  <text x="870" y="506" class="altname">schpet/linear-cli</text>
+  <rect x="1250" y="486" width="228" height="30" rx="8" fill="#f5c451" fill-opacity="0.09" stroke="#f5c451" stroke-opacity="0.28"/><text x="1364" y="507" class="altcost" fill="#f5c451" text-anchor="middle">Deno · 25+ imports</text>
+
+  <text x="870" y="566" class="altname">Finesssee/linear-cli</text>
+  <rect x="1250" y="546" width="228" height="30" rx="8" fill="#f5c451" fill-opacity="0.09" stroke="#f5c451" stroke-opacity="0.28"/><text x="1364" y="567" class="altcost" fill="#f5c451" text-anchor="middle">Rust · 28 crates</text>
+
+  <text x="870" y="626" class="altname">Linear MCP server</text>
+  <rect x="1250" y="606" width="228" height="30" rx="8" fill="#fb7185" fill-opacity="0.10" stroke="#fb7185" stroke-opacity="0.3"/><text x="1364" y="627" class="altcost" fill="#fb7185" text-anchor="middle">~13k tokens / turn</text>
+
+  <text x="870" y="688" class="cap" fill="#8a90b8">every one adds a dependency tree — or a token tax — you didn't write and have to trust.</text>
+
+  <!-- footer -->
+  <text x="100" y="792" class="note">The full audit surface: <tspan class="noteA">~2,100 lines of Python</tspan> + the stdlib + Linear's GraphQL API. That's it.</text>
+  <text x="100" y="830" class="note">The most boring CLI you'll ever security-review — <tspan class="noteA">that's the point</tspan>.</text>
+</svg>
