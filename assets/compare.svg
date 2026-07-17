@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" role="img" aria-label="How linear-cli compares: it is a single Python-stdlib file with 0 dependencies and a 76 KB / 1-file footprint, versus @linear/cli (Node, abandoned 2021), Linearis (27 MB node_modules), schpet (Deno, 25+ imports), Finesssee (Rust, 28 crates), and Linear's MCP server (13k tokens injected into every agent turn). Numbers verified against each project's manifest.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" role="img" aria-label="How linear-cli compares: it is a single Python-stdlib file with 0 dependencies and a ~118 KB / 1-file footprint, versus @linear/cli (Node, abandoned 2021), Linearis (27 MB node_modules), schpet (Deno, 25+ imports), Finesssee (Rust, 28 crates), and Linear's MCP server (13k tokens injected into every agent turn). Numbers verified against each project's manifest.">
   <defs>
     <radialGradient id="gAmber" cx="10%" cy="0%" r="70%"><stop offset="0%" stop-color="#f5c451" stop-opacity="0.11"/><stop offset="60%" stop-color="#f5c451" stop-opacity="0"/></radialGradient>
     <radialGradient id="gLime" cx="92%" cy="-6%" r="70%"><stop offset="0%" stop-color="#B6E84A" stop-opacity="0.11"/><stop offset="60%" stop-color="#B6E84A" stop-opacity="0"/></radialGradient>
@@ -50,7 +50,7 @@
   <text x="660" y="321" class="dHi">0</text>
   <rect x="1005" y="304" width="360" height="12" rx="6" fill="#ffffff" fill-opacity="0.05"/>
   <rect x="1005" y="304" width="14" height="12" rx="6" fill="#B6E84A"/>
-  <text x="1390" y="321" class="fp">76 KB · 1 file</text>
+  <text x="1390" y="321" class="fp">~118 KB · 1 file</text>
 
   <!-- other rows -->
   <!-- @linear/cli -->
