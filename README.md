@@ -6,15 +6,15 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
 [![Supply chain: 0 attack surface](https://img.shields.io/badge/supply%20chain-0%20attack%20surface-brightgreen.svg)](#zero-supply-chain-attack-surface)
-[![Single file](https://img.shields.io/badge/single%20file-76%20KB-brightgreen.svg)](./linear)
+[![Single file](https://img.shields.io/badge/single%20file-118%20KB-brightgreen.svg)](./linear)
 [![Team CLI](https://img.shields.io/badge/team-CLI-a3e635.svg)](#why-the-mcp-server-isnt-always-the-answer)
 
-Issue tracking from the shell — for humans and their agents. Query your queue, claim tasks, report progress, close with proof. Works the same whether you're typing or a subagent is.
+Linear for human-owned work and agent-executed handoff. Keep the human as assignee, delegate the issue to an agent with `--delegate`, and require proof before `--done` closes the loop.
 
-Single-file Python (stdlib only). No npm, no cargo, no `@linear/sdk`. Works on macOS and Linux.
+Use the same shell contract whether you're typing or a subagent is: query the queue, delegate the work, ship progress notes, and close only with evidence. Single-file Python (stdlib only) keeps install and audit overhead low, but the moat is the delegation workflow.
 
 <p align="center">
-  <img src="assets/flow.svg" alt="How a Linear ticket becomes a PR: a human files the ticket and stays the assignee, an agent picks it up by lane label, ships a PR plus proof, then the human reviews. linear-cli is the contract between them." width="100%" />
+  <img src="assets/flow.svg" alt="How a Linear ticket becomes a PR: a human files the ticket and stays the assignee, an agent becomes the delegate, ships a PR plus proof, then the human reviews. linear-cli is the contract between them." width="100%" />
 </p>
 
 <p align="center">
@@ -49,6 +49,12 @@ linear setup --api-key lin_api_... --agent claude
 Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents/linear.json` from an earlier setup, linear-cli auto-migrates it on first run.
 
 > **Security:** treat the API key like a password. **Do not paste it into chat with an LLM in plaintext.** Pass it from your shell env (`linear setup --api-key "$LINEAR_API_KEY"`), or let linear-cli read it from the macOS Keychain. Resolution order is: config file → `LINEAR_API_KEY` env → Keychain service `linear-api-key`.
+
+### Fleet setup for agents
+
+For a shared agent fleet, mint the Full-access key once with `agents browser` so the browser session drives `linear.app/settings/account/security` instead of exposing the key in chat. Store it in `agents secrets` / the OS keychain, then let each session run with `LINEAR_API_KEY` populated from that secret.
+
+No code change is required for this path: linear-cli already resolves credentials from its config file, then `LINEAR_API_KEY`, then the macOS Keychain service `linear-api-key`.
 
 ## Usage
 
@@ -125,7 +131,8 @@ Full help: `linear <command> --help`.
 The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.
 
 - **Assignee-as-queue.** `linear tasks` returns what *you* own in the active cycle. Widen with `--cycle all` (whole team) or `--cycle none` (backlog), or filter by `--assignee me|none|<email>`. No dashboards, no saved views.
-- **Agent-lane labels.** Set `--agent claude` at setup and `linear tasks` filters to issues labeled for that agent. Multiple agents can share a team without stepping on each other.
+- **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
+- **Shared-seat fallback.** If your agents share one Linear seat, set `--agent claude` at setup and `linear tasks` filters to issues labeled for that agent. Labels are a fallback lane, not the primary handoff model.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
 - **JSON everywhere.** `--json` on every read command. Pipe to `jq` or hand to a subagent.
 
@@ -148,11 +155,11 @@ Drop [`skill.md`](./skill.md) into your agent's skills directory (e.g. `~/.claud
 ## Why this one?
 
 <p align="center">
-  <img src="assets/zero-deps.svg" alt="linear-cli is one ~76 KB Python file with zero dependencies (stdlib only) and a ~2,100-line audit surface, versus Node's node_modules, Rust's crates, and an MCP server's per-turn token cost." width="100%" />
+  <img src="assets/zero-deps.svg" alt="linear-cli is one ~118 KB Python file with zero dependencies (stdlib only) and a ~3,000-line audit surface, versus Node's node_modules, Rust's crates, and an MCP server's per-turn token cost." width="100%" />
 </p>
 
 
-The Linear CLI space already has options. Here's what's different about this one, measured — not vibes.
+The Linear CLI space already has options. This one is built for human-owned queues where agents execute delegated work and must prove completion. The zero-dependency footprint is the supporting advantage: easy to install, easy to audit, and cheap for subagents to call repeatedly.
 
 ### Zero dependencies. Literally.
 
@@ -170,27 +177,35 @@ import subprocess
 import sys
 ```
 
-Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno. The whole tool is one ~76 KB file you can read top-to-bottom in an hour.
+Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno. The whole tool is one ~118 KB file you can read top-to-bottom.
 
 ### How it compares
 
 <p align="center">
-  <img src="assets/compare.svg" alt="How linear-cli compares: 0 dependencies and a 76 KB single file versus @linear/cli, Linearis, schpet, Finesssee, and Linear's MCP server — measured against each project's manifest." width="100%" />
+  <img src="assets/compare.svg" alt="How linear-cli compares: 0 dependencies and a 118 KB single file versus @linear/cli, Linearis, schpet, Finesssee, and Linear's MCP server — measured against each project's manifest." width="100%" />
 </p>
 
 
 | Tool | Runtime | Deps | Install footprint | Last published |
 |------|---------|------|-------------------|----------------|
-| **linear-cli** (this) | Python 3.9+ stdlib | **0** | 76 KB, 1 file | active |
+| **linear-cli** (this) | Python 3.9+ stdlib | **0** | ~118 KB, 1 file | active |
 | [`@linear/cli`](https://www.npmjs.com/package/@linear/cli) (official) | Node | 0 | 5 MB npm pkg | Nov 2021 (abandoned) |
 | [Linearis](https://github.com/czottmann/linearis) | Node | `@linear/sdk` + `commander` | 27 MB `node_modules` | 2025 |
 | [schpet/linear-cli](https://github.com/schpet/linear-cli) | Deno | 25+ imports (cliffy, graphql-codegen, unified, valibot…) | Deno + codegen | active |
-| [scmfury/linear-cli](https://github.com/feras239/linear-cli) | Node 18+ | `@linear/sdk`, commander, dotenv, picocolors | 27 MB `node_modules` | 2025 |
-| [evangodon/linear-cli](https://github.com/evangodon/linear-cli) | Node | 18 deps (oclif, boxen, chalk, inquirer, marked…) | heavy | stale |
 | [Finesssee/linear-cli](https://github.com/Finesssee/linear-cli) | Rust toolchain | 28 crates (tokio, reqwest, clap, keyring…) | compiled binary | active |
 | Linear's hosted [MCP server](https://linear.app/docs/mcp) | remote | — | 0 local, but 13k+ tokens injected into every agent turn | active |
 
 Numbers verified against each project's `package.json` / `Cargo.toml` / `deno.json` via the npm registry.
+
+| Capability | linear-cli | `@linear/cli` | Linearis | schpet | Finesssee | Linear MCP |
+|------------|------------|---------------|----------|--------|-----------|------------|
+| Native agent delegation (`assignee` stays human, `delegateId` becomes agent) | yes | ? | ? | ? | ? | ? |
+| Proof-first completion (`--done` requires `--proof`) | yes | ? | ? | ? | ? | ? |
+| Bulk issue updates (`ANT-1 ANT-2`, `--stdin`) | yes | ? | ? | ? | ? | ? |
+| Bulk JSONL create (`--from-file`) | yes | ? | ? | ? | ? | ? |
+| Full pagination for list/search paths | yes | ? | ? | ? | ? | ? |
+
+`?` means the competitor may support it, but this README is not claiming that without a source-level verification. The point is the positive contract this CLI exposes for agents: native delegation, proof-first close, bulk-safe commands, and no silent 50-item cap.
 
 ### Zero supply chain attack surface
 
@@ -198,7 +213,7 @@ This is the boring superpower of having no dependencies.
 
 Every notable CLI supply chain attack of the last few years — `event-stream`, `colors`/`faker`, `ua-parser-js`, `node-ipc`, the `xz` backdoor, `polyfill.io`, the dozens of [npm typosquats](https://socket.dev) caught monthly — happened through a compromised dependency, not the tool itself. linear-cli has none. The full audit surface is:
 
-- The ~2,100 lines of Python in this repo (read it: [`linear`](./linear))
+- The ~3,000 lines of Python in this repo (read it: [`linear`](./linear))
 - Python's standard library
 - Linear's own GraphQL API at `api.linear.app`
 
