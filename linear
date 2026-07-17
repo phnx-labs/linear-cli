@@ -456,6 +456,42 @@ def _suggest(value: str, names: list[str]) -> str:
     return f" Did you mean: {', '.join(close)}?" if close else ""
 
 
+def _sort_by_recent(nodes: list[dict]) -> list[dict]:
+    return sorted(
+        nodes,
+        key=lambda n: n.get("updatedAt") or n.get("startsAt") or "",
+        reverse=True,
+    )
+
+
+def _select_named_node(nodes: list[dict], value: str, kind: str,
+                       strict: bool = False, suggest: bool = False,
+                       skip_word: bool = False) -> dict | None:
+    """Select a node from already-fetched data: exact name, then substring,
+    newest first on ambiguity. This keeps API wrappers thin and testable."""
+    matches = [n for n in nodes if (n.get("name") or "").lower() == value.lower()]
+    if not matches:
+        matches = [n for n in nodes if value.lower() in (n.get("name") or "").lower()]
+    if not matches:
+        msg = f"{kind} '{value}' not found."
+        if suggest:
+            msg += _suggest(value, [n.get("name") or "" for n in nodes])
+        if strict:
+            raise LookupError(msg)
+        suffix = " Skipping." if skip_word else ""
+        print(f"Warning: {msg}{suffix}", file=sys.stderr)
+        return None
+    matches = _sort_by_recent(matches)
+    if len(matches) > 1:
+        suffix = ""
+        if kind == "milestone":
+            project_name = matches[0].get("_projectName", "")
+            suffix = f" in project '{project_name}'" if project_name else ""
+        print(f"Note: '{value}' matched {len(matches)} {kind}s; "
+              f"picked '{matches[0].get('name')}'{suffix} (most recent).", file=sys.stderr)
+    return matches[0]
+
+
 def resolve_project_id(api_key: str, team_id: str, value: str,
                        strict: bool = False) -> str | None:
     """Resolve --project to a projectId. Accepts UUID or name (exact match
@@ -472,20 +508,11 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
     if len(value) == 36 and value.count("-") == 4:
         return value
     projects = list_team_projects(api_key, team_id)
-    matches = [p for p in projects if p["name"].lower() == value.lower()]
-    if not matches:
-        # Substring fallback so 'phoenix' matches 'Phoenix Horizon'.
-        matches = [p for p in projects if value.lower() in p["name"].lower()]
-    if not matches:
-        msg = f"project '{value}' not found.{_suggest(value, [p['name'] for p in projects])}"
-        if strict:
-            raise LookupError(msg)
-        print(f"Warning: {msg} Skipping.", file=sys.stderr)
+    match = _select_named_node(projects, value, "project", strict=strict,
+                               suggest=True, skip_word=True)
+    if not match:
         return None
-    if len(matches) > 1:
-        print(f"Note: '{value}' matched {len(matches)} projects; "
-              f"picked '{matches[0]['name']}' (most recent).", file=sys.stderr)
-    return matches[0]["id"]
+    return match["id"]
 
 
 def resolve_milestone_id(api_key: str, team_id: str, name: str,
@@ -539,22 +566,11 @@ def resolve_milestone_id(api_key: str, team_id: str, name: str,
                 m["_projectName"] = p["name"]
                 nodes.append(m)
 
-    matches = [m for m in nodes if m["name"].lower() == name.lower()]
-    if not matches:
-        matches = [m for m in nodes if name.lower() in m["name"].lower()]
-    if not matches:
-        msg = f"milestone '{name}' not found.{_suggest(name, [m['name'] for m in nodes])}"
-        if strict:
-            raise LookupError(msg)
-        print(f"Warning: {msg} Skipping.", file=sys.stderr)
+    match = _select_named_node(nodes, name, "milestone", strict=strict,
+                               suggest=True, skip_word=True)
+    if not match:
         return None
-    matches.sort(key=lambda m: m.get("updatedAt") or "", reverse=True)
-    if len(matches) > 1:
-        proj = matches[0].get("_projectName", "")
-        suffix = f" in project '{proj}'" if proj else ""
-        print(f"Note: '{name}' matched {len(matches)} milestones; "
-              f"picked '{matches[0]['name']}'{suffix} (most recent).", file=sys.stderr)
-    return matches[0]["id"]
+    return match["id"]
 
 
 def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
@@ -569,7 +585,7 @@ def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
             pageInfo { hasNextPage endCursor }
             nodes {
                 id number name startsAt endsAt completedAt
-                issueCountHistory
+                issueCountHistory updatedAt
             }
         }
     }"""
@@ -961,13 +977,33 @@ def list_team_labels(api_key: str, team_id: str) -> list[dict]:
             after: $cursor
         ) {
             pageInfo { hasNextPage endCursor }
-            nodes { id name description color }
+            nodes { id name description color updatedAt }
         }
     }"""
     return paginate_connection(api_key, query, ["issueLabels"], {"teamId": team_id}) or []
 
 
-def resolve_cycle_by_value(api_key: str, team_id: str, value: str) -> dict | None:
+def _select_cycle_node(cycles: list[dict], value: str, strict: bool = False) -> dict | None:
+    matches = [c for c in cycles if (c.get("name") or "").lower() == value.lower()]
+    if not matches and value.isdigit():
+        matches = [c for c in cycles if str(c.get("number")) == value]
+    if not matches:
+        matches = [c for c in cycles if value.lower() in (c.get("name") or "").lower()]
+    if not matches:
+        msg = f"cycle '{value}' not found."
+        if strict:
+            raise LookupError(msg)
+        print(f"Warning: {msg}", file=sys.stderr)
+        return None
+    matches = _sort_by_recent(matches)
+    if len(matches) > 1:
+        print(f"Note: '{value}' matched {len(matches)} cycles; "
+              f"picked '{matches[0].get('name')}' (most recent).", file=sys.stderr)
+    return matches[0]
+
+
+def resolve_cycle_by_value(api_key: str, team_id: str, value: str,
+                           strict: bool = False) -> dict | None:
     """Resolve a non-keyword --cycle value to a cycle node {id, name, ...}.
     Accepts a UUID (passthrough), a cycle number, or a fuzzy name match.
     Warns and returns None when nothing matches."""
@@ -975,44 +1011,44 @@ def resolve_cycle_by_value(api_key: str, team_id: str, value: str) -> dict | Non
         return None
     if len(value) == 36 and value.count("-") == 4:
         return {"id": value, "name": None, "startsAt": None, "endsAt": None}
-    cycles = list_team_cycles(api_key, team_id)
-    matches = [c for c in cycles if (c.get("name") or "").lower() == value.lower()]
-    if not matches and value.isdigit():
-        matches = [c for c in cycles if str(c.get("number")) == value]
-    if not matches:
-        matches = [c for c in cycles if value.lower() in (c.get("name") or "").lower()]
-    if not matches:
-        print(f"Warning: cycle '{value}' not found.", file=sys.stderr)
-        return None
-    if len(matches) > 1:
-        matches.sort(key=lambda c: c.get("startsAt") or "", reverse=True)
-        print(f"Note: '{value}' matched {len(matches)} cycles; "
-              f"picked '{matches[0].get('name')}' (most recent).", file=sys.stderr)
-    return matches[0]
+    return _select_cycle_node(list_team_cycles(api_key, team_id), value, strict=strict)
 
 
-def resolve_label_by_value(api_key: str, team_id: str, value: str) -> dict | None:
+def resolve_label_by_value(api_key: str, team_id: str, value: str,
+                           strict: bool = False) -> dict | None:
     """Resolve a label id-or-name to a label node {id, name, ...}. UUID passes
-    through; otherwise exact (case-insensitive) name wins, then a unique
-    substring match. Ambiguous or missing -> warn and return None."""
+    through; otherwise exact (case-insensitive) name wins, then substring.
+    Ambiguity picks the most-recently-updated match and warns."""
     if not value:
         return None
     if len(value) == 36 and value.count("-") == 4:
         return {"id": value, "name": value}
-    labels = list_team_labels(api_key, team_id)
-    exact = [l for l in labels if l["name"].lower() == value.lower()]
-    if exact:
-        return exact[0]
-    subs = [l for l in labels if value.lower() in l["name"].lower()]
-    if len(subs) == 1:
-        return subs[0]
-    if len(subs) > 1:
-        names = ", ".join(l["name"] for l in subs[:5])
-        print(f"Warning: label '{value}' is ambiguous ({names}). "
-              f"Use the exact name or ID.", file=sys.stderr)
-        return None
-    print(f"Warning: label '{value}' not found.", file=sys.stderr)
-    return None
+    return _select_named_node(list_team_labels(api_key, team_id), value, "label",
+                              strict=strict)
+
+
+def build_cycle_scope_from_resolved(
+    scope: str | None,
+    active_meta: dict | None = None,
+    next_meta: dict | None = None,
+    cycle_node: dict | None = None,
+) -> tuple[str | None, str | None, dict | None]:
+    s = (scope or "active").lower()
+    if s in ("active", "next"):
+        meta = active_meta if s == "active" else next_meta
+        if not meta:
+            return None, None, None
+        return f'cycle: {{ id: {{ eq: "{meta["id"]}" }} }}', cycle_label(meta), meta
+    if s in ("none", "backlog"):
+        return "cycle: { null: true }", "Backlog (no cycle)", None
+    if s == "all":
+        return "", "All issues", None
+    if not cycle_node:
+        return None, None, None
+    label = cycle_label(cycle_node)
+    if label == "no cycle":
+        label = scope
+    return f'cycle: {{ id: {{ eq: "{cycle_node["id"]}" }} }}', label, cycle_node
 
 
 def build_cycle_scope(api_key: str, team_id: str,
@@ -1027,24 +1063,19 @@ def build_cycle_scope(api_key: str, team_id: str,
     On an unresolvable active/next/named cycle, returns (None, None, None).
     """
     s = (scope or "active").lower()
-    if s in ("active", "next"):
-        meta = resolve_cycle_meta(api_key, team_id, s)
-        if not meta:
-            return None, None, None
-        return f'cycle: {{ id: {{ eq: "{meta["id"]}" }} }}', cycle_label(meta), meta
-    if s in ("none", "backlog"):
-        return "cycle: { null: true }", "Backlog (no cycle)", None
-    if s == "all":
-        return "", "All issues", None
-    node = resolve_cycle_by_value(api_key, team_id, scope)
-    if not node:
-        return None, None, None
-    # A raw-UUID lookup yields a node with neither name nor number; keep showing
-    # the user's input there rather than collapsing to "no cycle".
-    label = cycle_label(node)
-    if label == "no cycle":
-        label = scope
-    return f'cycle: {{ id: {{ eq: "{node["id"]}" }} }}', label, node
+    if s == "active":
+        return build_cycle_scope_from_resolved(
+            scope, active_meta=resolve_cycle_meta(api_key, team_id, s)
+        )
+    if s == "next":
+        return build_cycle_scope_from_resolved(
+            scope, next_meta=resolve_cycle_meta(api_key, team_id, s)
+        )
+    if s in ("none", "backlog", "all"):
+        return build_cycle_scope_from_resolved(scope)
+    return build_cycle_scope_from_resolved(
+        scope, cycle_node=resolve_cycle_by_value(api_key, team_id, scope)
+    )
 
 
 def cycle_date_to_iso(value: str, flag: str) -> str:
@@ -1476,6 +1507,47 @@ def show_issue_detail(args, api_key, team_id):
 # update - all mutations on an existing issue
 # ---------------------------------------------------------------------------
 
+def collect_update_identifiers(identifiers, stdin_lines=None) -> list[str]:
+    collected = list(identifiers or [])
+    for line in stdin_lines or []:
+        collected.extend(line.split())
+    return list(dict.fromkeys(collected))
+
+
+def run_bulk_update(args, cfg, api_key, team_id, identifiers: list[str],
+                    project_id=_UNSET, milestone_id=_UNSET,
+                    resolve_issue_fn=None, apply_update_fn=None):
+    resolve_issue_fn = resolve_issue_fn or resolve_issue
+    apply_update_fn = apply_update_fn or _apply_update
+    total = len(identifiers)
+    succeeded = 0
+    failed: list[str] = []
+    for i, ident in enumerate(identifiers, 1):
+        issue = resolve_issue_fn(api_key, team_id, ident)
+        if not issue:
+            print(f"[{i}/{total}] {ident} -> not found")
+            failed.append(ident)
+            continue
+        print(f"[{i}/{total}] {issue['identifier']}")
+        try:
+            if apply_update_fn(args, cfg, api_key, team_id, issue, single=False,
+                               project_id=project_id, milestone_id=milestone_id):
+                succeeded += 1
+            else:
+                failed.append(ident)
+        except Exception as e:  # never let one ticket abort the batch
+            print(f"  error: {e}", file=sys.stderr)
+            failed.append(ident)
+
+    summary = f"\n{succeeded}/{total} updated."
+    if failed:
+        summary += f" Failed: {', '.join(failed)}"
+    sys.stdout.flush()  # keep per-issue progress ahead of the summary when piped
+    print(summary, file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
 def cmd_update(args, cfg, api_key, team_id):
     """Dispatcher: apply the same set of changes to one or many issues.
 
@@ -1492,12 +1564,8 @@ def cmd_update(args, cfg, api_key, team_id):
         print('  --proof "Sent 15/30 emails"        (text)', file=sys.stderr)
         sys.exit(1)
 
-    identifiers = list(args.identifier or [])
-    if getattr(args, "stdin", False):
-        for line in sys.stdin:
-            identifiers.extend(line.split())
-    # De-dupe while preserving order.
-    identifiers = list(dict.fromkeys(identifiers))
+    stdin_lines = sys.stdin if getattr(args, "stdin", False) else None
+    identifiers = collect_update_identifiers(args.identifier, stdin_lines)
     if not identifiers:
         print("No issue identifier given.", file=sys.stderr)
         sys.exit(1)
@@ -1533,33 +1601,8 @@ def cmd_update(args, cfg, api_key, team_id):
             sys.exit(1)
         return
 
-    total = len(identifiers)
-    succeeded = 0
-    failed: list[str] = []
-    for i, ident in enumerate(identifiers, 1):
-        issue = resolve_issue(api_key, team_id, ident)
-        if not issue:
-            print(f"[{i}/{total}] {ident} -> not found")
-            failed.append(ident)
-            continue
-        print(f"[{i}/{total}] {issue['identifier']}")
-        try:
-            if _apply_update(args, cfg, api_key, team_id, issue, single=False,
-                             project_id=project_id, milestone_id=milestone_id):
-                succeeded += 1
-            else:
-                failed.append(ident)
-        except Exception as e:  # never let one ticket abort the batch
-            print(f"  error: {e}", file=sys.stderr)
-            failed.append(ident)
-
-    summary = f"\n{succeeded}/{total} updated."
-    if failed:
-        summary += f" Failed: {', '.join(failed)}"
-    sys.stdout.flush()  # keep per-issue progress ahead of the summary when piped
-    print(summary, file=sys.stderr)
-    if failed:
-        sys.exit(1)
+    run_bulk_update(args, cfg, api_key, team_id, identifiers,
+                    project_id=project_id, milestone_id=milestone_id)
 
 
 def _apply_update(args, cfg, api_key, team_id, issue, single=True,
