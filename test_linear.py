@@ -46,6 +46,22 @@ class CycleLabelTest(unittest.TestCase):
         self.assertEqual(linear_cli.cycle_label({"name": "", "number": 7}), "Cycle 7")
 
 
+class InboxTypeLabelTest(unittest.TestCase):
+    def test_common_notification_types_have_friendly_labels(self):
+        # The `notifications` query returns these; each must render a human label,
+        # not the raw camelCase type, in `linear inbox`.
+        for raw, expected in [
+            ("issueNewComment", "comment"),
+            ("issueCommentMention", "mention"),
+            ("issueAssignedToYou", "assigned"),
+            ("issueStatusChanged", "status"),
+        ]:
+            self.assertEqual(linear_cli._INBOX_TYPE_LABEL.get(raw), expected)
+
+    def test_unmapped_type_absent_so_cmd_inbox_falls_back_to_raw(self):
+        self.assertNotIn("issueSomeFutureKind", linear_cli._INBOX_TYPE_LABEL)
+
+
 class BulkUpdateTest(unittest.TestCase):
     def test_collect_update_identifiers_dedupes_positional_and_stdin_in_order(self):
         self.assertEqual(
