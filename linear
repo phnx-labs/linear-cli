@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -2771,9 +2771,56 @@ _INBOX_TYPE_LABEL = {
 }
 
 
+def _mark_notifications_read(api_key, ids):
+    """Mark specific notifications read via notificationUpdate. Returns (ok, failed)."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    ok, failed = [], []
+    for nid in ids:
+        data = gql(api_key, """
+            mutation($id: String!, $at: DateTime!) {
+              notificationUpdate(id: $id, input: { readAt: $at }) { success }
+            }
+        """, {"id": nid, "at": now})
+        # check_errors prints "Error: <message>" to stderr on a GraphQL error,
+        # matching the other per-item mutation loops in this file.
+        had_error = check_errors(data)
+        success = (((data.get("data") or {}).get("notificationUpdate") or {}).get("success"))
+        (ok if success and not had_error else failed).append(nid)
+    return ok, failed
+
+
 def cmd_inbox(args, cfg, api_key, team_id):
-    """Show your Linear inbox — notifications: comments, mentions, assignments,
-    status changes on issues you follow. Unread only by default; --all adds read."""
+    """Show your Linear inbox — notifications (comments, mentions, assignments,
+    status changes). Acts too: --read <id> marks notification(s) read, --read-all
+    marks everything read. Unread only by default; --all lists read as well.
+
+    Agents: `--json` returns full metadata per notification — the issue
+    (identifier + url + state), the comment (id + url + body), the thread parent,
+    and the actor — enough to follow up. Reply on a ticket with
+    `linear update <identifier> --comment "..."`; dismiss with
+    `linear inbox --read <notification-id>`."""
+    # --- actions take precedence over listing ---
+    if getattr(args, "read_all", False):
+        data = gql(api_key, "mutation { notificationMarkReadAll { success } }")
+        ok = not check_errors(data) and (((data.get("data") or {}).get("notificationMarkReadAll") or {}).get("success"))
+        if ok:
+            print("Marked all notifications read.")
+        else:
+            print("Failed to mark all read.", file=sys.stderr)
+            sys.exit(1)
+        return
+    read_ids = getattr(args, "read", None) or []
+    if read_ids:
+        ok, failed = _mark_notifications_read(api_key, read_ids)
+        if ok:
+            print(f"Marked read ({len(ok)}): {', '.join(ok)}")
+        if failed:
+            print(f"Failed to mark read: {', '.join(failed)}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # --- list ---
     limit = getattr(args, "limit", 30)  # argparse always supplies a default; honor an explicit value
     if limit < 1:
         print("inbox: --limit must be >= 1", file=sys.stderr)
@@ -2784,9 +2831,10 @@ def cmd_inbox(args, cfg, api_key, team_id):
             nodes {
               id __typename createdAt readAt
               ... on IssueNotification {
-                type
-                issue { identifier title url state { name } }
-                comment { body }
+                type url inboxUrl
+                issue { identifier title url state { name type } }
+                comment { id url body }
+                parentComment { id url }
                 actor { name displayName }
               }
             }
@@ -2824,6 +2872,8 @@ def cmd_inbox(args, cfg, api_key, team_id):
         body = ((n.get("comment") or {}).get("body") or "").replace("\n", " ").strip()
         if body and label in ("comment", "mention"):
             print(f'      "{body[:96]}"')
+    print('\nReply:  linear update <ID> --comment "..."    ·    '
+          'Dismiss:  linear inbox --read <notification-id>  (id in --json)')
 
 
 def cmd_agents(args, cfg, api_key, team_id):
@@ -3056,12 +3106,16 @@ def main():
     p_states.add_argument("--json", action="store_true", help="JSON output")
 
     # inbox (Linear notifications: comments, mentions, assignments, status changes)
-    p_inbox = sub.add_parser("inbox", help="Show your Linear inbox (notifications)")
+    p_inbox = sub.add_parser("inbox", help="Show your Linear inbox (notifications), or mark them read")
     p_inbox.add_argument("--all", action="store_true",
                          help="Include already-read notifications (default: unread only)")
     p_inbox.add_argument("--limit", type=int, default=30,
                          help="Max notifications to fetch (default: 30)")
     p_inbox.add_argument("--json", action="store_true", help="JSON output")
+    p_inbox.add_argument("--read", action="append", metavar="NOTIFICATION_ID",
+                         help="Mark the given notification id(s) read (repeatable). id is in --json output.")
+    p_inbox.add_argument("--read-all", action="store_true",
+                         help="Mark ALL notifications read")
 
     # Back-compat + ergonomics: `projects <name>` (a bare name, not a verb) is
     # shorthand for `projects show <name>`. Insert the implicit `show` so the
