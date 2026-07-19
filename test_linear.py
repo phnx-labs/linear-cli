@@ -61,6 +61,39 @@ class InboxTypeLabelTest(unittest.TestCase):
     def test_unmapped_type_absent_so_cmd_inbox_falls_back_to_raw(self):
         self.assertNotIn("issueSomeFutureKind", linear_cli._INBOX_TYPE_LABEL)
 
+    def test_cmd_inbox_truncates_unmapped_type_and_keeps_rows_aligned(self):
+        # A notification type not in _INBOX_TYPE_LABEL must not break column
+        # alignment: the label column is fixed-width, so the actor column lands
+        # at the same offset on a mapped row and an unmapped (long-type) row.
+        def fake_gql(_key, _query, _vars=None):
+            node = lambda ident, typ: {
+                "id": ident, "__typename": "IssueNotification",
+                "createdAt": "2026-07-18T00:00:00Z", "readAt": None, "type": typ,
+                "issue": {"identifier": ident, "title": "T", "url": "u", "state": {"name": "Todo"}},
+                "comment": None, "actor": {"name": "Bisma"},
+            }
+            return {"data": {"notifications": {"nodes": [
+                node("RUSH-1", "issueNewComment"),
+                node("RUSH-2", "issueSomeVeryLongFutureKind"),
+            ]}}}
+
+        args = types.SimpleNamespace(limit=30, all=False, json=False)
+        original_gql = linear_cli.gql
+        linear_cli.gql = fake_gql
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                linear_cli.cmd_inbox(args, {}, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original_gql
+
+        out = stdout.getvalue()
+        self.assertIn("comment", out)  # mapped type renders its friendly label
+        self.assertNotIn("issueSomeVeryLongFutureKind", out)  # long raw type truncated
+        actor_rows = [ln for ln in out.splitlines() if "Bisma" in ln]
+        self.assertEqual(len(actor_rows), 2)
+        self.assertEqual(len({ln.index("Bisma") for ln in actor_rows}), 1)  # aligned
+
 
 class BulkUpdateTest(unittest.TestCase):
     def test_collect_update_identifiers_dedupes_positional_and_stdin_in_order(self):

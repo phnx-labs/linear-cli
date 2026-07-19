@@ -2774,7 +2774,10 @@ _INBOX_TYPE_LABEL = {
 def cmd_inbox(args, cfg, api_key, team_id):
     """Show your Linear inbox — notifications: comments, mentions, assignments,
     status changes on issues you follow. Unread only by default; --all adds read."""
-    limit = getattr(args, "limit", None) or 30
+    limit = getattr(args, "limit", 30)  # argparse always supplies a default; honor an explicit value
+    if limit < 1:
+        print("inbox: --limit must be >= 1", file=sys.stderr)
+        return
     data = gql(api_key, """
         query($n: Int!) {
           notifications(first: $n) {
@@ -2817,7 +2820,7 @@ def cmd_inbox(args, cfg, api_key, team_id):
         label = _INBOX_TYPE_LABEL.get(n.get("type"), n.get("type") or "note")
         dot = " " if n.get("readAt") else "*"
         title = (iss.get("title") or "")[:48]
-        print(f"  {dot} {iss.get('identifier','-'):11s}{label:11s}{who:14.14s}{title}")
+        print(f"  {dot} {iss.get('identifier','-'):11.11s}{label:11.11s}{who:14.14s}{title}")
         body = ((n.get("comment") or {}).get("body") or "").replace("\n", " ").strip()
         if body and label in ("comment", "mention"):
             print(f'      "{body[:96]}"')
