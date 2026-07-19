@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.11.1"
+__version__ = "0.12.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -2756,6 +2756,76 @@ def cmd_states(args, cfg, api_key, team_id):
         print(f"  {name:20s}  {meta['type']}")
 
 
+_INBOX_TYPE_LABEL = {
+    "issueNewComment": "comment",
+    "issueCommentMention": "mention",
+    "issueMention": "mention",
+    "issueCommentReaction": "reaction",
+    "issueAssignedToYou": "assigned",
+    "issueUnassignedFromYou": "unassigned",
+    "issueStatusChanged": "status",
+    "issueDue": "due",
+    "issueBlocking": "blocking",
+    "issueEmojiReaction": "reaction",
+    "issueSubscribed": "subscribed",
+}
+
+
+def cmd_inbox(args, cfg, api_key, team_id):
+    """Show your Linear inbox — notifications: comments, mentions, assignments,
+    status changes on issues you follow. Unread only by default; --all adds read."""
+    limit = getattr(args, "limit", 30)  # argparse always supplies a default; honor an explicit value
+    if limit < 1:
+        print("inbox: --limit must be >= 1", file=sys.stderr)
+        return
+    data = gql(api_key, """
+        query($n: Int!) {
+          notifications(first: $n) {
+            nodes {
+              id __typename createdAt readAt
+              ... on IssueNotification {
+                type
+                issue { identifier title url state { name } }
+                comment { body }
+                actor { name displayName }
+              }
+            }
+          }
+        }
+    """, {"n": limit})
+    if check_errors(data):
+        return
+    nodes = ((data.get("data") or {}).get("notifications") or {}).get("nodes") or []
+    # Only issue notifications carry an issue; ignore project/other kinds for now.
+    items = [n for n in nodes if n.get("issue")]
+    if not getattr(args, "all", False):
+        items = [n for n in items if not n.get("readAt")]
+
+    if getattr(args, "json", False):
+        print(json.dumps(items, indent=2))
+        return
+
+    if not items:
+        hint = "" if getattr(args, "all", False) else " (no unread — use --all to include read)"
+        print(f"Inbox empty{hint}.")
+        return
+
+    unread = sum(1 for n in items if not n.get("readAt"))
+    scope = "" if getattr(args, "all", False) else " unread"
+    print(f"Inbox — {len(items)}{scope} ({unread} unread):")
+    for n in items:
+        iss = n.get("issue") or {}
+        actor = n.get("actor") or {}
+        who = actor.get("name") or actor.get("displayName") or "-"
+        label = _INBOX_TYPE_LABEL.get(n.get("type"), n.get("type") or "note")
+        dot = " " if n.get("readAt") else "*"
+        title = (iss.get("title") or "")[:48]
+        print(f"  {dot} {iss.get('identifier','-'):11.11s}{label:11.11s}{who:14.14s}{title}")
+        body = ((n.get("comment") or {}).get("body") or "").replace("\n", " ").strip()
+        if body and label in ("comment", "mention"):
+            print(f'      "{body[:96]}"')
+
+
 def cmd_agents(args, cfg, api_key, team_id):
     """List the workspace's agent members — the app users you can `--delegate` to.
 
@@ -2985,6 +3055,14 @@ def main():
     p_states = sub.add_parser("states", help="List the team's workflow states")
     p_states.add_argument("--json", action="store_true", help="JSON output")
 
+    # inbox (Linear notifications: comments, mentions, assignments, status changes)
+    p_inbox = sub.add_parser("inbox", help="Show your Linear inbox (notifications)")
+    p_inbox.add_argument("--all", action="store_true",
+                         help="Include already-read notifications (default: unread only)")
+    p_inbox.add_argument("--limit", type=int, default=30,
+                         help="Max notifications to fetch (default: 30)")
+    p_inbox.add_argument("--json", action="store_true", help="JSON output")
+
     # Back-compat + ergonomics: `projects <name>` (a bare name, not a verb) is
     # shorthand for `projects show <name>`. Insert the implicit `show` so the
     # detail view keeps working alongside the create/archive/delete subcommands.
@@ -3049,6 +3127,8 @@ def main():
         cmd_agents(args, cfg, api_key, team_id)
     elif args.command == "states":
         cmd_states(args, cfg, api_key, team_id)
+    elif args.command == "inbox":
+        cmd_inbox(args, cfg, api_key, team_id)
 
 
 if __name__ == "__main__":

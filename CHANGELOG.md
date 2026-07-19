@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-18
+
+### Added
+
+- `linear inbox` — show your Linear inbox (notifications): comments, mentions,
+  assignments, and status changes on issues you follow. Unread only by default;
+  `--all` includes already-read, `--limit N` bounds the fetch, `--json` for raw
+  output. Backed by the GraphQL `notifications` query — no browser needed.
+
 ## [0.11.1] - 2026-07-17
 
 ### Documentation
