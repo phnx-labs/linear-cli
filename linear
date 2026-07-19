@@ -2782,8 +2782,11 @@ def _mark_notifications_read(api_key, ids):
               notificationUpdate(id: $id, input: { readAt: $at }) { success }
             }
         """, {"id": nid, "at": now})
+        # check_errors prints "Error: <message>" to stderr on a GraphQL error,
+        # matching the other per-item mutation loops in this file.
+        had_error = check_errors(data)
         success = (((data.get("data") or {}).get("notificationUpdate") or {}).get("success"))
-        (ok if success and "errors" not in data else failed).append(nid)
+        (ok if success and not had_error else failed).append(nid)
     return ok, failed
 
 
@@ -2800,10 +2803,12 @@ def cmd_inbox(args, cfg, api_key, team_id):
     # --- actions take precedence over listing ---
     if getattr(args, "read_all", False):
         data = gql(api_key, "mutation { notificationMarkReadAll { success } }")
-        if check_errors(data):
-            return
-        ok = (((data.get("data") or {}).get("notificationMarkReadAll") or {}).get("success"))
-        print("Marked all notifications read." if ok else "Failed to mark all read.")
+        ok = not check_errors(data) and (((data.get("data") or {}).get("notificationMarkReadAll") or {}).get("success"))
+        if ok:
+            print("Marked all notifications read.")
+        else:
+            print("Failed to mark all read.", file=sys.stderr)
+            sys.exit(1)
         return
     read_ids = getattr(args, "read", None) or []
     if read_ids:
