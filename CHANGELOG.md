@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-19
+
+### Added
+
+- `linear inbox` is now agent-actionable:
+  - **Actions:** `--read <id>` marks specific notification(s) read (repeatable);
+    `--read-all` marks everything read (via `notificationUpdate` /
+    `notificationMarkReadAll`).
+  - **Richer `--json`:** each notification now carries the issue (`identifier`,
+    `url`, `state`), the comment (`id`, `url`, `body`), the thread `parentComment`,
+    and the actor — enough for an agent to follow the ticket/thread and act.
+  - The plain listing prints the follow-up recipe: reply with
+    `linear update <ID> --comment "..."`, dismiss with `linear inbox --read <id>`.
+
 ## [0.12.0] - 2026-07-18
 
 ### Added

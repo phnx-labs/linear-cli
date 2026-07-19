@@ -94,6 +94,29 @@ class InboxTypeLabelTest(unittest.TestCase):
         self.assertEqual(len(actor_rows), 2)
         self.assertEqual(len({ln.index("Bisma") for ln in actor_rows}), 1)  # aligned
 
+    def test_cmd_inbox_read_marks_each_given_notification(self):
+        # --read <id> issues a notificationUpdate mutation per id and reports them.
+        calls = []
+
+        def fake_gql(_key, query, variables=None):
+            calls.append(variables)
+            self.assertIn("notificationUpdate", query)
+            return {"data": {"notificationUpdate": {"success": True}}}
+
+        args = types.SimpleNamespace(read=["n1", "n2"], read_all=False,
+                                     limit=30, all=False, json=False)
+        original_gql = linear_cli.gql
+        linear_cli.gql = fake_gql
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                linear_cli.cmd_inbox(args, {}, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original_gql
+
+        self.assertEqual([c["id"] for c in calls], ["n1", "n2"])  # one mutation per id
+        self.assertIn("Marked read (2): n1, n2", stdout.getvalue())
+
 
 class BulkUpdateTest(unittest.TestCase):
     def test_collect_update_identifiers_dedupes_positional_and_stdin_in_order(self):
