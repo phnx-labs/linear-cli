@@ -4,10 +4,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies-literally)
-[![Supply chain: 0 attack surface](https://img.shields.io/badge/supply%20chain-0%20attack%20surface-brightgreen.svg)](#zero-supply-chain-attack-surface)
-[![Single file](https://img.shields.io/badge/single%20file-118%20KB-brightgreen.svg)](./linear)
-[![Team CLI](https://img.shields.io/badge/team-CLI-a3e635.svg)](#why-the-mcp-server-isnt-always-the-answer)
 
 Linear for human-owned work and agent-executed handoff. Keep the human as assignee, delegate the issue to an agent with `--delegate`, and require proof before `--done` closes the loop.
 
@@ -28,14 +24,14 @@ Use the same shell contract whether you're typing or a subagent is: query the qu
 ## Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/main/install.sh | bash
-```
-
-Or manually:
-
-```bash
 curl -o /usr/local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/main/linear
 chmod +x /usr/local/bin/linear
+```
+
+Or use the install script:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/main/install.sh | sh
 ```
 
 ## Setup
