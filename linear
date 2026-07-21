@@ -47,6 +47,8 @@ _UNSET = object()
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
 API_URL = "https://api.linear.app/graphql"
+CONFIG_DIR_MODE = 0o700
+CONFIG_FILE_MODE = 0o600
 
 # How long a cached agent roster stays fresh before an auto-refresh. Agent apps
 # (Claude, Codex, Kimi, …) are installed/removed rarely, so a periodic refresh
@@ -63,19 +65,29 @@ def load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text())
     if LEGACY_CONFIG_PATH.exists():
         cfg = json.loads(LEGACY_CONFIG_PATH.read_text())
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        write_config_file(cfg)
         print(f"Migrated config: {LEGACY_CONFIG_PATH} -> {CONFIG_PATH}", file=sys.stderr)
         return cfg
     return {}
+
+
+def write_config_file(cfg: dict):
+    CONFIG_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+    CONFIG_PATH.parent.chmod(CONFIG_DIR_MODE)
+    data = (json.dumps(cfg, indent=2) + "\n").encode()
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONFIG_FILE_MODE)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    CONFIG_PATH.chmod(CONFIG_FILE_MODE)
 
 
 def save_config(cfg: dict):
     # Volatile cfg (e.g. --team override) opts out of persistence.
     if cfg.get("__volatile__"):
         return
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    write_config_file(cfg)
 
 
 def get_api_key(cfg: dict) -> str:
@@ -377,9 +389,11 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     if which not in ("active", "next"):
         return None
     if which == "active":
-        data = gql(api_key, f"""{{
-            team(id: "{team_id}") {{ activeCycle {{ id name }} }}
-        }}""")
+        data = gql(api_key, """
+            query($teamId: String!) {
+                team(id: $teamId) { activeCycle { id name } }
+            }
+        """, {"teamId": team_id})
         if check_errors(data):
             return None
         cycle = (data.get("data") or {}).get("team", {}).get("activeCycle")
@@ -387,11 +401,13 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
 
     # "next" — Linear has no team.nextCycle field. Find the first cycle whose
     # startsAt is after the active cycle's endsAt, ordered ascending.
-    active_query = gql(api_key, f"""{{
-        team(id: "{team_id}") {{
-            activeCycle {{ endsAt }}
-        }}
-    }}""")
+    active_query = gql(api_key, """
+        query($teamId: String!) {
+            team(id: $teamId) {
+                activeCycle { endsAt }
+            }
+        }
+    """, {"teamId": team_id})
     if check_errors(active_query):
         return None
     active_ends = (
@@ -686,14 +702,13 @@ def resolve_issue(api_key: str, team_id: str, identifier: str) -> dict | None:
         print(f"Invalid identifier: {identifier}", file=sys.stderr)
         return None
 
-    data = gql(api_key, f"""{{
-        issues(filter: {{
-            team: {{ id: {{ eq: "{team_id}" }} }}
-            number: {{ eq: {number} }}
-        }}) {{
-            nodes {{ id identifier title }}
-        }}
-    }}""")
+    data = gql(api_key, """
+        query($filter: IssueFilter) {
+            issues(filter: $filter) {
+                nodes { id identifier title }
+            }
+        }
+    """, {"filter": {"team": {"id": {"eq": team_id}}, "number": {"eq": number}}})
 
     if check_errors(data):
         return None
@@ -858,24 +873,24 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 100  # 10k-issue safety rail; warns if ever hit (no silent caps).
 
 
-def paginate_issues(api_key: str, filter_str: str) -> list[dict] | None:
+def paginate_issues(api_key: str, issue_filter: dict) -> list[dict] | None:
     """Fetch every issue matching a root-level filter, following pagination.
 
-    `filter_str` is the inner body of the GraphQL `filter:` object (no braces).
-    The opaque cursor is passed as a variable; only the static filter is
-    interpolated. Returns None on API error (caller already printed it).
+    `issue_filter` is passed as a GraphQL variable, so ids and user-provided
+    strings never get interpolated into the query text. Returns None on API error
+    (caller already printed it).
     """
     nodes: list[dict] = []
     cursor: str | None = None
     pages = 0
-    query = f"""query($cursor: String) {{
-        issues(first: {_PAGE_SIZE}, after: $cursor, filter: {{ {filter_str} }}) {{
+    query = f"""query($cursor: String, $filter: IssueFilter) {{
+        issues(first: {_PAGE_SIZE}, after: $cursor, filter: $filter) {{
             pageInfo {{ hasNextPage endCursor }}
             nodes {{ {ISSUE_FIELDS} }}
         }}
     }}"""
     while True:
-        data = gql(api_key, query, {"cursor": cursor})
+        data = gql(api_key, query, {"cursor": cursor, "filter": issue_filter})
         if check_errors(data):
             return None
         conn = (data.get("data") or {}).get("issues") or {}
@@ -1032,27 +1047,27 @@ def build_cycle_scope_from_resolved(
     active_meta: dict | None = None,
     next_meta: dict | None = None,
     cycle_node: dict | None = None,
-) -> tuple[str | None, str | None, dict | None]:
+) -> tuple[dict | None, str | None, dict | None]:
     s = (scope or "active").lower()
     if s in ("active", "next"):
         meta = active_meta if s == "active" else next_meta
         if not meta:
             return None, None, None
-        return f'cycle: {{ id: {{ eq: "{meta["id"]}" }} }}', cycle_label(meta), meta
+        return {"cycle": {"id": {"eq": meta["id"]}}}, cycle_label(meta), meta
     if s in ("none", "backlog"):
-        return "cycle: { null: true }", "Backlog (no cycle)", None
+        return {"cycle": {"null": True}}, "Backlog (no cycle)", None
     if s == "all":
-        return "", "All issues", None
+        return {}, "All issues", None
     if not cycle_node:
         return None, None, None
     label = cycle_label(cycle_node)
     if label == "no cycle":
         label = scope
-    return f'cycle: {{ id: {{ eq: "{cycle_node["id"]}" }} }}', label, cycle_node
+    return {"cycle": {"id": {"eq": cycle_node["id"]}}}, label, cycle_node
 
 
 def build_cycle_scope(api_key: str, team_id: str,
-                      scope: str | None) -> tuple[str | None, str | None, dict | None]:
+                      scope: str | None) -> tuple[dict | None, str | None, dict | None]:
     """Translate a --cycle value into an issues() filter fragment + display label.
 
     Returns (fragment, label, cycle_meta):
@@ -1184,7 +1199,7 @@ def list_tasks(args, cfg, api_key, team_id):
     Tasks are sorted by priority, then due date (earliest first), then id.
     Results are fully paginated — no silent truncation at Linear's 50-issue cap.
     """
-    filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
+    issue_filter = {"team": {"id": {"eq": team_id}}}
 
     # Cycle scope. active/next resolve to a concrete cycle id (and a header
     # name); `all` drops the cycle filter; `none`/`backlog` lists the backlog;
@@ -1195,7 +1210,7 @@ def list_tasks(args, cfg, api_key, team_id):
         print(f"Could not resolve --cycle '{scope}'.")
         return
     if fragment:
-        filters.append(fragment)
+        issue_filter.update(fragment)
 
     # Optional date floor: only issues created on/after --since (YYYY-MM-DD).
     since = getattr(args, "since", None)
@@ -1205,7 +1220,7 @@ def list_tasks(args, cfg, api_key, team_id):
         except ValueError:
             print(f"Invalid --since '{since}'. Use YYYY-MM-DD.", file=sys.stderr)
             return
-        filters.append(f'createdAt: {{ gte: "{since}T00:00:00.000Z" }}')
+        issue_filter["createdAt"] = {"gte": f"{since}T00:00:00.000Z"}
 
     # Resolve which agent filter to apply (if any). `--all` overrides config default.
     if args.all:
@@ -1222,7 +1237,7 @@ def list_tasks(args, cfg, api_key, team_id):
         include_unowned = False
 
     if args.label and not explicit_agent:
-        filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
+        issue_filter["labels"] = {"name": {"eq": args.label}}
 
     # Project scope. Strict resolution: a mistyped project must abort, not
     # silently drop the filter and return the whole team queue (unattended
@@ -1234,13 +1249,13 @@ def list_tasks(args, cfg, api_key, team_id):
         except LookupError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
+        issue_filter["project"] = {"id": {"eq": pid}}
 
     # Assignee filter: 'me' = API-key owner, 'none' = unassigned, else email.
     assignee = getattr(args, "assignee", None)
     if assignee:
         if assignee.lower() == "none":
-            filters.append("assignee: { null: true }")
+            issue_filter["assignee"] = {"null": True}
         else:
             if assignee.lower() == "me":
                 uid = get_viewer_id(api_key, cfg)
@@ -1249,34 +1264,32 @@ def list_tasks(args, cfg, api_key, team_id):
             if not uid:
                 print(f"Could not resolve assignee '{assignee}'.", file=sys.stderr)
                 return
-            filters.append(f'assignee: {{ id: {{ eq: "{uid}" }} }}')
+            issue_filter["assignee"] = {"id": {"eq": uid}}
 
     if getattr(args, "query", None):
-        q = args.query.replace('"', '\\"')
-        filters.append(
-            f'or: [ {{ title: {{ containsIgnoreCase: "{q}" }} }}, '
-            f'{{ description: {{ containsIgnoreCase: "{q}" }} }} ]'
-        )
+        q = args.query
+        issue_filter["or"] = [
+            {"title": {"containsIgnoreCase": q}},
+            {"description": {"containsIgnoreCase": q}},
+        ]
 
     if args.status:
         status = args.status.lower()
         if status == "open":
-            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+            issue_filter["state"] = {"type": {"nin": ["completed", "canceled"]}}
         elif status == "done":
-            filters.append('state: { type: { eq: "completed" } }')
+            issue_filter["state"] = {"type": {"eq": "completed"}}
         else:
             states = get_states(api_key, team_id, cfg)
             sid = resolve_state_id(states, status)
             if sid:
-                filters.append(f'state: {{ id: {{ eq: "{sid}" }} }}')
+                issue_filter["state"] = {"id": {"eq": sid}}
             else:
-                filters.append(f'state: {{ name: {{ eqi: "{status}" }} }}')
+                issue_filter["state"] = {"name": {"eqi": status}}
     else:
-        filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+        issue_filter["state"] = {"type": {"nin": ["completed", "canceled"]}}
 
-    filter_str = ", ".join(filters)
-
-    nodes = paginate_issues(api_key, filter_str)
+    nodes = paginate_issues(api_key, issue_filter)
     if nodes is None:
         return
 
@@ -1331,14 +1344,14 @@ def show_board(args, api_key, team_id, cfg):
         print(f"Could not resolve --cycle '{args.cycle}'.")
         return
 
-    filters = [
-        f'team: {{ id: {{ eq: "{team_id}" }} }}',
-        'state: { type: { nin: ["completed", "canceled"] } }',
-    ]
+    issue_filter = {
+        "team": {"id": {"eq": team_id}},
+        "state": {"type": {"nin": ["completed", "canceled"]}},
+    }
     if fragment:
-        filters.append(fragment)
+        issue_filter.update(fragment)
 
-    nodes = paginate_issues(api_key, ", ".join(filters))
+    nodes = paginate_issues(api_key, issue_filter)
     if nodes is None:
         return
 
@@ -1406,28 +1419,27 @@ def show_issue_detail(args, api_key, team_id):
         print(f"Invalid identifier: {identifier}", file=sys.stderr)
         sys.exit(1)
 
-    data = gql(api_key, f"""{{
-        issues(filter: {{
-            team: {{ id: {{ eq: "{team_id}" }} }}
-            number: {{ eq: {number} }}
-        }}) {{
-            nodes {{
-                id identifier title description url
-                state {{ name }}
-                priority dueDate
-                labels {{ nodes {{ name }} }}
-                assignee {{ name }}
-                delegate {{ name }}
-                project {{ name }}
-                cycle {{ number name }}
-                parent {{ identifier title }}
-                createdAt updatedAt
-                relations {{ nodes {{ type relatedIssue {{ identifier title }} }} }}
-                inverseRelations {{ nodes {{ type issue {{ identifier title }} }} }}
-                comments {{ nodes {{ body createdAt user {{ name }} }} }}
-            }}
-        }}
-    }}""")
+    data = gql(api_key, """
+        query($filter: IssueFilter) {
+            issues(filter: $filter) {
+                nodes {
+                    id identifier title description url
+                    state { name }
+                    priority dueDate
+                    labels { nodes { name } }
+                    assignee { name }
+                    delegate { name }
+                    project { name }
+                    cycle { number name }
+                    parent { identifier title }
+                    createdAt updatedAt
+                    relations { nodes { type relatedIssue { identifier title } } }
+                    inverseRelations { nodes { type issue { identifier title } } }
+                    comments { nodes { body createdAt user { name } } }
+                }
+            }
+        }
+    """, {"filter": {"team": {"id": {"eq": team_id}}, "number": {"eq": number}}})
 
     if check_errors(data):
         return
@@ -1721,11 +1733,13 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
             label_map = {l["name"]: l["id"] for l in all_labels}
 
             # Also get current labels on the issue
-            issue_data = gql(api_key, f"""{{
-                issue(id: "{issue['id']}") {{
-                    labels {{ nodes {{ id name }} }}
-                }}
-            }}""")
+            issue_data = gql(api_key, """
+                query($id: String!) {
+                    issue(id: $id) {
+                        labels { nodes { id name } }
+                    }
+                }
+            """, {"id": issue["id"]})
             current_ids = []
             current_names_by_id = {}
             if not check_errors(issue_data):

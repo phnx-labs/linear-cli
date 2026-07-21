@@ -24,14 +24,14 @@ Use the same shell contract whether you're typing or a subagent is: query the qu
 ## Install
 
 ```bash
-curl -o /usr/local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/main/linear
+curl -fL -o /usr/local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.13.0/linear
 chmod +x /usr/local/bin/linear
 ```
 
-Or use the install script:
+Or use the checksum-verifying install script:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.13.0/install.sh | sh
 ```
 
 ## Setup
@@ -151,11 +151,11 @@ Drop [`skill.md`](./skill.md) into your agent's skills directory (e.g. `~/.claud
 ## Why this one?
 
 <p align="center">
-  <img src="assets/zero-deps.svg" alt="linear-cli is one ~118 KB Python file with zero dependencies (stdlib only) and a ~3,000-line audit surface, versus Node's node_modules, Rust's crates, and an MCP server's per-turn token cost." width="100%" />
+  <img src="assets/zero-deps.svg" alt="linear-cli is one Python file with zero dependencies (stdlib only), versus Node's node_modules, Rust's crates, and an MCP server's per-turn token cost." width="100%" />
 </p>
 
 
-The Linear CLI space already has options. This one is built for human-owned queues where agents execute delegated work and must prove completion. The zero-dependency footprint is the supporting advantage: easy to install, easy to audit, and cheap for subagents to call repeatedly.
+The Linear CLI space already has options. This one is built for human-owned queues where agents execute delegated work and must prove completion. The stdlib-only footprint is the supporting advantage: easy to install, easy to audit, and cheap for subagents to call repeatedly.
 
 ### Zero dependencies. Literally.
 
@@ -173,19 +173,19 @@ import subprocess
 import sys
 ```
 
-Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno. The whole tool is one ~118 KB file you can read top-to-bottom.
+Every symbol is in the Python standard library. No `pip install`. No `npm install`. No `cargo build`. No Deno.
 
 ### How it compares
 
 <p align="center">
-  <img src="assets/compare.svg" alt="How linear-cli compares: 0 dependencies and a 118 KB single file versus @linear/cli, Linearis, schpet, Finesssee, and Linear's MCP server — measured against each project's manifest." width="100%" />
+  <img src="assets/compare.svg" alt="How linear-cli compares: 0 dependencies and one Python file versus @linear/cli, Linearis, schpet, Finesssee, and Linear's MCP server — measured against each project's manifest." width="100%" />
 </p>
 
 
 | Tool | Runtime | Deps | Install footprint | Last published |
 |------|---------|------|-------------------|----------------|
-| **linear-cli** (this) | Python 3.9+ stdlib | **0** | ~118 KB, 1 file | active |
-| [`@linear/cli`](https://www.npmjs.com/package/@linear/cli) (official) | Node | 0 | 5 MB npm pkg | Nov 2021 (abandoned) |
+| **linear-cli** (this) | Python 3.9+ stdlib | **0** | 1 Python file | active |
+| [`@linear/cli`](https://www.npmjs.com/package/@linear/cli) (official) | Node | 0 | 5 MB npm pkg | Nov 2021 |
 | [Linearis](https://github.com/czottmann/linearis) | Node | `@linear/sdk` + `commander` | 27 MB `node_modules` | 2025 |
 | [schpet/linear-cli](https://github.com/schpet/linear-cli) | Deno | 25+ imports (cliffy, graphql-codegen, unified, valibot…) | Deno + codegen | active |
 | [Finesssee/linear-cli](https://github.com/Finesssee/linear-cli) | Rust toolchain | 28 crates (tokio, reqwest, clap, keyring…) | compiled binary | active |
@@ -203,17 +203,15 @@ Numbers verified against each project's `package.json` / `Cargo.toml` / `deno.js
 
 `?` means the competitor may support it, but this README is not claiming that without a source-level verification. The point is the positive contract this CLI exposes for agents: native delegation, proof-first close, bulk-safe commands, and no silent 50-item cap.
 
-### Zero supply chain attack surface
+### Audit surface
 
-This is the boring superpower of having no dependencies.
+The full audit surface is:
 
-Every notable CLI supply chain attack of the last few years — `event-stream`, `colors`/`faker`, `ua-parser-js`, `node-ipc`, the `xz` backdoor, `polyfill.io`, the dozens of [npm typosquats](https://socket.dev) caught monthly — happened through a compromised dependency, not the tool itself. linear-cli has none. The full audit surface is:
-
-- The ~3,000 lines of Python in this repo (read it: [`linear`](./linear))
+- The Python in this repo (read it: [`linear`](./linear))
 - Python's standard library
 - Linear's own GraphQL API at `api.linear.app`
 
-That's it. No `npm install` running 200 postinstall scripts. No transitive dependency eight layers deep that you've never heard of. No `package-lock.json` to audit, no `Cargo.lock` to chase, no Deno permissions matrix. If you trust this repo and Python's stdlib, you're done auditing.
+No `npm install` running postinstall scripts. No transitive dependency tree. No `package-lock.json`, `Cargo.lock`, or Deno permissions matrix.
 
 It's probably the most boring CLI you'll ever security-review. That's the point.
 
@@ -254,7 +252,7 @@ Untested. The script is plain Python + `urllib` + `subprocess`, so it should run
 
 ### Why Python instead of Go / Rust / Node?
 
-Because every Mac and every modern Linux already ships it. Zero install, zero toolchain, zero `npm audit` churn. The tradeoff is startup isn't as fast as a compiled binary (~170 ms vs ~10 ms), but for a tool invoked a handful of times per ticket that's noise.
+Because every Mac and every modern Linux already ships it. No separate runtime or package manager is required. The tradeoff is startup isn't as fast as a compiled binary (~170 ms vs ~10 ms), but for a tool invoked a handful of times per ticket that's noise.
 
 ## License
 

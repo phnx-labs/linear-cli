@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import sys
+import tempfile
 import types
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -215,45 +216,109 @@ class CycleScopeTest(unittest.TestCase):
         meta = {"id": "active-id", "name": "Active", "number": 10}
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("active", active_meta=meta),
-            ('cycle: { id: { eq: "active-id" } }', "Active", meta),
+            ({"cycle": {"id": {"eq": "active-id"}}}, "Active", meta),
         )
 
     def test_next_scope_uses_next_cycle_id(self):
         meta = {"id": "next-id", "name": None, "number": 11}
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("next", next_meta=meta),
-            ('cycle: { id: { eq: "next-id" } }', "Cycle 11", meta),
+            ({"cycle": {"id": {"eq": "next-id"}}}, "Cycle 11", meta),
         )
 
     def test_all_scope_has_no_cycle_constraint(self):
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("all"),
-            ("", "All issues", None),
+            ({}, "All issues", None),
         )
 
     def test_none_and_backlog_scope_filter_for_null_cycle(self):
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("none"),
-            ("cycle: { null: true }", "Backlog (no cycle)", None),
+            ({"cycle": {"null": True}}, "Backlog (no cycle)", None),
         )
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("backlog"),
-            ("cycle: { null: true }", "Backlog (no cycle)", None),
+            ({"cycle": {"null": True}}, "Backlog (no cycle)", None),
         )
 
     def test_named_scope_uses_resolved_cycle_id(self):
         node = {"id": "named-id", "name": "Launch", "number": 12}
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("Launch", cycle_node=node),
-            ('cycle: { id: { eq: "named-id" } }', "Launch", node),
+            ({"cycle": {"id": {"eq": "named-id"}}}, "Launch", node),
         )
 
     def test_raw_id_scope_keeps_user_supplied_label(self):
         node = {"id": "raw-id", "name": None}
         self.assertEqual(
             linear_cli.build_cycle_scope_from_resolved("raw-id", cycle_node=node),
-            ('cycle: { id: { eq: "raw-id" } }', "raw-id", node),
+            ({"cycle": {"id": {"eq": "raw-id"}}}, "raw-id", node),
         )
+
+
+class IssueFilterTest(unittest.TestCase):
+    def test_paginate_issues_passes_filter_as_graphql_variable(self):
+        calls = []
+
+        def fake_gql(_key, query, variables=None):
+            calls.append((query, variables))
+            return {"data": {"issues": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"identifier": "RUSH-1"}],
+            }}}
+
+        original_gql = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            issue_filter = {
+                "team": {"id": {"eq": 'team"bad'}},
+                "or": [{"title": {"containsIgnoreCase": 'q"bad'}}],
+            }
+            nodes = linear_cli.paginate_issues("api-key", issue_filter)
+        finally:
+            linear_cli.gql = original_gql
+
+        self.assertEqual(nodes, [{"identifier": "RUSH-1"}])
+        query, variables = calls[0]
+        self.assertIn("filter: $filter", query)
+        self.assertNotIn('team"bad', query)
+        self.assertNotIn('q"bad', query)
+        self.assertEqual(variables["filter"], issue_filter)
+
+    def test_resolve_issue_uses_filter_variable_for_team_and_number(self):
+        calls = []
+
+        def fake_gql(_key, query, variables=None):
+            calls.append((query, variables))
+            return {"data": {"issues": {"nodes": [{"id": "i1", "identifier": "RUSH-7"}]}}}
+
+        original_gql = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            issue = linear_cli.resolve_issue("api-key", 'team"bad', "RUSH-7")
+        finally:
+            linear_cli.gql = original_gql
+
+        self.assertEqual(issue["identifier"], "RUSH-7")
+        query, variables = calls[0]
+        self.assertNotIn('team"bad', query)
+        self.assertEqual(variables["filter"]["team"]["id"]["eq"], 'team"bad')
+        self.assertEqual(variables["filter"]["number"]["eq"], 7)
+
+
+class ConfigPermissionTest(unittest.TestCase):
+    def test_save_config_writes_private_directory_and_file(self):
+        original_path = linear_cli.CONFIG_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            linear_cli.CONFIG_PATH = linear_cli.Path(tmp) / ".linear-cli" / "config.json"
+            try:
+                linear_cli.save_config({"apiKey": "lin_api_secret", "teamId": "team"})
+                self.assertEqual(linear_cli.CONFIG_PATH.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(linear_cli.CONFIG_PATH.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(linear_cli.load_config()["apiKey"], "lin_api_secret")
+            finally:
+                linear_cli.CONFIG_PATH = original_path
 
 
 class NameResolutionTest(unittest.TestCase):
