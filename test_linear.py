@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import sys
+import tempfile
 import types
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -313,6 +314,92 @@ class NameResolutionTest(unittest.TestCase):
                 linear_cli.resolve_label_by_value("api-key", "team-id", "missing", strict=True)
         finally:
             linear_cli.list_team_labels = original
+
+
+class CreateImageTest(unittest.TestCase):
+    def test_images_uploaded_and_embedded_in_description(self):
+        cfg = {
+            "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
+            "viewerId": "viewer-id",
+        }
+
+        uploads = []
+
+        def fake_upload_file(_api_key, path):
+            uploads.append(path)
+            return f"https://cdn.linear.app/{os.path.basename(path)}"
+
+        original_upload_file = linear_cli.upload_file
+        original_get_cycle_id = linear_cli.get_cycle_id
+        linear_cli.upload_file = fake_upload_file
+        linear_cli.get_cycle_id = lambda _a, _t, _w: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                img1 = os.path.join(tmp, "screenshot.png")
+                img2 = os.path.join(tmp, "diagram.jpg")
+                open(img1, "w").close()
+                open(img2, "w").close()
+
+                fields = {
+                    "title": "RUSH-1962 test",
+                    "description": "Initial description",
+                    "image": [img1, img2],
+                    "cycle": "active",
+                }
+                input_obj, err = linear_cli._build_create_input(
+                    "api-key", "team-id", cfg, fields, verbose=False
+                )
+
+            self.assertIsNone(err)
+            desc = input_obj.get("description", "")
+            self.assertIn("Initial description", desc)
+            self.assertIn("![screenshot.png](https://cdn.linear.app/screenshot.png)", desc)
+            self.assertIn("![diagram.jpg](https://cdn.linear.app/diagram.jpg)", desc)
+            self.assertEqual(uploads, [img1, img2])
+            # Embeds follow the description separated by blank lines.
+            self.assertTrue(desc.startswith("Initial description\n\n!"))
+        finally:
+            linear_cli.upload_file = original_upload_file
+            linear_cli.get_cycle_id = original_get_cycle_id
+
+    def test_failed_image_upload_is_skipped(self):
+        cfg = {
+            "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
+            "viewerId": "viewer-id",
+        }
+
+        def fake_upload_file(_api_key, path):
+            if path.endswith("missing.png"):
+                return None
+            return f"https://cdn.linear.app/{os.path.basename(path)}"
+
+        original_upload_file = linear_cli.upload_file
+        original_get_cycle_id = linear_cli.get_cycle_id
+        linear_cli.upload_file = fake_upload_file
+        linear_cli.get_cycle_id = lambda _a, _t, _w: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                good = os.path.join(tmp, "good.png")
+                bad = os.path.join(tmp, "missing.png")
+                open(good, "w").close()
+
+                fields = {
+                    "title": "RUSH-1962 skip test",
+                    "description": "Body",
+                    "image": [good, bad],
+                    "cycle": "active",
+                }
+                input_obj, err = linear_cli._build_create_input(
+                    "api-key", "team-id", cfg, fields, verbose=False
+                )
+
+            self.assertIsNone(err)
+            desc = input_obj.get("description", "")
+            self.assertIn("![good.png](https://cdn.linear.app/good.png)", desc)
+            self.assertNotIn("missing.png", desc)
+        finally:
+            linear_cli.upload_file = original_upload_file
+            linear_cli.get_cycle_id = original_get_cycle_id
 
 
 if __name__ == "__main__":

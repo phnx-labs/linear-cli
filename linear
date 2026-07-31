@@ -1975,6 +1975,11 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
 
     description = read_description(fields.get("description"), fields.get("description_file"))
 
+    for image_path in fields.get("image") or []:
+        asset_url = upload_file(api_key, image_path)
+        if asset_url:
+            description = (description or "") + f"\n\n![{Path(image_path).name}]({asset_url})"
+
     title = fields.get("title")
     if not title:
         if not description:
@@ -2119,6 +2124,7 @@ def cmd_create(args, cfg, api_key, team_id):
         "delegate": args.delegate,
         "due_date": args.due_date,
         "label": args.label or [],
+        "image": args.image or [],
     }
     input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
     if err:
@@ -2992,6 +2998,8 @@ def main():
     p_create.add_argument("--description", help="Issue description")
     p_create.add_argument("--description-file", dest="description_file", default=None,
                           help="Read description from a file path, or '-' for stdin")
+    p_create.add_argument("--image", action="append",
+                          help="Image file path to upload and embed (repeatable)")
     p_create.add_argument("--status", help="Initial status (default: Todo)")
     p_create.add_argument("--cycle", default="active",
                           choices=["active", "next", "none"],
