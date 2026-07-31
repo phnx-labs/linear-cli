@@ -401,6 +401,42 @@ class CreateImageTest(unittest.TestCase):
             linear_cli.upload_file = original_upload_file
             linear_cli.get_cycle_id = original_get_cycle_id
 
+    def test_image_embed_does_not_leak_into_derived_title(self):
+        cfg = {
+            "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
+            "viewerId": "viewer-id",
+        }
+
+        def fake_upload_file(_api_key, path):
+            return f"https://cdn.linear.app/{os.path.basename(path)}"
+
+        original_upload_file = linear_cli.upload_file
+        original_get_cycle_id = linear_cli.get_cycle_id
+        linear_cli.upload_file = fake_upload_file
+        linear_cli.get_cycle_id = lambda _a, _t, _w: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                img = os.path.join(tmp, "screenshot.png")
+                open(img, "w").close()
+
+                fields = {
+                    "title": None,
+                    "description": "The actual issue body",
+                    "image": [img],
+                    "cycle": "active",
+                }
+                input_obj, err = linear_cli._build_create_input(
+                    "api-key", "team-id", cfg, fields, verbose=False
+                )
+
+            self.assertIsNone(err)
+            self.assertEqual(input_obj["title"], "The actual issue body")
+            self.assertIn("![screenshot.png](https://cdn.linear.app/screenshot.png)",
+                          input_obj.get("description", ""))
+        finally:
+            linear_cli.upload_file = original_upload_file
+            linear_cli.get_cycle_id = original_get_cycle_id
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -1975,16 +1975,16 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
 
     description = read_description(fields.get("description"), fields.get("description_file"))
 
-    for image_path in fields.get("image") or []:
-        asset_url = upload_file(api_key, image_path)
-        if asset_url:
-            description = (description or "") + f"\n\n![{Path(image_path).name}]({asset_url})"
-
     title = fields.get("title")
     if not title:
         if not description:
             return None, "no title or description"
         title = derive_title(description)
+
+    for image_path in fields.get("image") or []:
+        asset_url = upload_file(api_key, image_path)
+        if asset_url:
+            description = (description or "") + f"\n\n![{Path(image_path).name}]({asset_url})"
 
     input_obj: dict = {"teamId": team_id, "title": title}
     if description:
