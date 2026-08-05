@@ -438,5 +438,78 @@ class CreateImageTest(unittest.TestCase):
             linear_cli.get_cycle_id = original_get_cycle_id
 
 
+class MilestoneRollupTest(unittest.TestCase):
+    def test_rollup_aggregates_by_milestone_with_none_bucket(self):
+        # One page of a project's issues across two milestones + an unassigned
+        # bucket. 'done' counts only state.type == 'completed'.
+        page = {
+            "data": {
+                "issues": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [
+                        {"projectMilestone": {"id": "m1"}, "state": {"type": "completed"}},
+                        {"projectMilestone": {"id": "m1"}, "state": {"type": "started"}},
+                        {"projectMilestone": {"id": "m1"}, "state": {"type": "completed"}},
+                        {"projectMilestone": {"id": "m2"}, "state": {"type": "unstarted"}},
+                        {"projectMilestone": None, "state": {"type": "completed"}},
+                        {"projectMilestone": None, "state": {"type": "backlog"}},
+                    ],
+                }
+            }
+        }
+        original = linear_cli.gql
+        linear_cli.gql = lambda *a, **k: page
+        try:
+            roll = linear_cli.milestone_rollup("api-key", "proj-id")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(roll["m1"], {"total": 3, "done": 2})
+        self.assertEqual(roll["m2"], {"total": 1, "done": 0})
+        self.assertEqual(roll["_none"], {"total": 2, "done": 1})
+
+
+class FmtRollupTest(unittest.TestCase):
+    def test_empty_is_zero_issues(self):
+        self.assertEqual(linear_cli._fmt_rollup(None), "(0 issues)")
+        self.assertEqual(linear_cli._fmt_rollup({"total": 0, "done": 0}), "(0 issues)")
+
+    def test_ratio_and_percent(self):
+        self.assertEqual(linear_cli._fmt_rollup({"total": 10, "done": 3}), "(3/10 done, 30%)")
+        self.assertEqual(linear_cli._fmt_rollup({"total": 4, "done": 4}), "(4/4 done, 100%)")
+
+
+class PrintByMilestoneTest(unittest.TestCase):
+    @staticmethod
+    def _issue(ident, ms_name, cyc=None):
+        return {
+            "identifier": ident, "title": f"{ident} title",
+            "state": {"name": "Todo", "type": "unstarted"},
+            "priority": 0, "labels": {"nodes": []},
+            "assignee": None, "delegate": None,
+            "project": {"name": "P", "id": "p"},
+            "projectMilestone": {"name": ms_name} if ms_name else None,
+            "cycle": cyc, "dueDate": None,
+        }
+
+    def test_groups_named_first_orphan_last_with_cycle_annotation(self):
+        nodes = [
+            self._issue("ANT-3", None),
+            self._issue("ANT-1", "v1.0", {"number": 11, "name": None}),
+            self._issue("ANT-2", "v0.9", {"number": 10, "name": None}),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            linear_cli.print_by_milestone(nodes)
+        out = buf.getvalue()
+        # Named milestones alpha-first, the 'No milestone' orphan bucket last.
+        self.assertLess(out.index("v0.9"), out.index("v1.0"))
+        self.assertLess(out.index("v1.0"), out.index("No milestone"))
+        # Open count per group header.
+        self.assertIn("v1.0  (1 open)", out)
+        self.assertIn("No milestone  (1 open)", out)
+        # Cycle annotation rides on the scheduled issue (the milestone x cycle join).
+        self.assertIn("·Cycle 11", out)
+
+
 if __name__ == "__main__":
     unittest.main()

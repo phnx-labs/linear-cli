@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan · linear-cli project hierarchy</title>
+<style>
+  :root{
+    --bg:#0a0a0a; --panel:#111312; --panel2:#161a18; --ink:#e7ece8; --dim:#8b938c;
+    --line:#26302a; --accent:#a3e635; --amber:#f5c451; --red:#ff6b6b; --cyan:#5ad6c0;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#faf9f6; --panel:#ffffff; --panel2:#f2f4f0; --ink:#1a1c1a; --dim:#5c655c;
+    --line:#e2e6df; --accent:#4d7c0f; --amber:#b45309; --red:#dc2626; --cyan:#0e7490;
+  }
+  :root[data-theme="light"] .fig{background:#0e120f;border-color:#26302a}
+  :root[data-theme="light"] .fig figcaption{color:#8b938c}
+  :root[data-theme="light"] .fig figcaption b{color:#e7ece8}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:56px 28px 120px}
+  header.hero{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:40px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 14px}
+  h1{font-size:34px;line-height:1.15;margin:0 0 12px;font-weight:700;letter-spacing:-.01em}
+  h1 .accent{color:var(--accent)}
+  .sub{color:var(--dim);font-size:17px;max-width:70ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--dim);border:1px solid var(--line);
+    border-radius:999px;padding:4px 11px;background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:500}
+  .prov{margin-top:10px}
+  .prov .chip{font-size:11px;opacity:.82}
+  .prov .chip b{color:var(--cyan)}
+  h2{font-size:23px;margin:52px 0 8px;letter-spacing:-.01em;scroll-margin-top:20px}
+  h2 .n{font-family:var(--mono);color:var(--accent);font-size:15px;margin-right:10px;opacity:.85}
+  h3{font-size:16.5px;margin:26px 0 8px;color:var(--ink)}
+  p{margin:10px 0}
+  .lead{color:var(--dim)}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);border:1px solid var(--line);
+    border-radius:5px;padding:1.5px 6px;color:var(--cyan)}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+  a:hover{border-bottom-color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 22px 18px;margin:22px 0;overflow-x:auto}
+  .fig figcaption{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:14px;text-align:center}
+  .fig figcaption b{color:var(--ink)}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:500}
+  td code{font-size:.85em}
+  .tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600}
+  .tag.a{background:rgba(163,230,53,.12);color:var(--accent);border:1px solid rgba(163,230,53,.3)}
+  .tag.b{background:rgba(90,214,192,.1);color:var(--cyan);border:1px solid rgba(90,214,192,.28)}
+  .tag.c{background:rgba(245,196,81,.1);color:var(--amber);border:1px solid rgba(245,196,81,.28)}
+  ul{margin:10px 0;padding-left:22px}li{margin:6px 0}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;
+    padding:14px 18px;margin:18px 0}
+  .callout.warn{border-left-color:var(--amber)}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--accent);display:block;margin-bottom:5px}
+  .callout.warn .lbl{color:var(--amber)}
+  .toc{font-family:var(--mono);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:18px}
+  .toc a{color:var(--dim);border:0}.toc a:hover{color:var(--accent)}
+  pre{font-family:var(--mono);font-size:13px;background:#0c0f0d;border:1px solid var(--line);
+    border-radius:12px;padding:16px 18px;overflow-x:auto;line-height:1.55;color:#e7ece8}
+  pre .c{color:#8b938c}pre .k{color:#a3e635}pre .s{color:#5ad6c0}pre .r{color:#ff6b6b}
+  .foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:12px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    justify-content:center;margin-top:6px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .themebtn{position:fixed;top:16px;right:16px;z-index:9;font-family:var(--mono);font-size:12px;
+    color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:6px 13px;cursor:pointer}
+  .themebtn:hover{color:var(--accent);border-color:var(--accent)}
+</style>
+</head>
+<body>
+<button class="themebtn" onclick="tt()" id="tb">◐ light</button>
+<script>
+  var r=document.documentElement;
+  function set(t){r.setAttribute('data-theme',t);document.getElementById('tb').textContent=(t==='light'?'◑ dark':'◐ light')}
+  set(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  function tt(){set(r.getAttribute('data-theme')==='light'?'dark':'light')}
+</script>
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">linear-cli · project hierarchy · plan</p>
+  <h1>Make the project hierarchy the CLI already writes<br><span class="accent">actually visible — and give each task a goal</span></h1>
+  <p class="sub">linear-cli can file an issue into a project and a milestone, but never
+  shows the milestone back, can't list work by milestone, and shows a milestone as an empty
+  name. This plan makes the Project&nbsp;&rarr;&nbsp;Milestone&nbsp;&rarr;&nbsp;Task ladder
+  legible, then adds a goal (acceptance criteria) as the open half of the proof-first contract.</p>
+  <div class="meta">
+    <span class="chip"><b>1</b>&nbsp;file (the <code>linear</code> script)</span>
+    <span class="chip"><b>2</b>&nbsp;PRs</span>
+    <span class="chip"><b>7</b>&nbsp;capabilities</span>
+    <span class="chip">status: <b>awaiting go</b></span>
+  </div>
+  <div class="meta prov">
+    <span class="chip">harness: <b>claude</b></span>
+    <span class="chip">agent: <b>opus-4.8</b></span>
+    <span class="chip">host: <b>zion</b></span>
+    <span class="chip">session: <b>3769548d</b></span>
+    <span class="chip"><b>2026-08-05</b></span>
+  </div>
+  <nav class="toc">
+    <a href="#s1">01 · the ladder</a>
+    <a href="#s2">02 · goal = open half of proof</a>
+    <a href="#s3">03 · what's broken today</a>
+    <a href="#s4">04 · the build</a>
+    <a href="#s5">05 · edges & verification</a>
+  </nav>
+</header>
+
+<!-- ============ 01 ============ -->
+<h2 id="s1"><span class="n">01</span>The model: one ladder of intent</h2>
+<p class="lead">The four layers are not four separate features. They are one ladder, each level
+answering a different question and defined by the level below it. You reach for only the depth
+the work needs.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 900 430" role="img" aria-label="Nested ladder: Project contains Milestone contains Task contains steps">
+  <!-- Project -->
+  <rect x="40" y="30" width="820" height="370" rx="14" fill="#12160f" stroke="#a3e635" stroke-width="1.5"/>
+  <text x="62" y="58" fill="#a3e635" font-size="13" font-family="var(--mono)">PROJECT</text>
+  <text x="200" y="58" fill="#8b938c" font-size="12" font-family="var(--mono)">why · the outcome · "Rush App v2" · ≈ your product (1:1 for now)</text>
+
+  <!-- Milestone -->
+  <rect x="70" y="80" width="760" height="290" rx="12" fill="#161a18" stroke="#5ad6c0" stroke-width="1.3"/>
+  <text x="92" y="107" fill="#5ad6c0" font-size="13" font-family="var(--mono)">MILESTONE</text>
+  <text x="240" y="107" fill="#8b938c" font-size="12" font-family="var(--mono)">what &amp; when · the deliverable · "v1.0 — auth end-to-end, Aug 15"</text>
+
+  <!-- Task -->
+  <rect x="100" y="130" width="700" height="210" rx="11" fill="#12160f" stroke="#f5c451" stroke-width="1.2"/>
+  <text x="122" y="157" fill="#f5c451" font-size="13" font-family="var(--mono)">TASK (issue)</text>
+  <text x="270" y="157" fill="#8b938c" font-size="12" font-family="var(--mono)">the goal · what "done" means · "tokens refresh; e2e login passes"</text>
+
+  <!-- steps -->
+  <rect x="130" y="180" width="640" height="130" rx="10" fill="#161a18" stroke="#26302a" stroke-dasharray="5 4"/>
+  <text x="152" y="207" fill="#e7ece8" font-size="13" font-family="var(--mono)">steps</text>
+  <text x="230" y="207" fill="#8b938c" font-size="12" font-family="var(--mono)">how · disposable to-do · the agent regenerates as it learns</text>
+  <text x="152" y="238" fill="#8b938c" font-size="11.5" font-family="var(--mono)">– read refresh handler   – add expiry check   – wire e2e test</text>
+  <text x="152" y="262" fill="#8b938c" font-size="11.5" font-family="var(--mono)">NOT sub-issues — a markdown checklist or the harness todo list</text>
+  <text x="152" y="292" fill="#5ad6c0" font-size="11.5" font-family="var(--mono)">scale depth to size: tiny fix = just a Task; big effort = Milestones under a Project</text>
+</svg>
+<div class="legend">
+  <span><span class="sw" style="background:#a3e635"></span>project (durable-ish container)</span>
+  <span><span class="sw" style="background:#5ad6c0"></span>milestone = deliverable</span>
+  <span><span class="sw" style="background:#f5c451"></span>task = goal</span>
+  <span><span class="sw" style="background:#26302a;border:1px dashed #8b938c"></span>steps = disposable</span>
+</div>
+<figcaption><b>The ladder.</b> Project&nbsp;&rarr;&nbsp;Milestone&nbsp;&rarr;&nbsp;Task&nbsp;&rarr;&nbsp;steps. A milestone <em>is</em> the deliverable; you don't add a separate deliverables layer.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Layer</th><th>Answers</th><th>Linear object</th><th>Completes?</th></tr></thead>
+  <tbody>
+    <tr><td><b>Project</b></td><td>why — the outcome</td><td><code>Project</code> (≈ product, 1:1 for now)</td><td>eventually</td></tr>
+    <tr><td><b>Milestone</b></td><td>what deliverable, by when</td><td><code>ProjectMilestone</code></td><td>yes — a checkpoint</td></tr>
+    <tr><td><b>Task</b></td><td>the goal — what "done" means</td><td><code>Issue</code></td><td>yes — proven by proof</td></tr>
+    <tr><td><b>steps</b></td><td>how — the path</td><td>none (checklist / local todo)</td><td>disposable</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="lbl">the reframe</span>
+  A <b>milestone is the deliverable</b> — its description is the "done when…", its issues are
+  the work that produces it. No separate deliverables object. And <b>steps are not sub-issues</b>:
+  they're disposable scratch. A sub-issue is only for a step big enough to be independently delegated.
+</div>
+
+<h3>Where cycles fit — the time axis, crossing the ladder</h3>
+<p>Cycles are not a level in the ladder. The ladder is the <b>scope</b> axis (what the work is,
+what it belongs to); a cycle is the <b>time</b> axis (when you schedule it). Every task has both
+coordinates, and they cross: one milestone's tasks spread across several cycles, and one cycle
+pulls tasks from several milestones.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 900 320" role="img" aria-label="Cycles as vertical time columns crossing horizontal milestone rows; tasks sit at intersections">
+  <!-- active cycle band -->
+  <rect x="405" y="52" width="170" height="238" rx="8" fill="rgba(163,230,53,.08)" stroke="#a3e635" stroke-dasharray="4 4"/>
+  <text x="490" y="44" fill="#a3e635" font-size="11" text-anchor="middle" font-family="var(--mono)">active cycle = default queue</text>
+
+  <!-- cycle column headers -->
+  <text x="320" y="76" fill="#8b938c" font-size="12" text-anchor="middle" font-family="var(--mono)">cycle W10</text>
+  <text x="490" y="76" fill="#a3e635" font-size="12" text-anchor="middle" font-family="var(--mono)">cycle W11</text>
+  <text x="660" y="76" fill="#8b938c" font-size="12" text-anchor="middle" font-family="var(--mono)">cycle W12</text>
+
+  <!-- milestone rows -->
+  <text x="30" y="150" fill="#5ad6c0" font-size="12" font-family="var(--mono)">MILESTONE</text>
+  <text x="30" y="166" fill="#8b938c" font-size="11" font-family="var(--mono)">v1.0 · Aug 15</text>
+  <line x1="30" y1="180" x2="800" y2="180" stroke="#26302a"/>
+  <text x="30" y="230" fill="#5ad6c0" font-size="12" font-family="var(--mono)">MILESTONE</text>
+  <text x="30" y="246" fill="#8b938c" font-size="11" font-family="var(--mono)">v1.1 · Aug 29</text>
+
+  <!-- task dots: v1.0 in W10,W10,W11 ; v1.1 in W11,W12,W12 -->
+  <circle cx="300" cy="150" r="9" fill="#12160f" stroke="#f5c451"/><circle cx="340" cy="150" r="9" fill="#12160f" stroke="#f5c451"/>
+  <circle cx="490" cy="150" r="9" fill="#12160f" stroke="#f5c451"/>
+  <circle cx="490" cy="230" r="9" fill="#12160f" stroke="#f5c451"/>
+  <circle cx="640" cy="230" r="9" fill="#12160f" stroke="#f5c451"/><circle cx="680" cy="230" r="9" fill="#12160f" stroke="#f5c451"/>
+
+  <!-- vertical cycle dividers -->
+  <line x1="405" y1="86" x2="405" y2="286" stroke="#26302a"/>
+  <line x1="575" y1="86" x2="575" y2="286" stroke="#26302a"/>
+</svg>
+<div class="legend">
+  <span><span class="sw" style="background:#5ad6c0"></span>milestone = outcome grouping (rows)</span>
+  <span><span class="sw" style="background:#8b938c"></span>cycle = time grouping (columns)</span>
+  <span><span class="sw" style="background:#f5c451"></span>task = one (milestone, cycle) intersection</span>
+</div>
+<figcaption><b>Two axes, not one nesting.</b> A milestone's tasks span cycles; a cycle spans milestones.
+Milestone <em>target date</em> is a deadline; a <em>cycle</em> is the bucket you schedule into. If the remaining
+tasks don't fit the cycles before the target date, the deliverable is off-track.</figcaption>
+</figure>
+
+<div class="callout">
+  <span class="lbl">the crossing to build</span>
+  <code>--project</code> / <code>--milestone</code> widen to <b>all cycles</b> by default (you want the whole
+  deliverable, not this week's slice) — unless you also pass <code>--cycle</code>. Two cross-axis views:
+  <code>tasks --cycle active --by-milestone</code> (what this sprint delivers) and
+  <code>tasks --milestone v1.0</code> annotated by cycle (is it on track for its date).
+</div>
+
+<!-- ============ 02 ============ -->
+<h2 id="s2"><span class="n">02</span>A goal is the open half of the proof contract you already have</h2>
+<p class="lead">A to-do list is a plan of steps — brittle; an agent optimizing "check off steps"
+drifts from the outcome. A goal is the success condition — durable; a smart agent holds it fixed
+and regenerates the steps. The CLI is already proof-first at close, but nothing captures the
+target at open, so the proof is unanchored. The goal is simply what the proof is meant to satisfy.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 900 250" role="img" aria-label="Open sets the goal; close supplies proof against it">
+  <!-- open node -->
+  <rect x="40" y="60" width="220" height="110" rx="12" fill="#12160f" stroke="#f5c451" stroke-width="1.3"/>
+  <text x="150" y="90" fill="#f5c451" font-size="13" text-anchor="middle" font-family="var(--mono)">OPEN</text>
+  <text x="150" y="116" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="var(--mono)">--goal "..."</text>
+  <text x="150" y="140" fill="#8b938c" font-size="11" text-anchor="middle" font-family="var(--mono)">## Done when</text>
+  <text x="150" y="156" fill="#8b938c" font-size="11" text-anchor="middle" font-family="var(--mono)">X, Y, Z (verifiable)</text>
+
+  <!-- execution -->
+  <path d="M260 115 L360 115" stroke="#8b938c" fill="none" stroke-dasharray="4 4" marker-end="url(#a1)"/>
+  <rect x="360" y="75" width="180" height="80" rx="11" fill="#161a18" stroke="#26302a"/>
+  <text x="450" y="105" fill="#e7ece8" font-size="12.5" text-anchor="middle" font-family="var(--mono)">agent executes</text>
+  <text x="450" y="128" fill="#8b938c" font-size="11" text-anchor="middle" font-family="var(--mono)">regenerates steps</text>
+  <path d="M540 115 L640 115" stroke="#8b938c" fill="none" stroke-dasharray="4 4" marker-end="url(#a1)"/>
+
+  <!-- close node -->
+  <rect x="640" y="60" width="220" height="110" rx="12" fill="#12160f" stroke="#a3e635" stroke-width="1.3"/>
+  <text x="750" y="90" fill="#a3e635" font-size="13" text-anchor="middle" font-family="var(--mono)">CLOSE</text>
+  <text x="750" y="116" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="var(--mono)">--done --proof</text>
+  <text x="750" y="140" fill="#8b938c" font-size="11" text-anchor="middle" font-family="var(--mono)">evidence X, Y, Z</text>
+  <text x="750" y="156" fill="#8b938c" font-size="11" text-anchor="middle" font-family="var(--mono)">happened</text>
+
+  <!-- contract arc -->
+  <path d="M150 60 C 150 12, 750 12, 750 60" stroke="#5ad6c0" fill="none" stroke-width="1.3" marker-end="url(#a2)"/>
+  <text x="450" y="30" fill="#5ad6c0" font-size="12" text-anchor="middle" font-family="var(--mono)">one contract: proof is checked against the goal</text>
+
+  <defs>
+    <marker id="a1" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#8b938c"/></marker>
+    <marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#5ad6c0"/></marker>
+  </defs>
+</svg>
+<div class="legend">
+  <span><span class="sw" style="background:#f5c451"></span>goal set at open</span>
+  <span><span class="sw" style="background:#a3e635"></span>proof at close (exists today)</span>
+  <span><span class="sw" style="background:#5ad6c0"></span>the contract linking them</span>
+</div>
+<figcaption><b>Goal &harr; proof.</b> <code>--done --proof</code> is the closing end, already built. <code>--goal</code> is the missing opening end. Same contract, two ends.</figcaption>
+</figure>
+
+<p>When is a goal needed? When the title is already a crisp acceptance criterion
+(<code>Bump version to 0.14.0</code>) the title <em>is</em> the goal — no extra field. When the
+task is fuzzy (<code>Improve project management</code>) the goal is what converts it into
+executable work. Rule of thumb: <b>an agent should not start a fuzzy task before writing its goal.</b></p>
+
+<!-- ============ 03 ============ -->
+<h2 id="s3"><span class="n">03</span>What's broken today — the CLI writes the hierarchy but can't show it</h2>
+<p class="lead">Every row below is verified against the current <code>linear</code> script. The
+theme: the model exists on write, and disappears on read.</p>
+
+<table>
+  <thead><tr><th>Gap</th><th>Evidence</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag c">bug</span>&nbsp;Milestone never displayed</td><td><code>ISSUE_FIELDS</code> (linear:786) has <code>project</code> but no <code>projectMilestone</code>; ditto <code>show_issue_detail</code> (linear:1400)</td><td>You file a task into a milestone, then never see it there again</td></tr>
+    <tr><td><span class="tag c">bug</span>&nbsp;Milestone looks empty</td><td><code>_milestone_list</code> / <code>_project_show</code> print name + target only (linear:2390)</td><td>A deliverable shows no work and no progress under it</td></tr>
+    <tr><td><span class="tag c">bug</span>&nbsp;No <code>--milestone</code> filter</td><td><code>list_tasks</code> filters <code>--project</code> (linear:1237); no milestone branch</td><td>Can't ask "show me the work for v1.0"</td></tr>
+    <tr><td><span class="tag c">bug</span>&nbsp;No grouping / orphan view</td><td><code>--project</code> returns a flat list</td><td>Can't see which issues aren't matched to any milestone</td></tr>
+    <tr><td><span class="tag a">new</span>&nbsp;No goal concept</td><td>only <code>--done --proof</code> exists (close half)</td><td>Proof is unanchored; fuzzy tasks start without a target</td></tr>
+  </tbody>
+</table>
+
+<!-- ============ 04 ============ -->
+<h2 id="s4"><span class="n">04</span>The build — two PRs, one file</h2>
+<p class="lead">All changes land in the single <code>linear</code> script. PR&nbsp;1 makes the
+hierarchy visible (low-risk, model-independent). PR&nbsp;2 adds the goal + agent-execution layer.</p>
+
+<h3>PR 1 — make the hierarchy visible</h3>
+<table>
+  <thead><tr><th></th><th>Capability</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag b">edit</span></td><td>Show milestone in list + detail</td><td><code>ISSUE_FIELDS</code> (786), <code>show_issue_detail</code> (1400), <code>format_issue_row</code></td></tr>
+    <tr><td><span class="tag b">edit</span></td><td>Per-milestone rollup: issue count + % done</td><td><code>_milestone_list</code> (2471), <code>_project_show</code> (2333)</td></tr>
+    <tr><td><span class="tag b">edit</span></td><td><code>linear tasks --milestone "v1.0"</code> filter</td><td><code>list_tasks</code> (1230)</td></tr>
+    <tr><td><span class="tag b">edit</span></td><td><code>--project X</code> grouped by milestone + "No milestone" bucket</td><td><code>list_tasks</code> render path</td></tr>
+    <tr><td><span class="tag b">edit</span></td><td>Cross the axes: <code>--project</code>/<code>--milestone</code> widen to all cycles; <code>--cycle active --by-milestone</code></td><td><code>list_tasks</code> (cycle default at 1230+)</td></tr>
+    <tr><td><span class="tag a">new</span></td><td><code>linear roadmap</code> — project&nbsp;&rarr;&nbsp;milestones&nbsp;&rarr;&nbsp;tasks</td><td>new <code>cmd_roadmap</code></td></tr>
+  </tbody>
+</table>
+
+<h3>PR 2 — the goal + agent-execution layer</h3>
+<table>
+  <thead><tr><th></th><th>Capability</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag a">new</span></td><td><code>--goal</code> seeds a <code>## Done when</code> block; detail surfaces it; <code>--done</code> echoes goal-vs-proof</td><td><code>_build_create_input</code> (1963), <code>_apply_update</code> (1608), <code>show_issue_detail</code></td></tr>
+    <tr><td><span class="tag a">new</span></td><td><code>linear tasks --delegate &lt;agent&gt;</code> grouped by milestone — the agent board</td><td><code>list_tasks</code> render path</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">deliberately not doing</span>
+  No new "product" or "deliverables" object (project&nbsp;&asymp;&nbsp;product 1:1 for now; milestone
+  <em>is</em> the deliverable). No enforced goal gate — <code>--goal</code> is a convention, not a
+  block on <code>--done</code>; earn the gate with usage, don't assume it. No sub-issue-per-step.
+</div>
+
+<h3>Goal seeding — the one snippet worth previewing</h3>
+<pre><span class="c"># linear create "Fix auth refresh" --goal "tokens refresh on expiry; e2e login passes"</span>
+<span class="c"># writes into the issue description:</span>
+## Done when
+- tokens refresh on expiry
+- e2e login passes
+
+<span class="c"># at close, the CLI prints the goal next to the proof so close is a checked contract:</span>
+<span class="k">linear</span> update ANT-42 --done --proof <span class="s">https://pr/123</span>
+  goal:  tokens refresh on expiry; e2e login passes
+  proof: https://pr/123   <span class="c"># reviewer checks proof-against-goal</span></pre>
+
+<!-- ============ 05 ============ -->
+<h2 id="s5"><span class="n">05</span>Edges &amp; verification</h2>
+<ul>
+  <li><b>Extra API cost.</b> Rollups need issue-by-milestone counts. Fetch counts in the existing
+  project/milestone query where possible; fall back to one <code>issues(filter:{projectMilestone})</code>
+  aggregate per project — measured, not per-issue.</li>
+  <li><b>Orphan bucket is the feature, not a warning.</b> Issues with no milestone group under an
+  explicit "No milestone (N)" heading — that surface is literally "what isn't matched".</li>
+  <li><b>Goal lives in the description.</b> A <code>## Done when</code> block is parsed/round-tripped
+  so <code>--goal</code> edits don't clobber the rest of the description body.</li>
+  <li><b>Backward compatible.</b> Every new flag is additive; existing commands unchanged. Tests go in
+  <code>test_linear.py</code> (1:1 with the script) + a real <code>--json</code> round-trip against the API.</li>
+  <li><b>Proof of done.</b> Run each new command against the live workspace, capture output, attach to the PR.</li>
+</ul>
+
+<div class="foot">
+  linear-cli · plan mode · rendered by plan-render &nbsp;·&nbsp;
+  claude · opus-4.8 · zion · session 3769548d · 2026-08-05 &nbsp;·&nbsp;
+  next: <span style="color:var(--accent)">go / reshape</span>
+</div>
+
+</div>
+</body>
+</html>

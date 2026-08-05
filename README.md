@@ -74,6 +74,8 @@ linear tasks --cycle "Q2W11"         # a specific cycle by name, number, or id
 linear tasks --since 2026-06-01      # only issues created on/after a date
 linear tasks --assignee me           # by assignee: me | none | someone@x.com
 linear tasks --project "Rush App"    # scope to one project (name or UUID)
+linear tasks --milestone "v1.0"      # scope to one milestone (the whole deliverable)
+linear tasks --project "Rush App" --by-milestone  # group by milestone; unmatched fall in "No milestone"
 linear tasks --json | jq             # machine-readable
 
 linear update ANT-42 --pickup         # claim (In Progress)
@@ -97,10 +99,10 @@ linear create "Ship it" --delegate droid    # create + hand to an agent
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
 
 linear projects                       # list projects + progress + issue count
-linear projects "Phoenix"             # detail view (exact name or id) with milestones
+linear projects "Phoenix"             # detail view: milestones with per-milestone % done
 linear projects create --name "Phoenix" --lead you@co.com --target 2026-09-30
 linear projects archive "Old Project" # remove a project (moves to trash)
-linear milestones list "Phoenix"      # milestones in a project
+linear milestones list "Phoenix"      # milestones in a project, each with % done (issues rolled up)
 linear milestones create --project "Phoenix" --name "v1.0" --target 2026-08-15
 linear milestones set-target-date "v1.0" 2026-08-20 --project "Phoenix"
 linear milestones move "v1.0" --to "Phoenix CLI"         # across projects
@@ -131,6 +133,7 @@ Full help: `linear <command> --help`.
 The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.
 
 - **Assignee-as-queue.** `linear tasks` returns what *you* own in the active cycle. Widen with `--cycle all` (whole team) or `--cycle none` (backlog), or filter by `--assignee me|none|<email>`. No dashboards, no saved views.
+- **Milestones as deliverables.** `--milestone` scopes to one deliverable across all cycles; `--by-milestone` groups a project's issues by milestone (with a *No milestone* bucket for unmatched work), each row annotated with its cycle so you see which iteration a deliverable's work is scheduled in. `linear projects` / `milestones list` roll up per-milestone % done, so a deliverable's progress sits next to its target date. Scoping to `--project`/`--milestone` widens to all cycles by default (the whole deliverable, not just this cycle's slice).
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
 - **Shared-seat fallback.** If your agents share one Linear seat, set `--agent claude` at setup and `linear tasks` filters to issues labeled for that agent. Labels are a fallback lane, not the primary handoff model.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.

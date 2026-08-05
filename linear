@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -789,6 +789,8 @@ ISSUE_FIELDS = """
     assignee { name }
     delegate { name }
     project { name id }
+    projectMilestone { name }
+    cycle { number name }
     dueDate createdAt url
 """
 
@@ -845,6 +847,83 @@ def format_issue_row(node: dict) -> str:
     delegate = (node.get("delegate") or {}).get("name")
     who = f"{assignee} → {delegate}" if delegate else assignee
     return f"  {ident:<8} {pri:<7}  {state:<12}  {due}  {who:<22}  {title}{label_str}"
+
+
+def print_by_milestone(nodes: list[dict]) -> None:
+    """Group open issues by their milestone for the project / `--by-milestone`
+    view. Each issue carries its milestone name and cycle via ISSUE_FIELDS, so
+    this is a local group-by with no extra API calls.
+
+    Issues matched to no milestone fall into an explicit 'No milestone' bucket,
+    printed last — that bucket is the "what isn't matched to a deliverable"
+    surface. Each row is annotated with its cycle, so you can read which
+    iteration a deliverable's work is scheduled in (the milestone x cycle join).
+    Progress % lives in `projects show` / `milestones list`, which count
+    completed issues too; this view is open work only.
+    """
+    orphan = "— No milestone"
+    groups: dict[str, list] = {}
+    for n in nodes:
+        name = (n.get("projectMilestone") or {}).get("name") or orphan
+        groups.setdefault(name, []).append(n)
+    ordered = sorted(k for k in groups if k != orphan)
+    if orphan in groups:
+        ordered.append(orphan)
+    for name in ordered:
+        issues = groups[name]
+        print(f"{name}  ({len(issues)} open)")
+        for n in issues:
+            cyc = n.get("cycle")
+            cyc_str = f"  ·{cycle_label(cyc)}" if cyc else ""
+            print(f"{format_issue_row(n)}{cyc_str}")
+        print()
+
+
+def milestone_rollup(api_key: str, project_id: str) -> dict:
+    """One paginated pass over a project's issues, all states, aggregated into
+    {milestone_id: {"total": n, "done": n}} plus a "_none" key for issues in the
+    project but no milestone. Slim field set (milestone id + state type) keeps a
+    progress rollup one cheap query, not a fetch of every issue body.
+
+    'done' counts issues whose workflow state type is 'completed'. Returns {} on
+    API error (caller renders milestones without counts rather than aborting).
+    """
+    counts: dict = {}
+    cursor = None
+    pages = 0
+    while True:
+        data = gql(api_key, """
+            query($pid: String!, $cursor: String) {
+                issues(first: 250, after: $cursor,
+                       filter: { project: { id: { eq: $pid } } }) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { projectMilestone { id } state { type } }
+                }
+            }
+        """, {"pid": project_id, "cursor": cursor})
+        if check_errors(data):
+            break
+        conn = (data.get("data") or {}).get("issues") or {}
+        for n in conn.get("nodes", []):
+            key = (n.get("projectMilestone") or {}).get("id") or "_none"
+            c = counts.setdefault(key, {"total": 0, "done": 0})
+            c["total"] += 1
+            if (n.get("state") or {}).get("type") == "completed":
+                c["done"] += 1
+        info = conn.get("pageInfo") or {}
+        cursor = info.get("endCursor")
+        pages += 1
+        if not info.get("hasNextPage") or pages >= _MAX_PAGES:
+            break
+    return counts
+
+
+def _fmt_rollup(entry: dict | None) -> str:
+    """'(3/10 done, 30%)' from a milestone_rollup entry, or '(0 issues)'."""
+    if not entry or not entry.get("total"):
+        return "(0 issues)"
+    total, done = entry["total"], entry["done"]
+    return f"({done}/{total} done, {int(done * 100 / total)}%)"
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1269,13 @@ def list_tasks(args, cfg, api_key, team_id):
     # name); `all` drops the cycle filter; `none`/`backlog` lists the backlog;
     # any other value is treated as a cycle name or id and resolved.
     scope = args.cycle
+    if scope is None:
+        # Scoping to a project or milestone means you want the whole deliverable,
+        # not just this cycle's slice of it — so widen to all cycles unless the
+        # user set --cycle explicitly. A bare `linear tasks` still defaults to
+        # the active cycle.
+        scope = ("all" if (getattr(args, "project", None) or getattr(args, "milestone", None))
+                 else "active")
     fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
     if fragment is None:
         print(f"Could not resolve --cycle '{scope}'.")
@@ -1228,6 +1314,7 @@ def list_tasks(args, cfg, api_key, team_id):
     # silently drop the filter and return the whole team queue (unattended
     # consumers act on whatever this lists).
     project = getattr(args, "project", None)
+    pid = None
     if project:
         try:
             pid = resolve_project_id(api_key, team_id, project, strict=True)
@@ -1235,6 +1322,21 @@ def list_tasks(args, cfg, api_key, team_id):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
         filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
+
+    # Milestone scope. Strict like --project: a mistyped milestone aborts rather
+    # than silently listing the whole team. Pass --project alongside to
+    # disambiguate a milestone name that exists in more than one project.
+    milestone = getattr(args, "milestone", None)
+    if milestone:
+        try:
+            mid = resolve_milestone_id(api_key, team_id, milestone, pid, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not mid:
+            print(f"No milestone matching '{milestone}'.", file=sys.stderr)
+            sys.exit(1)
+        filters.append(f'projectMilestone: {{ id: {{ eq: "{mid}" }} }}')
 
     # Assignee filter: 'me' = API-key owner, 'none' = unassigned, else email.
     assignee = getattr(args, "assignee", None)
@@ -1318,8 +1420,14 @@ def list_tasks(args, cfg, api_key, team_id):
         header_note = f"  ({owned} yours, {unowned} unowned)"
     print(f"{scope_label} -- {len(nodes)} task(s){header_note}")
     print()
-    for n in nodes:
-        print(format_issue_row(n))
+    # Group by milestone when asked (--by-milestone) or when scoped to a project
+    # (the natural project view). The milestone name is already on each issue via
+    # ISSUE_FIELDS, so this is a local group-by with no extra API calls.
+    if getattr(args, "by_milestone", False) or bool(project):
+        print_by_milestone(nodes)
+    else:
+        for n in nodes:
+            print(format_issue_row(n))
 
 
 def show_board(args, api_key, team_id, cfg):
@@ -1419,6 +1527,7 @@ def show_issue_detail(args, api_key, team_id):
                 assignee {{ name }}
                 delegate {{ name }}
                 project {{ name }}
+                projectMilestone {{ name }}
                 cycle {{ number name }}
                 parent {{ identifier title }}
                 createdAt updatedAt
@@ -1461,6 +1570,8 @@ def show_issue_detail(args, api_key, team_id):
         print(f"  Due:      {n['dueDate']}")
     if n.get("project"):
         print(f"  Project:  {n['project']['name']}")
+    if n.get("projectMilestone"):
+        print(f"  Milestone: {n['projectMilestone']['name']}")
     if n.get("cycle"):
         print(f"  Cycle:    {cycle_label(n['cycle'])}")
     if n.get("parent"):
@@ -2384,12 +2495,16 @@ def _project_show(args, api_key, team_id):
     print(f"  Target:   {proj.get('targetDate') or '-'}")
     print(f"  ID:       {proj.get('id')}")
     milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
+    roll = milestone_rollup(api_key, proj_id)
     if milestones:
         milestones.sort(key=lambda m: m.get("sortOrder") or 0)
         print(f"\nMilestones ({len(milestones)}):")
         for m in milestones:
             tgt = m.get("targetDate") or "-"
-            print(f"  - {m['name']:30s}  target: {tgt}")
+            print(f"  - {m['name']:30s}  target: {tgt:12s}  {_fmt_rollup(roll.get(m['id']))}")
+    none_entry = roll.get("_none")
+    if none_entry and none_entry.get("total"):
+        print(f"  - {'— No milestone':30s}  target: {'-':12s}  {_fmt_rollup(none_entry)}")
 
 
 def _project_create(args, api_key, team_id):
@@ -2490,6 +2605,9 @@ def _milestone_list(args, api_key, team_id):
     proj = (data.get("data") or {}).get("project") or {}
     nodes = (proj.get("projectMilestones") or {}).get("nodes", [])
     nodes.sort(key=lambda m: m.get("sortOrder") or 0)
+    roll = milestone_rollup(api_key, pid)
+    for m in nodes:
+        m["rollup"] = roll.get(m["id"], {"total": 0, "done": 0})
     if args.json:
         print(json.dumps(nodes, indent=2))
         return
@@ -2499,7 +2617,10 @@ def _milestone_list(args, api_key, team_id):
     print(f"{len(nodes)} milestone(s) in '{proj.get('name', args.project)}':")
     for m in nodes:
         tgt = m.get("targetDate") or "-"
-        print(f"  {m['name']:30s}  target: {tgt:12s}  {m['id']}")
+        print(f"  {m['name']:30s}  target: {tgt:12s}  {_fmt_rollup(roll.get(m['id']))}")
+    none_entry = roll.get("_none")
+    if none_entry and none_entry.get("total"):
+        print(f"  {'— No milestone':30s}  target: {'-':12s}  {_fmt_rollup(none_entry)}")
 
 
 def _milestone_create(args, api_key, team_id):
@@ -2929,11 +3050,20 @@ def main():
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
     p_tasks.add_argument("--label", help="Filter by any label")
     p_tasks.add_argument("--project", help="Filter by project (name or UUID)")
+    p_tasks.add_argument("--milestone",
+                         help="Filter by milestone (name or UUID). Pair with "
+                              "--project to disambiguate a name across projects.")
+    p_tasks.add_argument("--by-milestone", action="store_true",
+                         help="Group the list by milestone, with a 'No milestone' "
+                              "bucket for issues matched to a project but no milestone. "
+                              "Auto-on when --project scopes the list.")
     p_tasks.add_argument("--status", help="Filter: backlog, todo, progress, done, open")
-    p_tasks.add_argument("--cycle", default="active", metavar="SCOPE",
+    p_tasks.add_argument("--cycle", default=None, metavar="SCOPE",
                          help="Scope: active (default), next, all (whole team, "
                               "cross-cycle + backlog), none/backlog (no cycle), "
-                              "or a specific cycle by name or id")
+                              "or a specific cycle by name or id. When --project or "
+                              "--milestone is set, defaults to all cycles (the whole "
+                              "deliverable, not just this cycle's slice).")
     p_tasks.add_argument("--since", metavar="YYYY-MM-DD",
                          help="Only issues created on or after this date")
     p_tasks.add_argument("--assignee",
