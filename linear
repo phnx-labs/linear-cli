@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -893,7 +893,7 @@ def milestone_rollup(api_key: str, project_id: str) -> dict:
     pages = 0
     while True:
         data = gql(api_key, """
-            query($pid: String!, $cursor: String) {
+            query($pid: ID!, $cursor: String) {
                 issues(first: 250, after: $cursor,
                        filter: { project: { id: { eq: $pid } } }) {
                     pageInfo { hasNextPage endCursor }

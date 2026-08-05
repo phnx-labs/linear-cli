@@ -560,6 +560,29 @@ class MilestoneRollupPaginationTest(unittest.TestCase):
         self.assertEqual(roll, {})
 
 
+class MilestoneRollupQueryTypeTest(unittest.TestCase):
+    def test_project_id_variable_is_typed_ID_not_String(self):
+        # Regression: the issues filter's `project.id.eq` comparator expects the
+        # GraphQL `ID` scalar, not `String`. A `String!` declaration errors on the
+        # live API every call and (since the rollup returns {} on error) silently
+        # zeroes every milestone's progress. A mocked gql can't catch a schema
+        # type mismatch, so guard the declared type in the query text directly.
+        captured = {}
+
+        def fake_gql(_api_key, query, _variables):
+            captured["query"] = query
+            return {"data": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}
+
+        original = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            linear_cli.milestone_rollup("api-key", "proj-id")
+        finally:
+            linear_cli.gql = original
+        self.assertIn("$pid: ID!", captured["query"])
+        self.assertNotIn("$pid: String", captured["query"])
+
+
 class BoardJsonScopeTest(unittest.TestCase):
     def test_default_board_scope_is_active_not_null(self):
         # Regression guard: --cycle defaults to None at the parser (so list_tasks
