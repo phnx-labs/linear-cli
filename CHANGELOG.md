@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-08-05
+
+### Fixed
+
+- `milestone_rollup` declared its project-id variable as `String!`, but Linear's
+  `issues(filter: { project: { id: { eq } } })` comparator expects `ID`. On the
+  live API the query errored every call, and (since the rollup returns `{}` on
+  error) every milestone silently showed `(0 issues)`. Corrected to `ID!`;
+  `linear projects "<name>"` and `linear milestones list "<name>"` now report real
+  per-milestone progress. Added a regression test asserting the variable type.
+
 ## [0.15.0] - 2026-08-05
 
 ### Added
