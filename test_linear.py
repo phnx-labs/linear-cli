@@ -511,5 +511,76 @@ class PrintByMilestoneTest(unittest.TestCase):
         self.assertIn("·Cycle 11", out)
 
 
+class ResolveTaskScopeTest(unittest.TestCase):
+    def test_explicit_cycle_always_wins(self):
+        self.assertEqual(linear_cli.resolve_task_scope("next", "P", None), "next")
+        self.assertEqual(linear_cli.resolve_task_scope("all", None, "v1"), "all")
+        self.assertEqual(linear_cli.resolve_task_scope("active", "P", "v1"), "active")
+
+    def test_project_or_milestone_widens_to_all_cycles(self):
+        self.assertEqual(linear_cli.resolve_task_scope(None, "P", None), "all")
+        self.assertEqual(linear_cli.resolve_task_scope(None, None, "v1"), "all")
+
+    def test_bare_list_defaults_to_active(self):
+        self.assertEqual(linear_cli.resolve_task_scope(None, None, None), "active")
+
+
+class MilestoneRollupPaginationTest(unittest.TestCase):
+    @staticmethod
+    def _sequence(*pages):
+        it = iter(pages)
+        return lambda *a, **k: next(it)
+
+    def test_follows_cursor_across_pages(self):
+        p1 = {"data": {"issues": {"pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+              "nodes": [{"projectMilestone": {"id": "m1"}, "state": {"type": "completed"}}]}}}
+        p2 = {"data": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+              "nodes": [{"projectMilestone": {"id": "m1"}, "state": {"type": "started"}}]}}}
+        original = linear_cli.gql
+        linear_cli.gql = self._sequence(p1, p2)
+        try:
+            roll = linear_cli.milestone_rollup("api-key", "proj-id")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(roll["m1"], {"total": 2, "done": 1})
+
+    def test_returns_empty_dict_on_midpagination_error(self):
+        # Page 1 ok, page 2 errors -> discard the partial, return {} (per docstring)
+        # so a milestone never renders a confident-but-wrong "% done".
+        p1 = {"data": {"issues": {"pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+              "nodes": [{"projectMilestone": {"id": "m1"}, "state": {"type": "completed"}}]}}}
+        err = {"errors": [{"message": "boom"}]}
+        original = linear_cli.gql
+        linear_cli.gql = self._sequence(p1, err)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                roll = linear_cli.milestone_rollup("api-key", "proj-id")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(roll, {})
+
+
+class BoardJsonScopeTest(unittest.TestCase):
+    def test_default_board_scope_is_active_not_null(self):
+        # Regression guard: --cycle defaults to None at the parser (so list_tasks
+        # can widen); the board must normalize None -> "active" so
+        # `linear tasks --board --json` never emits "scope": null.
+        args = types.SimpleNamespace(cycle=None, json=True, board=True)
+        original_bcs = linear_cli.build_cycle_scope
+        original_pag = linear_cli.paginate_issues
+        linear_cli.build_cycle_scope = lambda a, t, s: (
+            'cycle: { id: { eq: "x" } }', "Active cycle", {"id": "x"})
+        linear_cli.paginate_issues = lambda a, f: []
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                linear_cli.show_board(args, "api-key", "team-id", {})
+        finally:
+            linear_cli.build_cycle_scope = original_bcs
+            linear_cli.paginate_issues = original_pag
+        import json as _json
+        self.assertEqual(_json.loads(buf.getvalue())["scope"], "active")
+
+
 if __name__ == "__main__":
     unittest.main()

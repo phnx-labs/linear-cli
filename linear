@@ -902,7 +902,10 @@ def milestone_rollup(api_key: str, project_id: str) -> dict:
             }
         """, {"pid": project_id, "cursor": cursor})
         if check_errors(data):
-            break
+            # Discard any partial counts. A mid-pagination failure would else
+            # render an understated "% done" that looks complete; returning {}
+            # makes the caller show "(0 issues)" — honestly-unknown, not wrong.
+            return {}
         conn = (data.get("data") or {}).get("issues") or {}
         for n in conn.get("nodes", []):
             key = (n.get("projectMilestone") or {}).get("id") or "_none"
@@ -913,7 +916,14 @@ def milestone_rollup(api_key: str, project_id: str) -> dict:
         info = conn.get("pageInfo") or {}
         cursor = info.get("endCursor")
         pages += 1
-        if not info.get("hasNextPage") or pages >= _MAX_PAGES:
+        if not info.get("hasNextPage"):
+            break
+        if pages >= _MAX_PAGES:
+            print(
+                f"Warning: milestone rollup stopped after {pages * 250} issues "
+                f"(pagination safety rail); progress may be understated.",
+                file=sys.stderr,
+            )
             break
     return counts
 
@@ -1157,6 +1167,16 @@ def build_cycle_scope(api_key: str, team_id: str,
     )
 
 
+def resolve_task_scope(cycle: str | None, project, milestone) -> str:
+    """The effective --cycle scope for `linear tasks`. An explicit --cycle wins.
+    With none set, scoping to a project or milestone widens to all cycles (you
+    want the whole deliverable, not just this cycle's slice); a bare list still
+    defaults to the active cycle."""
+    if cycle is not None:
+        return cycle
+    return "all" if (project or milestone) else "active"
+
+
 def cycle_date_to_iso(value: str, flag: str) -> str:
     """Cycle startsAt/endsAt are DateTimes. Accept a YYYY-MM-DD and anchor it to
     start-of-day UTC; pass an explicit ISO timestamp through untouched."""
@@ -1268,14 +1288,8 @@ def list_tasks(args, cfg, api_key, team_id):
     # Cycle scope. active/next resolve to a concrete cycle id (and a header
     # name); `all` drops the cycle filter; `none`/`backlog` lists the backlog;
     # any other value is treated as a cycle name or id and resolved.
-    scope = args.cycle
-    if scope is None:
-        # Scoping to a project or milestone means you want the whole deliverable,
-        # not just this cycle's slice of it — so widen to all cycles unless the
-        # user set --cycle explicitly. A bare `linear tasks` still defaults to
-        # the active cycle.
-        scope = ("all" if (getattr(args, "project", None) or getattr(args, "milestone", None))
-                 else "active")
+    scope = resolve_task_scope(args.cycle, getattr(args, "project", None),
+                               getattr(args, "milestone", None))
     fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
     if fragment is None:
         print(f"Could not resolve --cycle '{scope}'.")
@@ -1434,9 +1448,13 @@ def show_board(args, api_key, team_id, cfg):
     # Same cycle scoping as list_tasks (active/next/all/none/name/id), so the
     # board no longer hits the non-existent team.nextCycle field, and it
     # paginates instead of silently capping at 50 open issues.
-    fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, args.cycle)
+    # --cycle defaults to None at the parser (so list_tasks can widen it); the
+    # board has no project/milestone scope to widen for, so None means active —
+    # normalize here so the --json "scope" field stays "active", not null.
+    scope = args.cycle or "active"
+    fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
     if fragment is None:
-        print(f"Could not resolve --cycle '{args.cycle}'.")
+        print(f"Could not resolve --cycle '{scope}'.")
         return
 
     filters = [
@@ -1454,7 +1472,7 @@ def show_board(args, api_key, team_id, cfg):
 
     if args.json:
         print(json.dumps({
-            "scope": args.cycle,
+            "scope": scope,
             "cycle": cycle_meta,
             "count": len(nodes),
             "issues": nodes,
@@ -2605,15 +2623,16 @@ def _milestone_list(args, api_key, team_id):
     proj = (data.get("data") or {}).get("project") or {}
     nodes = (proj.get("projectMilestones") or {}).get("nodes", [])
     nodes.sort(key=lambda m: m.get("sortOrder") or 0)
-    roll = milestone_rollup(api_key, pid)
-    for m in nodes:
-        m["rollup"] = roll.get(m["id"], {"total": 0, "done": 0})
     if args.json:
         print(json.dumps(nodes, indent=2))
         return
     if not nodes:
         print(f"No milestones in '{proj.get('name', args.project)}'.")
         return
+    # Compute the rollup only for the human view (one extra issue query), so
+    # --json neither pays for it nor leaks an undocumented key — same as the
+    # sibling `projects show --json` path.
+    roll = milestone_rollup(api_key, pid)
     print(f"{len(nodes)} milestone(s) in '{proj.get('name', args.project)}':")
     for m in nodes:
         tgt = m.get("targetDate") or "-"
