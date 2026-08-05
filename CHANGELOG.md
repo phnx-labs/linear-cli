@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-05
+
+### Added
+
+- **Milestone visibility.** Every issue now carries its `projectMilestone` and
+  `cycle` in `ISSUE_FIELDS` — so `linear tasks` and `linear tasks <ID>` show which
+  milestone an issue belongs to, and the milestone×cycle join is queryable in one
+  fetch (previously the milestone was settable via `--milestone` but never shown).
+- `linear tasks --milestone "<name|uuid>"` filters the queue to one milestone.
+  Pair with `--project` to disambiguate a milestone name across projects.
+- `linear tasks --by-milestone` groups the list by milestone with a `No milestone`
+  bucket for issues matched to a project but no milestone (the "what isn't matched
+  to a deliverable" surface). Each row is annotated with its cycle. Auto-on when
+  `--project` scopes the list.
+- **Per-milestone progress rollups.** `linear projects "<name>"` and
+  `linear milestones list "<name>"` now show `(done/total done, N%)` per milestone,
+  plus a `No milestone` rollup — computed from a single slim issue query per project.
+
+### Changed
+
+- Scoping `linear tasks` to `--project` or `--milestone` now defaults to **all
+  cycles** (the whole deliverable), not just the active cycle's slice. Pass an
+  explicit `--cycle` to narrow. A bare `linear tasks` still defaults to the active
+  cycle.
+- `linear milestones list` shows each milestone's progress rollup in place of its
+  raw UUID in the human view (the id remains in `--json`).
+
 ## [0.14.0] - 2026-07-31
 
 ### Added
