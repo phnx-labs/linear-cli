@@ -1389,7 +1389,9 @@ def list_tasks(args, cfg, api_key, team_id):
                   f"roster ({names}). Filtering on the name as given — "
                   f"re-run `linear setup --agent <name>` if it was renamed.",
                   file=sys.stderr)
-            explicit_agent = requested_agent
+            # `.strip()` to match what resolve_agent_name would have done — a
+            # config value of " claude " must still filter.
+            explicit_agent = requested_agent.strip()
 
     # `--label` composes with the agent queue. It used to be suppressed whenever
     # an agent filter was active, because ownership was itself a label and the two
@@ -2954,6 +2956,8 @@ def classify_agent_labels(node: dict, label_names: list[str], roster: list[str])
     Pure decision logic, no I/O, so every branch is testable without touching a
     workspace.
     """
+    if not label_names:
+        return "already", ""      # nothing to do; caller filters these out
     suffixes = [n[len(AGENT_LABEL_PREFIX):].strip() for n in label_names]
     resolved, unknown = [], []
     for s in suffixes:
@@ -2978,24 +2982,30 @@ def classify_agent_labels(node: dict, label_names: list[str], roster: list[str])
     return "conflict", f"delegated to {current}, label says {target}"
 
 
-def count_label_uses(api_key: str, label_id: str) -> int | None:
-    """How many issues carry this label, workspace-wide. None on API error.
+def label_carrier_ids(api_key: str, label_id: str) -> set[str] | None:
+    """Ids of the issues carrying this label, workspace-wide. None on API error.
 
     Deliberately not team-scoped: `list_team_labels` also returns workspace-wide
     labels (`team: { null: true }`), so a label this team has finished with may
     still be carrying ownership on another team's issues. Deleting on the
     strength of a team-scoped scan would strip those silently.
+
+    `includeArchived: true` matters — the connection excludes archived issues by
+    default, so a label carried only by archived issues would look unused and be
+    deleted. Bounded at 200: past that it is emphatically still in use, and the
+    only question this answers is "is anything left?".
     """
     data = gql(api_key, """
         query($id: ID!) {
-            issues(filter: { labels: { id: { eq: $id } } }, first: 1) {
-                nodes { identifier }
+            issues(filter: { labels: { id: { eq: $id } } },
+                   includeArchived: true, first: 200) {
+                nodes { id }
             }
         }
     """, {"id": label_id})
     if check_errors(data):
         return None
-    return len(((data.get("data") or {}).get("issues") or {}).get("nodes", []))
+    return {n["id"] for n in ((data.get("data") or {}).get("issues") or {}).get("nodes", [])}
 
 
 def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
@@ -3076,6 +3086,12 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
     blocked_labels = {l["name"] for _, labels, v, _ in rows
                       if v in ("conflict", "unresolved") for l in labels}
 
+    # Issues whose agent labels this run removes. In a dry run that is every
+    # planned row: the delete gate has to reason about the state the migration
+    # WOULD leave behind, or the preview reports every label as still in use —
+    # by the very issues it just said it would strip.
+    cleared_ids = {n["id"] for n, _, v, _ in rows if v in ("migrate", "already")}
+
     if args.apply:
         for n, labels, verdict, detail in rows:
             if verdict not in ("migrate", "already"):
@@ -3116,26 +3132,31 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
 
     # Retire every `agent:*` label that nothing carries any more. A label still
     # on a conflicting, unresolved, or failed issue is deliberately kept, and so
-    # is one still in use outside this team.
+    # is one still carried outside the scanned team.
     delete_failures = 0
+    scanned_ids = {n["id"] for n, _, _, _ in rows}
     labels = [l for l in list_team_labels(api_key, team_id)
               if l["name"].startswith(AGENT_LABEL_PREFIX)]
     for l in sorted(labels, key=lambda x: x["name"]):
         if l["name"] in blocked_labels:
             print(f"  keep       label {l['name']} — still in use by an unmigrated issue")
             continue
-        uses = count_label_uses(api_key, l["id"])
-        if uses is None:
-            print(f"  FAILED     label {l['name']} — could not count its uses",
+        carriers = label_carrier_ids(api_key, l["id"])
+        if carriers is None:
+            print(f"  FAILED     label {l['name']} — could not look up what carries it",
                   file=sys.stderr)
             delete_failures += 1
             continue
-        if uses > 0:
-            print(f"  keep       label {l['name']} — still carried by an issue "
-                  f"outside this team")
+        # Whatever this run clears no longer counts against the label. In a dry
+        # run that projection is the whole point of the preview.
+        remaining = carriers - cleared_ids
+        if remaining:
+            where = ("outside the scanned team" if remaining - scanned_ids
+                     else "by an issue this run did not migrate")
+            print(f"  keep       label {l['name']} — still carried {where}")
             continue
         if not args.apply:
-            print(f"  delete     label {l['name']} (0 uses after migration)")
+            print(f"  delete     label {l['name']} (nothing carries it after migration)")
             continue
         data = gql(api_key, """
             mutation($id: String!) { issueLabelDelete(id: $id) { success } }
@@ -3153,7 +3174,10 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
 
     left_behind = of("conflict") or of("unresolved") or write_failures or delete_failures
     if not args.apply:
-        if left_behind:
+        if delete_failures:
+            print("Dry run only. Could not reach the API to check what still carries "
+                  "some labels — re-run once it responds.")
+        elif left_behind:
             print("Dry run only. The entries above need a human before --apply can "
                   "finish: resolve each conflict, and rename or remove any label "
                   "whose suffix is not an agent.")
