@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-08-06
+
+### Added
+
+- **`linear projects update <name|id>`** — set project description, name, lead,
+  start/target dates, and state. Resolves the project strictly (mistyped name
+  aborts). `--state` accepts a status type (`backlog` / `planned` / `started` /
+  `paused` / `completed` / `canceled`) or a workspace status name; `--lead` /
+  `--start` / `--target` accept `none` to clear. `--description-file` reads a
+  multi-line body (or `-` for stdin).
+- **`linear initiatives`** — workspace initiatives for agent workflows:
+  list / show / create / update / link / unlink / archive. `link` and `unlink`
+  attach projects via Linear's `initiativeToProject*` mutations; show lists
+  linked projects with progress. Status values:
+  `Proposed|Planned|Active|Completed|Canceled`.
+- **`projects show` prints Description** when set, so a post-update check does
+  not need `--json`.
+
+### Docs
+
+- README and skill.md cover `projects update` and the `initiatives` group.
+
 ## [0.16.1] - 2026-08-06
 
 ### Security
