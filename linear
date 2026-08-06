@@ -22,6 +22,8 @@ Commands:
     migrate-agent-labels
                         One-time: move legacy agent:<name> labels onto delegates
     states              List the team's workflow states
+    queue               Durable local queue for closes that hit rate limits
+                        (`queue drain` applies pending closes)
 
 Config: ~/.linear-cli/config.json
 """
@@ -35,7 +37,7 @@ import mimetypes
 import os
 import subprocess
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -59,6 +61,15 @@ CONFIG_FILE_MODE = 0o600
 # (Claude, Codex, Kimi, …) are installed/removed rarely, so a periodic refresh
 # keeps `--delegate <name>` resolving without a per-call lookup.
 AGENTS_TTL_SECONDS = 6 * 3600
+
+# Durable local queue for closes that could not be written immediately (e.g.
+# Linear rate limit). One JSON intent per issue identifier; the directory is
+# kept private because it carries proof URLs/text from the user's workflow.
+QUEUE_DIR = Path.home() / ".linear-cli" / "queue"
+MAX_QUEUE_SIZE = 1000
+MAX_QUEUE_ATTEMPTS = 10
+QUEUE_BACKOFF_BASE_SECONDS = 2
+QUEUE_BACKOFF_MAX_SECONDS = 300  # 5 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -184,16 +195,25 @@ def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
     except URLError as e:
         # HTTPError has a response body with actual GraphQL error details
         body = ""
+        status = getattr(e, "code", None)
         if hasattr(e, "read"):
             try:
                 body = e.read().decode("utf-8", errors="replace")
                 parsed = json.loads(body)
                 if "errors" in parsed:
+                    # Surface the HTTP status so callers can distinguish
+                    # rate-limit (429) and other transient errors.
+                    for err in parsed.get("errors", []):
+                        if isinstance(err, dict) and status is not None:
+                            err.setdefault("extensions", {})["status"] = status
                     return parsed
             except (json.JSONDecodeError, Exception):
                 pass
         detail = body if body else str(e)
-        return {"errors": [{"message": detail}]}
+        err: dict = {"message": detail}
+        if status is not None:
+            err["extensions"] = {"status": status}
+        return {"errors": [err]}
 
 
 def check_errors(data: dict) -> bool:
@@ -201,6 +221,326 @@ def check_errors(data: dict) -> bool:
     if errors:
         print(f"Error: {errors[0].get('message', 'Unknown error')}", file=sys.stderr)
         return True
+    return False
+
+
+def _error_status(err: dict) -> int | None:
+    """HTTP status carried by a GraphQL error extension, if any."""
+    ext = err.get("extensions") or {}
+    status = ext.get("status")
+    return int(status) if isinstance(status, int) or (isinstance(status, str) and status.isdigit()) else None
+
+
+def _error_message(err: dict) -> str:
+    return str(err.get("message", "")).lower()
+
+
+def is_rate_limited(data: dict) -> bool:
+    """True when Linear answered 429 or the error text names a rate limit."""
+    for err in data.get("errors", []):
+        if not isinstance(err, dict):
+            continue
+        if _error_status(err) == 429:
+            return True
+        msg = _error_message(err)
+        if "rate limit" in msg or "too many requests" in msg:
+            return True
+    return False
+
+
+def is_transient_error(data: dict) -> bool:
+    """True for errors where a retry may reasonably succeed: 429/502/503/504,
+    timeouts, and network blips. Permanent GraphQL validation errors are not."""
+    if is_rate_limited(data):
+        return True
+    transient_statuses = {429, 502, 503, 504}
+    transient_phrases = ("timeout", "temporary", "unreachable", "connection",
+                         "name or service not known", "nodename nor servname")
+    for err in data.get("errors", []):
+        if not isinstance(err, dict):
+            continue
+        status = _error_status(err)
+        if status in transient_statuses:
+            return True
+        msg = _error_message(err)
+        if any(p in msg for p in transient_phrases):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Durable close queue
+# ---------------------------------------------------------------------------
+
+def queue_dir() -> Path:
+    """Return the directory that holds queued close intents."""
+    return QUEUE_DIR
+
+
+def _intent_path(identifier: str) -> Path:
+    """Safe filename for an intent: one JSON file per identifier."""
+    safe = identifier.replace("/", "_").replace("\\", "_")
+    return queue_dir() / f"{safe}.json"
+
+
+def _ensure_queue_dir() -> None:
+    """Create the queue directory with the same private mode as config."""
+    qd = queue_dir()
+    qd.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+    try:
+        qd.chmod(CONFIG_DIR_MODE)
+    except OSError:
+        pass
+
+
+def list_queue_intents() -> list[dict]:
+    """Return all queued intents, oldest first (by filename for stability)."""
+    qd = queue_dir()
+    if not qd.exists():
+        return []
+    intents = []
+    for path in sorted(qd.glob("*.json")):
+        try:
+            intents.append(json.loads(path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            # Corrupt file: leave it; a human can inspect, and we won't lose it.
+            pass
+    return intents
+
+
+def save_queue_intent(intent: dict) -> bool:
+    """Persist an intent to disk. Overwrites any existing intent for the same
+    identifier so duplicate closes collapse to the latest desired state.
+    Returns False only when the queue is at MAX_QUEUE_SIZE and this would add
+    a new file (existing intents can still be updated).
+    """
+    _ensure_queue_dir()
+    identifier = intent.get("identifier", "")
+    if not identifier:
+        return False
+    path = _intent_path(identifier)
+    qd = queue_dir()
+    existing = set(qd.glob("*.json"))
+    is_new = path not in existing
+    if is_new and len(existing) >= MAX_QUEUE_SIZE:
+        return False
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(intent, indent=2) + "\n")
+        tmp.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def remove_queue_intent(identifier: str) -> None:
+    """Delete an intent once it has been successfully applied."""
+    path = _intent_path(identifier)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def queue_backoff_delay(attempts: int) -> int:
+    """Exponential backoff, bounded by QUEUE_BACKOFF_MAX_SECONDS."""
+    return min(
+        QUEUE_BACKOFF_BASE_SECONDS * (2 ** max(0, attempts - 1)),
+        QUEUE_BACKOFF_MAX_SECONDS,
+    )
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def build_close_intent(identifier: str, issue_id: str, state: str,
+                       proof: list[str] | None = None,
+                       comment: str | None = None) -> dict:
+    """Construct a durable intent for closing an issue with proof.
+
+    The intent never stores the API key or any credential; only the public
+    issue identifier, the resolved issue id, the desired state name, proof
+    items, and an optional comment.
+    """
+    return {
+        "identifier": identifier,
+        "issue_id": issue_id,
+        "state": state,
+        "proof": list(proof or []),
+        "comment": comment,
+        "proof_posted": False,
+        "created_at": _now_utc().isoformat(),
+        "attempts": 0,
+        "next_attempt": None,
+    }
+
+
+def apply_close_intent(api_key: str, team_id: str, cfg: dict,
+                       intent: dict) -> tuple[bool, bool]:
+    """Apply one queued close intent. Returns (success, transient).
+
+    * success  = the issue is now in the desired state (or already was).
+    * transient = the failure should be retried later (rate limit / network).
+
+    Idempotent: if the issue already has the desired state, the intent is
+    considered successful and no duplicate proof is posted.
+    """
+    identifier = intent.get("identifier", "")
+    issue_id = intent.get("issue_id")
+    desired_state = intent.get("state", "")
+
+    # Resolve fresh state each attempt so a close that already landed is a no-op.
+    issue = resolve_issue(api_key, team_id, identifier)
+    if not issue:
+        # resolve_issue already printed the error. Treat as transient because
+        # "not found" after a rate limit is often a misleading symptom.
+        return False, True
+
+    current_state = (issue.get("state") or {}).get("name", "")
+    if current_state == desired_state:
+        return True, False
+
+    # Issue id can change if an issue is moved teams; prefer the fresh one.
+    issue_id = issue.get("id") or issue_id
+
+    states = get_states(api_key, team_id, cfg)
+    state_id = resolve_state_id(states, desired_state)
+    if not state_id:
+        print(f"State '{desired_state}' not found. Available: {', '.join(states.keys())}",
+              file=sys.stderr)
+        return False, False
+
+    proof = intent.get("proof") or []
+    comment = intent.get("comment")
+    proof_posted = intent.get("proof_posted", False)
+    if proof and not proof_posted:
+        proof_body = build_proof_comment(api_key, proof)
+        if comment:
+            proof_body = f"{comment}\n\n{proof_body}"
+        data = gql(api_key, """
+            mutation($input: CommentCreateInput!) {
+                commentCreate(input: $input) { success }
+            }
+        """, {"input": {"issueId": issue_id, "body": proof_body}})
+        if is_transient_error(data):
+            return False, True
+        if check_errors(data):
+            # A non-transient proof failure (e.g. missing file) should not
+            # block forever; the caller will count attempts and eventually drop.
+            return False, False
+        if not data.get("data", {}).get("commentCreate", {}).get("success"):
+            return False, False
+        intent["proof_posted"] = True
+        save_queue_intent(intent)
+
+    data = gql(api_key, """
+        mutation($id: String!, $stateId: String!) {
+            issueUpdate(id: $id, input: { stateId: $stateId }) {
+                success
+                issue { identifier title state { name } }
+            }
+        }
+    """, {"id": issue_id, "stateId": state_id})
+
+    if is_transient_error(data):
+        return False, True
+    if check_errors(data):
+        return False, False
+
+    result = data.get("data", {}).get("issueUpdate") or {}
+    if result.get("success"):
+        return True, False
+    return False, False
+
+
+def drain_queue(api_key: str, team_id: str, cfg: dict,
+                quiet: bool = False) -> tuple[int, int]:
+    """Apply all queued intents that are due. Returns (applied, remaining).
+
+    Each intent is retried with exponential backoff up to MAX_QUEUE_ATTEMPTS.
+    Intents that exhaust attempts are dropped so the queue cannot grow forever
+    on permanently stuck items.
+    """
+    intents = list_queue_intents()
+    if not intents:
+        if not quiet:
+            print("Queue empty.")
+        return 0, 0
+
+    applied = 0
+    remaining = 0
+    now = _now_utc()
+    for intent in intents:
+        identifier = intent.get("identifier", "")
+        attempts = intent.get("attempts", 0) or 0
+        next_attempt = intent.get("next_attempt")
+        if next_attempt and _now_utc().isoformat() < next_attempt:
+            remaining += 1
+            continue
+
+        ok, transient = apply_close_intent(api_key, team_id, cfg, intent)
+        if ok:
+            remove_queue_intent(identifier)
+            applied += 1
+            if not quiet:
+                print(f"Applied {identifier} -> {intent.get('state', 'Done')}")
+            continue
+
+        if transient:
+            attempts += 1
+            if attempts >= MAX_QUEUE_ATTEMPTS:
+                remove_queue_intent(identifier)
+                if not quiet:
+                    print(f"Gave up on {identifier} after {attempts} attempts.",
+                          file=sys.stderr)
+            else:
+                delay = queue_backoff_delay(attempts)
+                intent["attempts"] = attempts
+                intent["next_attempt"] = (
+                    _now_utc() + timedelta(seconds=delay)
+                ).isoformat()
+                save_queue_intent(intent)
+                remaining += 1
+                if not quiet:
+                    print(f"Retained {identifier} in queue (retry {attempts} in {delay}s)")
+        else:
+            remove_queue_intent(identifier)
+            if not quiet:
+                print(f"Dropped {identifier}: permanent failure.", file=sys.stderr)
+
+    return applied, remaining
+
+
+def queue_close_and_try(api_key: str, team_id: str, cfg: dict,
+                        issue: dict, state: str,
+                        proof: list[str] | None = None,
+                        comment: str | None = None,
+                        quiet: bool = False) -> bool:
+    """Persist a close intent, attempt it immediately, and keep it on transient
+    failure. Returns True when the issue is applied or durably queued; False on
+    a permanent failure (e.g. unknown state or queue full).
+    """
+    identifier = issue.get("identifier", "")
+    intent = build_close_intent(identifier, issue.get("id"), state,
+                                proof=proof, comment=comment)
+    if not save_queue_intent(intent):
+        print(f"Queue full; could not queue close for {identifier}.",
+              file=sys.stderr)
+        return False
+
+    ok, transient = apply_close_intent(api_key, team_id, cfg, intent)
+    if ok:
+        remove_queue_intent(identifier)
+        if not quiet:
+            print(f"{identifier} -> {state}")
+        return True
+    if transient:
+        if not quiet:
+            print(f"{identifier} -> queued for retry (rate limited / transient)")
+        return True
+    remove_queue_intent(identifier)
     return False
 
 
@@ -1908,6 +2248,12 @@ def cmd_update(args, cfg, api_key, team_id):
         print("No issue identifier given.", file=sys.stderr)
         sys.exit(1)
 
+    # Next-invocation drain: a previous --done that hit a rate limit may have
+    # left intents on disk. Clear them before adding a new close so the board
+    # stays honest across invocations.
+    if args.done:
+        drain_queue(api_key, team_id, cfg, quiet=True)
+
     # Resolve --project / --milestone ONCE, up front and strictly. An unknown
     # name aborts the whole run with a non-zero exit instead of silently no-op'ing
     # every issue in a batch while reporting success (RUSH-1496); resolving once
@@ -1959,8 +2305,10 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
     # A local copy so the bulk loop doesn't see comment cleared after issue #1.
     comment = args.comment
 
-    # Post proof as a comment before status change
-    if args.proof:
+    # Post proof as a comment before status change. When closing (--done),
+    # proof is handled durably by the close queue so a rate limit cannot drop
+    # it between the comment and the status change.
+    if args.proof and not args.done:
         proof_body = build_proof_comment(api_key, args.proof)
         if comment:
             proof_body = f"{comment}\n\n{proof_body}"
@@ -1994,31 +2342,45 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
         target_state = args.status
 
     if target_state:
-        states = get_states(api_key, team_id, cfg)
-        state_id = resolve_state_id(states, target_state)
-        if not state_id:
-            print(f"State '{target_state}' not found. Available: {', '.join(states.keys())}", file=sys.stderr)
-            return False
-
-        data = gql(api_key, """
-            mutation($id: String!, $stateId: String!) {
-                issueUpdate(id: $id, input: { stateId: $stateId }) {
-                    success
-                    issue { identifier title state { name } }
-                }
-            }
-        """, {"id": issue["id"], "stateId": state_id})
-
-        if check_errors(data):
-            return False
-
-        result = data["data"]["issueUpdate"]
-        if result["success"]:
-            i = result["issue"]
-            print(f"{i['identifier']} -> {i['state']['name']}")
+        if args.done:
+            # Close is the one operation that must survive rate limits. Persist
+            # the intent before trying, attempt immediately, and keep it on
+            # transient failure for the next drain.
+            ok = queue_close_and_try(
+                api_key, team_id, cfg, issue, target_state,
+                proof=args.proof,
+                comment=comment,
+                quiet=False,
+            )
+            if not ok:
+                return False
+            did_something = True
         else:
-            print("Status update failed.")
-        did_something = True
+            states = get_states(api_key, team_id, cfg)
+            state_id = resolve_state_id(states, target_state)
+            if not state_id:
+                print(f"State '{target_state}' not found. Available: {', '.join(states.keys())}", file=sys.stderr)
+                return False
+
+            data = gql(api_key, """
+                mutation($id: String!, $stateId: String!) {
+                    issueUpdate(id: $id, input: { stateId: $stateId }) {
+                        success
+                        issue { identifier title state { name } }
+                    }
+                }
+            """, {"id": issue["id"], "stateId": state_id})
+
+            if check_errors(data):
+                return False
+
+            result = data["data"]["issueUpdate"]
+            if result["success"]:
+                i = result["issue"]
+                print(f"{i['identifier']} -> {i['state']['name']}")
+            else:
+                print("Status update failed.")
+            did_something = True
 
     # Issue relations. Linear models all of these as one relation with a
     # direction: "A blocks B" is the same edge as "B blocked-by A", so
@@ -3908,6 +4270,47 @@ def cmd_agents(args, cfg, api_key, team_id):
         print(f"  {a['name']:20s}  delegate: linear update <ID> --delegate {a['name'].lower()}")
 
 
+def cmd_queue(args, cfg, api_key, team_id):
+    """Manage the durable local queue for closes that could not be written
+    immediately (typically because Linear returned a rate limit)."""
+    action = getattr(args, "queue_action", None)
+    if action == "drain":
+        if getattr(args, "dry_run", False):
+            intents = list_queue_intents()
+            if not intents:
+                print("Queue empty.")
+                return
+            for intent in intents:
+                ident = intent.get("identifier", "?")
+                state = intent.get("state", "Done")
+                attempts = intent.get("attempts", 0) or 0
+                nxt = intent.get("next_attempt")
+                status = f"retry {attempts}"
+                if nxt:
+                    status += f", next {nxt}"
+                print(f"{ident} -> {state} ({status})")
+            return
+        applied, remaining = drain_queue(api_key, team_id, cfg, quiet=False)
+        if remaining == 0:
+            print(f"Drained {applied} intent(s). Queue empty.")
+        else:
+            print(f"Applied {applied}, {remaining} pending retry.")
+        return
+
+    # Bare `linear queue` lists intents and a hint.
+    intents = list_queue_intents()
+    if not intents:
+        print("Queue empty.")
+        return
+    print(f"{len(intents)} close intent(s) queued:")
+    for intent in intents:
+        ident = intent.get("identifier", "?")
+        state = intent.get("state", "Done")
+        attempts = intent.get("attempts", 0) or 0
+        print(f"  {ident} -> {state} (attempts={attempts})")
+    print("Run `linear queue drain` to apply them.")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -4203,6 +4606,15 @@ def main():
     p_inbox.add_argument("--read-all", action="store_true",
                          help="Mark ALL notifications read")
 
+    # queue (durable closes when Linear is rate-limited)
+    p_queue = sub.add_parser("queue",
+                             help="Manage the durable local close queue")
+    queue_sub = p_queue.add_subparsers(dest="queue_action")
+    q_drain = queue_sub.add_parser("drain",
+                                   help="Apply queued closes with backoff")
+    q_drain.add_argument("--dry-run", action="store_true",
+                         help="List queued intents without applying them")
+
     # Back-compat + ergonomics: `projects <name>` / `initiatives <name>` (a bare
     # name, not a verb) is shorthand for `<group> show <name>`. Insert the
     # implicit `show` so the detail view keeps working alongside create/update/
@@ -4281,6 +4693,8 @@ def main():
         cmd_states(args, cfg, api_key, team_id)
     elif args.command == "inbox":
         cmd_inbox(args, cfg, api_key, team_id)
+    elif args.command == "queue":
+        cmd_queue(args, cfg, api_key, team_id)
 
 
 if __name__ == "__main__":
