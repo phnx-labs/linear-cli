@@ -251,7 +251,11 @@ Use `--agent <name>` when your agents are installed as Linear app users and shar
 
 Run `linear migrate-agent-labels`. It is a dry run by default and prints exactly what it would do: which issues get a delegate, which labels get stripped, and which labels get deleted once nothing carries them. `--apply` writes.
 
-It never overwrites an existing delegate — an issue already delegated to a different agent than its label says is reported as a `CONFLICT` and left untouched. A label whose suffix is not a delegatable agent (a machine name, a workflow flag) is reported as `UNRESOLVED` and kept. Either case exits non-zero, so an unattended run can't mistake a partial migration for a clean one.
+It never overwrites an existing delegate. An issue already delegated to someone other than its label claims — or carrying two `agent:*` labels that name different agents — is reported as a `CONFLICT` and left untouched. A label whose suffix is not a delegatable agent (a machine name, a workflow flag) is reported as `UNRESOLVED` and kept, along with any sibling label on the same issue: mixed state needs a human, and migrating half of it silently is worse.
+
+Each issue gets at most one write, so two labels on one issue can't resurrect each other. A label is deleted only when nothing carries it **workspace-wide**, not merely nothing in the scanned team.
+
+`--apply` exits non-zero if anything was left behind — a conflict, an unresolved label, or a failed write. A dry run exits 0 and tells you what needs a human; it is an inspection, not a migration.
 
 ### What about Linear's native agents (app users)?
 
