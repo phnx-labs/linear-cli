@@ -19,6 +19,8 @@ linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
 linear create "Title" --label foo --priority high --description "..."
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
+linear projects update "Name" --description "..."  # set description / lead / dates / state
+linear initiatives                    # workspace initiatives (list / show / create / link)
 linear milestones list "Name"         # a project's milestones
 linear labels                         # list available labels
 linear users                          # humans (--assign) + agents (--delegate), grouped
@@ -105,7 +107,7 @@ linear labels update triage --name needs-triage       # or --color/--description
 linear labels delete needs-triage
 ```
 
-## Managing projects and milestones
+## Managing projects, milestones, and initiatives
 
 Own the whole project lifecycle from the shell. `projects <name>` (or `show`)
 takes an **exact name or id**; a mistyped `--project` on `create`/`update` is a
@@ -115,7 +117,15 @@ hard error (with suggestions), never a silent no-op.
 linear projects                                       # list + progress + issue count
 linear projects "Rush App"                            # detail: exact name or id
 linear projects create --name "Rush App" --lead you@co.com --target 2026-09-30
+linear projects update "Rush App" --description "..." # set description / lead / dates / state
 linear projects archive "Old Project"                 # remove (moves to Linear trash)
+
+linear initiatives                                    # workspace initiatives
+linear initiatives "Company goal"                     # detail + linked projects
+linear initiatives create --name "Q3" --status Active --target 2026-09-30
+linear initiatives link "Q3" --project "Rush App"     # attach a project
+linear initiatives unlink "Q3" --project "Rush App"
+linear initiatives archive "Q3"
 
 linear milestones list "Rush App"
 linear milestones create --project "Rush App" --name "Alpha 25" --target 2026-08-15

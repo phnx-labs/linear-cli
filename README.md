@@ -103,7 +103,11 @@ linear create --from-file plan.jsonl  # bulk: one JSON object per line
 linear projects                       # list projects + progress + issue count
 linear projects "Phoenix"             # detail view: milestones with per-milestone % done
 linear projects create --name "Phoenix" --lead you@co.com --target 2026-09-30
+linear projects update "Phoenix" --description "..."  # description / lead / dates / state
 linear projects archive "Old Project" # remove a project (moves to trash)
+linear initiatives                    # workspace initiatives (list / show / create / link)
+linear initiatives "Company goal"     # detail + linked projects with progress
+linear initiatives link "Q3" --project "Phoenix"
 linear milestones list "Phoenix"      # milestones in a project, each with % done (issues rolled up)
 linear milestones create --project "Phoenix" --name "v1.0" --target 2026-08-15
 linear milestones set-target-date "v1.0" 2026-08-20 --project "Phoenix"

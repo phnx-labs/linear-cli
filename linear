@@ -13,8 +13,9 @@ Commands:
                         bulk via multiple ids or --stdin
     create              Create a new issue
     cycles              List / create / update cycles
-    projects            List / show / create / archive / delete projects
+    projects            List / show / create / update / archive / delete projects
     milestones          List / create / move / retarget / delete milestones
+    initiatives         List / show / create / update / link / unlink / archive
     labels              List / create / update / delete labels
     users               List assignable users
     agents              List agent members you can --delegate to (auto-detected)
@@ -39,7 +40,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.16.1"
+__version__ = "0.17.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -589,6 +590,108 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
     if not match:
         return None
     return match["id"]
+
+
+def list_project_statuses(api_key: str) -> list[dict]:
+    """Workspace project statuses (Backlog / Planned / In Progress / ...)."""
+    data = gql(api_key, """
+        query {
+            projectStatuses {
+                nodes { id name type }
+            }
+        }
+    """)
+    if check_errors(data):
+        return []
+    return ((data.get("data") or {}).get("projectStatuses") or {}).get("nodes") or []
+
+
+def resolve_project_status_id(api_key: str, value: str) -> str:
+    """Resolve --state to a ProjectStatus id.
+
+    Accepts a status *type* (backlog | planned | started | paused | completed |
+    canceled) or a status *name* (exact, then substring). Raises LookupError on
+    unknown values so callers fail loud instead of no-opping the update.
+    """
+    statuses = list_project_statuses(api_key)
+    if not statuses:
+        raise LookupError("no project statuses available from Linear")
+    v = (value or "").strip().lower()
+    if not v:
+        raise LookupError("project status is required")
+    by_type = [s for s in statuses if (s.get("type") or "").lower() == v]
+    if by_type:
+        return by_type[0]["id"]
+    by_name = [s for s in statuses if (s.get("name") or "").lower() == v]
+    if by_name:
+        return by_name[0]["id"]
+    sub = [s for s in statuses if v in (s.get("name") or "").lower()]
+    if len(sub) == 1:
+        return sub[0]["id"]
+    choices = sorted({
+        *(s.get("type") or "" for s in statuses),
+        *(s.get("name") or "" for s in statuses),
+    } - {""})
+    raise LookupError(
+        f"project status '{value}' not found." + _suggest(value, choices)
+    )
+
+
+def list_initiatives(api_key: str) -> list[dict]:
+    """All workspace initiatives, most-recently-updated first. Fully paginated."""
+    query = """query($cursor: String) {
+        initiatives(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id name description status targetDate updatedAt
+                owner { name email }
+            }
+        }
+    }"""
+    nodes = paginate_connection(api_key, query, ["initiatives"]) or []
+    nodes.sort(key=lambda n: n.get("updatedAt") or "", reverse=True)
+    return nodes
+
+
+def resolve_initiative_id(api_key: str, value: str,
+                          strict: bool = False) -> str | None:
+    """Resolve an initiative by UUID or name (exact, then substring).
+
+    On no match: strict raises LookupError with suggestions; otherwise warns
+    and returns None — same contract as resolve_project_id.
+    """
+    if not value:
+        return None
+    if len(value) == 36 and value.count("-") == 4:
+        return value
+    initiatives = list_initiatives(api_key)
+    match = _select_named_node(initiatives, value, "initiative", strict=strict,
+                               suggest=True, skip_word=True)
+    if not match:
+        return None
+    return match["id"]
+
+
+def find_initiative_to_project_id(api_key: str, initiative_id: str,
+                                  project_id: str) -> str | None:
+    """Return the initiativeToProject join-row id for (initiative, project), or
+    None if not linked. Fully paginated — a workspace can outgrow one page."""
+    query = """query($cursor: String) {
+        initiativeToProjects(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id
+                initiative { id }
+                project { id }
+            }
+        }
+    }"""
+    nodes = paginate_connection(api_key, query, ["initiativeToProjects"]) or []
+    for n in nodes:
+        if ((n.get("initiative") or {}).get("id") == initiative_id
+                and (n.get("project") or {}).get("id") == project_id):
+            return n.get("id")
+    return None
 
 
 def resolve_milestone_id(api_key: str, team_id: str, name: str,
@@ -2539,10 +2642,12 @@ def _cycle_update(args, api_key, team_id):
 
 def cmd_projects(args, cfg, api_key, team_id):
     """List projects (default), show one's detail + milestones, or create /
-    archive / delete a project."""
+    update / archive / delete a project."""
     action = getattr(args, "projects_action", None)
     if action == "create":
         return _project_create(args, api_key, team_id)
+    if action == "update":
+        return _project_update(args, api_key, team_id)
     if action in ("archive", "delete"):
         return _project_delete(args, api_key, team_id)
     if action == "show":
@@ -2618,6 +2723,11 @@ def _project_show(args, api_key, team_id):
     print(f"  Start:    {proj.get('startDate') or '-'}")
     print(f"  Target:   {proj.get('targetDate') or '-'}")
     print(f"  ID:       {proj.get('id')}")
+    desc = (proj.get("description") or "").strip()
+    if desc:
+        print(f"  Description:")
+        for line in desc.splitlines() or [desc]:
+            print(f"    {line}")
     milestones = (proj.get("projectMilestones") or {}).get("nodes", [])
     roll = milestone_rollup(api_key, proj_id)
     if milestones:
@@ -2667,6 +2777,96 @@ def _project_create(args, api_key, team_id):
     print(f"Created project '{p['name']}'  ({p['id']})")
     if p.get("url"):
         print(f"  {p['url']}")
+
+
+def _project_update(args, api_key, team_id):
+    """Update a project via projectUpdate. Strict name resolution — a mistyped
+    project aborts rather than no-opping. Supports description, name, lead,
+    start/target TimelessDates, and state (resolved to statusId)."""
+    try:
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    input_obj: dict = {}
+    if getattr(args, "name", None) is not None:
+        input_obj["name"] = args.name
+
+    description = read_description(
+        getattr(args, "description", None),
+        getattr(args, "description_file", None),
+    )
+    if description is not None:
+        input_obj["description"] = description
+
+    if getattr(args, "lead", None) is not None:
+        lead_raw = (args.lead or "").strip()
+        if lead_raw.lower() in ("", "none"):
+            input_obj["leadId"] = None
+        else:
+            lead_id = resolve_user_id_by_email(api_key, lead_raw)
+            if not lead_id:
+                # Also try name/displayName via resolve_assignee_id for parity
+                # with issue --assign, so --lead bisma works without an email.
+                lead_id = resolve_assignee_id(api_key, lead_raw)
+            if not lead_id:
+                print(f"Lead '{args.lead}' not found (pass an email or name).",
+                      file=sys.stderr)
+                sys.exit(1)
+            input_obj["leadId"] = lead_id
+
+    if getattr(args, "start", None) is not None:
+        # parse_timeless_date returns None for 'none'/'' — that clears the field.
+        input_obj["startDate"] = parse_timeless_date(args.start, "--start")
+    if getattr(args, "target", None) is not None:
+        input_obj["targetDate"] = parse_timeless_date(args.target, "--target")
+
+    if getattr(args, "state", None) is not None:
+        try:
+            input_obj["statusId"] = resolve_project_status_id(api_key, args.state)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if not input_obj:
+        print("Nothing to update. Use --description, --name, --lead, "
+              "--start, --target, or --state.", file=sys.stderr)
+        sys.exit(1)
+
+    data = gql(api_key, """
+        mutation($id: String!, $input: ProjectUpdateInput!) {
+            projectUpdate(id: $id, input: $input) {
+                success
+                project {
+                    id name state description
+                    startDate targetDate
+                    lead { name email }
+                    status { id name type }
+                }
+            }
+        }
+    """, {"id": pid, "input": input_obj})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("projectUpdate") or {}
+    if not result.get("success"):
+        print("Project update failed.", file=sys.stderr)
+        sys.exit(1)
+    p = result["project"]
+    lead = (p.get("lead") or {}).get("name") or "-"
+    print(f"Updated project '{p['name']}'  ({p['id']})")
+    print(f"  State:    {p.get('state') or (p.get('status') or {}).get('type') or '-'}")
+    print(f"  Lead:     {lead}")
+    print(f"  Start:    {p.get('startDate') or '-'}")
+    print(f"  Target:   {p.get('targetDate') or '-'}")
+    desc = (p.get("description") or "").strip()
+    if desc:
+        # One-line summary so agents can confirm the write without re-querying.
+        preview = desc.splitlines()[0]
+        if len(preview) > 100:
+            preview = preview[:97] + "..."
+        print(f"  Description: {preview}")
 
 
 def _project_delete(args, api_key, team_id):
@@ -2870,6 +3070,290 @@ def _milestone_delete(args, api_key, team_id):
     else:
         print("Milestone delete failed.", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_initiatives(args, cfg, api_key, team_id):
+    """List initiatives (default), or show / create / update / link / unlink /
+    archive one. Initiatives are workspace-scoped (not per-team)."""
+    action = getattr(args, "initiatives_action", None)
+    if action == "show":
+        return _initiative_show(args, api_key, team_id)
+    if action == "create":
+        return _initiative_create(args, api_key, team_id)
+    if action == "update":
+        return _initiative_update(args, api_key, team_id)
+    if action == "link":
+        return _initiative_link(args, api_key, team_id)
+    if action == "unlink":
+        return _initiative_unlink(args, api_key, team_id)
+    if action == "archive":
+        return _initiative_archive(args, api_key, team_id)
+
+    nodes = list_initiatives(api_key)
+    if not nodes:
+        print("No initiatives found.")
+        return
+    if args.json:
+        print(json.dumps(nodes, indent=2))
+        return
+    print(f"{len(nodes)} initiative(s):")
+    for n in nodes:
+        status = n.get("status") or "-"
+        target = n.get("targetDate") or "-"
+        owner = (n.get("owner") or {}).get("name") or "-"
+        print(f"  {n['name']:40s}  {status:12s}  target: {target:12s}  owner: {owner}")
+
+
+def _initiative_show(args, api_key, team_id):
+    """Detail for one initiative including linked projects."""
+    try:
+        iid = resolve_initiative_id(api_key, args.name, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        query($id: String!) {
+            initiative(id: $id) {
+                id name description status targetDate
+                owner { name email }
+                projects {
+                    nodes { id name state progress }
+                }
+            }
+        }
+    """, {"id": iid})
+    if check_errors(data):
+        sys.exit(1)
+    init = (data.get("data") or {}).get("initiative") or {}
+    if not init:
+        print(f"No initiative with id '{iid}'.")
+        sys.exit(1)
+    if args.json:
+        print(json.dumps(init, indent=2))
+        return
+    owner = (init.get("owner") or {}).get("name") or "-"
+    print(f"{init['name']}")
+    print(f"  Status:   {init.get('status') or '-'}")
+    print(f"  Target:   {init.get('targetDate') or '-'}")
+    print(f"  Owner:    {owner}")
+    print(f"  ID:       {init.get('id')}")
+    desc = (init.get("description") or "").strip()
+    if desc:
+        print(f"  Description:")
+        for line in desc.splitlines() or [desc]:
+            print(f"    {line}")
+    projects = (init.get("projects") or {}).get("nodes") or []
+    print(f"\nProjects ({len(projects)}):")
+    if not projects:
+        print("  (none linked)")
+        return
+    for p in projects:
+        progress = int((p.get("progress") or 0) * 100)
+        state = p.get("state") or "-"
+        print(f"  - {p['name']:40s}  {state:12s}  {progress:>3}%")
+
+
+def _initiative_create(args, api_key, team_id):
+    """Create a workspace initiative. Status defaults to Linear's default
+    (typically Planned) when --status is omitted."""
+    input_obj: dict = {"name": args.name}
+    description = read_description(
+        getattr(args, "description", None),
+        getattr(args, "description_file", None),
+    )
+    if description is not None:
+        input_obj["description"] = description
+    if getattr(args, "status", None) is not None:
+        status = args.status.strip()
+        # Linear's InitiativeStatus is PascalCase; accept any case.
+        allowed = ("Proposed", "Planned", "Active", "Completed", "Canceled")
+        matched = next((s for s in allowed if s.lower() == status.lower()), None)
+        if not matched:
+            print(f"Error: initiative status '{args.status}' not found. "
+                  f"Use one of: {', '.join(allowed)}.", file=sys.stderr)
+            sys.exit(1)
+        input_obj["status"] = matched
+    if getattr(args, "target", None) is not None:
+        target = parse_timeless_date(args.target, "--target")
+        if target:
+            input_obj["targetDate"] = target
+    if getattr(args, "owner", None) is not None:
+        owner_raw = (args.owner or "").strip()
+        owner_id = (resolve_user_id_by_email(api_key, owner_raw)
+                    or resolve_assignee_id(api_key, owner_raw))
+        if not owner_id:
+            print(f"Owner '{args.owner}' not found (pass an email or name).",
+                  file=sys.stderr)
+            sys.exit(1)
+        input_obj["ownerId"] = owner_id
+
+    data = gql(api_key, """
+        mutation($input: InitiativeCreateInput!) {
+            initiativeCreate(input: $input) {
+                success
+                initiative { id name status targetDate }
+            }
+        }
+    """, {"input": input_obj})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("initiativeCreate") or {}
+    if not result.get("success"):
+        print("Initiative create failed.", file=sys.stderr)
+        sys.exit(1)
+    n = result["initiative"]
+    print(f"Created initiative '{n['name']}'  "
+          f"status: {n.get('status') or '-'}  ({n['id']})")
+
+
+def _initiative_update(args, api_key, team_id):
+    try:
+        iid = resolve_initiative_id(api_key, args.initiative, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    input_obj: dict = {}
+    if getattr(args, "name", None) is not None:
+        input_obj["name"] = args.name
+    description = read_description(
+        getattr(args, "description", None),
+        getattr(args, "description_file", None),
+    )
+    if description is not None:
+        input_obj["description"] = description
+    if getattr(args, "status", None) is not None:
+        status = args.status.strip()
+        allowed = ("Proposed", "Planned", "Active", "Completed", "Canceled")
+        matched = next((s for s in allowed if s.lower() == status.lower()), None)
+        if not matched:
+            print(f"Error: initiative status '{args.status}' not found. "
+                  f"Use one of: {', '.join(allowed)}.", file=sys.stderr)
+            sys.exit(1)
+        input_obj["status"] = matched
+    if getattr(args, "target", None) is not None:
+        input_obj["targetDate"] = parse_timeless_date(args.target, "--target")
+    if getattr(args, "owner", None) is not None:
+        owner_raw = (args.owner or "").strip()
+        if owner_raw.lower() in ("", "none"):
+            input_obj["ownerId"] = None
+        else:
+            owner_id = (resolve_user_id_by_email(api_key, owner_raw)
+                        or resolve_assignee_id(api_key, owner_raw))
+            if not owner_id:
+                print(f"Owner '{args.owner}' not found (pass an email or name).",
+                      file=sys.stderr)
+                sys.exit(1)
+            input_obj["ownerId"] = owner_id
+
+    if not input_obj:
+        print("Nothing to update. Use --name, --description, --status, "
+              "--target, or --owner.", file=sys.stderr)
+        sys.exit(1)
+
+    data = gql(api_key, """
+        mutation($id: String!, $input: InitiativeUpdateInput!) {
+            initiativeUpdate(id: $id, input: $input) {
+                success
+                initiative { id name status targetDate description
+                             owner { name } }
+            }
+        }
+    """, {"id": iid, "input": input_obj})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("initiativeUpdate") or {}
+    if not result.get("success"):
+        print("Initiative update failed.", file=sys.stderr)
+        sys.exit(1)
+    n = result["initiative"]
+    print(f"Updated initiative '{n['name']}'  "
+          f"status: {n.get('status') or '-'}  ({n['id']})")
+
+
+def _initiative_link(args, api_key, team_id):
+    """Link a project to an initiative (initiativeToProjectCreate). Idempotent
+    enough: if the join already exists, report it instead of failing hard."""
+    try:
+        iid = resolve_initiative_id(api_key, args.initiative, strict=True)
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    existing = find_initiative_to_project_id(api_key, iid, pid)
+    if existing:
+        print(f"Already linked: initiative '{args.initiative}' <-> "
+              f"project '{args.project}'  ({existing})")
+        return
+
+    data = gql(api_key, """
+        mutation($input: InitiativeToProjectCreateInput!) {
+            initiativeToProjectCreate(input: $input) {
+                success
+                initiativeToProject {
+                    id
+                    initiative { name }
+                    project { name }
+                }
+            }
+        }
+    """, {"input": {"initiativeId": iid, "projectId": pid}})
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get("initiativeToProjectCreate") or {}
+    if not result.get("success"):
+        print("Initiative link failed.", file=sys.stderr)
+        sys.exit(1)
+    row = result["initiativeToProject"]
+    iname = (row.get("initiative") or {}).get("name") or args.initiative
+    pname = (row.get("project") or {}).get("name") or args.project
+    print(f"Linked initiative '{iname}' <-> project '{pname}'  ({row['id']})")
+
+
+def _initiative_unlink(args, api_key, team_id):
+    """Remove the initiative↔project link via initiativeToProjectDelete."""
+    try:
+        iid = resolve_initiative_id(api_key, args.initiative, strict=True)
+        pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    link_id = find_initiative_to_project_id(api_key, iid, pid)
+    if not link_id:
+        print(f"Error: initiative '{args.initiative}' is not linked to "
+              f"project '{args.project}'.", file=sys.stderr)
+        sys.exit(1)
+
+    data = gql(api_key, """
+        mutation($id: String!) {
+            initiativeToProjectDelete(id: $id) { success }
+        }
+    """, {"id": link_id})
+    if check_errors(data):
+        sys.exit(1)
+    if not (data.get("data") or {}).get("initiativeToProjectDelete", {}).get("success"):
+        print("Initiative unlink failed.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Unlinked initiative '{args.initiative}' from project '{args.project}'.")
+
+
+def _initiative_archive(args, api_key, team_id):
+    try:
+        iid = resolve_initiative_id(api_key, args.initiative, strict=True)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    data = gql(api_key, """
+        mutation($id: String!) { initiativeArchive(id: $id) { success } }
+    """, {"id": iid})
+    if check_errors(data):
+        sys.exit(1)
+    if not (data.get("data") or {}).get("initiativeArchive", {}).get("success"):
+        print("Initiative archive failed.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Archived initiative '{args.initiative}'.")
 
 
 def cmd_labels(args, cfg, api_key, team_id):
@@ -3566,9 +4050,9 @@ def main():
     c_update.add_argument("--starts", default=None, metavar="YYYY-MM-DD", help="New start date")
     c_update.add_argument("--ends", default=None, metavar="YYYY-MM-DD", help="New end date")
 
-    # projects (list / show / create / archive / delete)
+    # projects (list / show / create / update / archive / delete)
     p_projects = sub.add_parser("projects",
-                                help="List, show, create, archive, or delete projects")
+                                help="List, show, create, update, archive, or delete projects")
     p_projects.add_argument("--json", action="store_true", help="JSON output (list)")
     proj_sub = p_projects.add_subparsers(dest="projects_action")
     ps_show = proj_sub.add_parser("show", help="Show a project's detail + milestones")
@@ -3583,6 +4067,21 @@ def main():
     ps_create.add_argument("--lead", default=None, metavar="EMAIL", help="Lead by email")
     ps_create.add_argument("--start", default=None, metavar="YYYY-MM-DD", help="Start date")
     ps_create.add_argument("--target", default=None, metavar="YYYY-MM-DD", help="Target date")
+    ps_update = proj_sub.add_parser("update", help="Update a project (description, lead, dates, state)")
+    ps_update.add_argument("project", help="Project name or id (strict)")
+    ps_update.add_argument("--name", default=None, help="Rename the project")
+    ps_update.add_argument("--description", default=None, help="Set project description")
+    ps_update.add_argument("--description-file", default=None, metavar="PATH",
+                           help="Read description from file ('-' = stdin)")
+    ps_update.add_argument("--lead", default=None, metavar="EMAIL|NAME",
+                           help="Set lead by email or name; 'none' clears")
+    ps_update.add_argument("--start", default=None, metavar="YYYY-MM-DD",
+                           help="Start date; 'none' clears")
+    ps_update.add_argument("--target", default=None, metavar="YYYY-MM-DD",
+                           help="Target date; 'none' clears")
+    ps_update.add_argument("--state", default=None,
+                           help="Project state/status: backlog|planned|started|paused|"
+                                "completed|canceled, or a status name")
     ps_archive = proj_sub.add_parser("archive", aliases=["delete"],
                                      help="Remove a project (moves to trash; recoverable in Linear's UI)")
     ps_archive.add_argument("project", help="Project name or id")
@@ -3613,6 +4112,47 @@ def main():
     ms_delete = ms_sub.add_parser("delete", help="Delete a milestone")
     ms_delete.add_argument("milestone", help="Milestone name or id")
     ms_delete.add_argument("--project", default=None, help="Project to disambiguate the milestone")
+
+    # initiatives (list / show / create / update / link / unlink / archive)
+    p_init = sub.add_parser("initiatives",
+                            help="List, show, create, update, link, unlink, or archive initiatives")
+    p_init.add_argument("--json", action="store_true", help="JSON output (list)")
+    init_sub = p_init.add_subparsers(dest="initiatives_action")
+    ini_show = init_sub.add_parser("show", help="Show an initiative + linked projects")
+    ini_show.add_argument("name", help="Initiative name or id")
+    ini_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                          help="JSON output")
+    ini_create = init_sub.add_parser("create", help="Create an initiative")
+    ini_create.add_argument("--name", required=True, help="Initiative name")
+    ini_create.add_argument("--description", default=None, help="Description")
+    ini_create.add_argument("--description-file", default=None, metavar="PATH",
+                            help="Read description from file ('-' = stdin)")
+    ini_create.add_argument("--status", default=None,
+                            help="Proposed|Planned|Active|Completed|Canceled")
+    ini_create.add_argument("--target", default=None, metavar="YYYY-MM-DD",
+                            help="Target date")
+    ini_create.add_argument("--owner", default=None, metavar="EMAIL|NAME",
+                            help="Owner by email or name")
+    ini_update = init_sub.add_parser("update", help="Update an initiative")
+    ini_update.add_argument("initiative", help="Initiative name or id (strict)")
+    ini_update.add_argument("--name", default=None, help="Rename")
+    ini_update.add_argument("--description", default=None, help="Set description")
+    ini_update.add_argument("--description-file", default=None, metavar="PATH",
+                            help="Read description from file ('-' = stdin)")
+    ini_update.add_argument("--status", default=None,
+                            help="Proposed|Planned|Active|Completed|Canceled")
+    ini_update.add_argument("--target", default=None, metavar="YYYY-MM-DD",
+                            help="Target date; 'none' clears")
+    ini_update.add_argument("--owner", default=None, metavar="EMAIL|NAME",
+                            help="Owner by email or name; 'none' clears")
+    ini_link = init_sub.add_parser("link", help="Link a project to an initiative")
+    ini_link.add_argument("initiative", help="Initiative name or id")
+    ini_link.add_argument("--project", required=True, help="Project name or id")
+    ini_unlink = init_sub.add_parser("unlink", help="Unlink a project from an initiative")
+    ini_unlink.add_argument("initiative", help="Initiative name or id")
+    ini_unlink.add_argument("--project", required=True, help="Project name or id")
+    ini_archive = init_sub.add_parser("archive", help="Archive an initiative")
+    ini_archive.add_argument("initiative", help="Initiative name or id")
 
     # labels (list / create / update / delete)
     p_labels = sub.add_parser("labels", help="List, create, update, or delete labels")
@@ -3663,15 +4203,23 @@ def main():
     p_inbox.add_argument("--read-all", action="store_true",
                          help="Mark ALL notifications read")
 
-    # Back-compat + ergonomics: `projects <name>` (a bare name, not a verb) is
-    # shorthand for `projects show <name>`. Insert the implicit `show` so the
-    # detail view keeps working alongside the create/archive/delete subcommands.
+    # Back-compat + ergonomics: `projects <name>` / `initiatives <name>` (a bare
+    # name, not a verb) is shorthand for `<group> show <name>`. Insert the
+    # implicit `show` so the detail view keeps working alongside create/update/
+    # archive/link/unlink subcommands.
     argv = sys.argv[1:]
     if len(argv) >= 2 and argv[0] == "projects":
-        _proj_verbs = {"show", "create", "archive", "delete"}
+        _proj_verbs = {"show", "create", "update", "archive", "delete"}
         for _i in range(1, len(argv)):
             if not argv[_i].startswith("-"):
                 if argv[_i] not in _proj_verbs:
+                    argv = argv[:_i] + ["show"] + argv[_i:]
+                break
+    if len(argv) >= 2 and argv[0] == "initiatives":
+        _ini_verbs = {"show", "create", "update", "link", "unlink", "archive"}
+        for _i in range(1, len(argv)):
+            if not argv[_i].startswith("-"):
+                if argv[_i] not in _ini_verbs:
                     argv = argv[:_i] + ["show"] + argv[_i:]
                 break
     args = parser.parse_args(argv)
@@ -3719,6 +4267,8 @@ def main():
         cmd_projects(args, cfg, api_key, team_id)
     elif args.command == "milestones":
         cmd_milestones(args, cfg, api_key, team_id)
+    elif args.command == "initiatives":
+        cmd_initiatives(args, cfg, api_key, team_id)
     elif args.command == "labels":
         cmd_labels(args, cfg, api_key, team_id)
     elif args.command == "users":
