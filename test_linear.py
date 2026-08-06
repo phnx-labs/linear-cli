@@ -813,6 +813,40 @@ class SaveConfigUnwritableTest(unittest.TestCase):
             self.assertTrue(linear_cli.save_config({"agent": "claude"}))
             self.assertEqual(linear_cli.load_config()["agent"], "claude")
 
+    def test_save_config_writes_private_directory_and_file(self):
+        """API key lives in config.json — dir 0700, file 0600 (RUSH-2285)."""
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            self._with_config_path(pathlib.Path(d) / ".linear-cli" / "config.json")
+            self.assertTrue(
+                linear_cli.save_config({"apiKey": "lin_api_secret", "teamId": "team"})
+            )
+            self.assertEqual(
+                linear_cli.CONFIG_PATH.parent.stat().st_mode & 0o777, 0o700
+            )
+            self.assertEqual(linear_cli.CONFIG_PATH.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(linear_cli.load_config()["apiKey"], "lin_api_secret")
+
+    def test_load_config_hardens_preexisting_loose_modes(self):
+        """Existing loose umask configs get tightened on load."""
+        import pathlib
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            cfg_dir = pathlib.Path(d) / ".linear-cli"
+            cfg_dir.mkdir(mode=0o755)
+            cfg_path = cfg_dir / "config.json"
+            cfg_path.write_text('{"apiKey": "lin_api_loose"}\n')
+            cfg_path.chmod(0o644)
+            self._with_config_path(cfg_path)
+            loaded = linear_cli.load_config()
+            self.assertEqual(loaded["apiKey"], "lin_api_loose")
+            self.assertEqual(cfg_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(cfg_path.stat().st_mode & 0o777, 0o600)
+            # Sanity: not group/world readable.
+            mode = cfg_path.stat().st_mode
+            self.assertFalse(mode & stat.S_IRGRP)
+            self.assertFalse(mode & stat.S_IROTH)
+
 
 class MigrateAgentLabelsClassifyTest(unittest.TestCase):
     ROSTER = ["Claude", "Codex"]

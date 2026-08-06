@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-08-06
+
+### Security
+
+- **Config file is private.** `save_config` / first-write / legacy migration now
+  create `~/.linear-cli` as `0700` and `config.json` as `0600` (the API key lives
+  there). A pre-existing loose-mode config is re-chmod'd on every `load_config`.
+- **`install.sh` fails closed on a bad download.** Pins a release tag (default
+  `v0.16.1`, not floating `main`) and verifies SHA-256 before moving the binary
+  into place. Override with `LINEAR_CLI_VERSION` / `LINEAR_CLI_SHA256` only when
+  deliberately installing a different revision.
+
 ## [0.16.0] - 2026-08-05
 
 ### Changed

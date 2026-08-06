@@ -4,8 +4,12 @@
 set -eu
 
 REPO="phnx-labs/linear-cli"
-BRANCH="${LINEAR_CLI_BRANCH:-main}"
-URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/linear"
+# Pin a release tag (not floating main). Override with LINEAR_CLI_VERSION /
+# LINEAR_CLI_SHA256 only when you deliberately install a different revision.
+VERSION="${LINEAR_CLI_VERSION:-v0.16.1}"
+# SHA-256 of the `linear` file at VERSION. Recomputed whenever VERSION bumps.
+EXPECTED_SHA256="${LINEAR_CLI_SHA256:-53017551174816eabaf02a3978d138c04c5f45771f85dcf8b16876de346f9efd}"
+URL="https://raw.githubusercontent.com/${REPO}/${VERSION}/linear"
 
 pick_install_dir() {
   if [ -w "/usr/local/bin" ]; then
@@ -23,15 +27,44 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+verify_sha256() {
+  file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$EXPECTED_SHA256" "$file" | sha256sum -c - >/dev/null
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [ "$actual" = "$EXPECTED_SHA256" ]
+  else
+    echo "sha256sum or shasum is required to verify the download." >&2
+    exit 1
+  fi
+}
+
 INSTALL_DIR="$(pick_install_dir)"
 TARGET="${INSTALL_DIR}/linear"
+TMP="$(mktemp "${TMPDIR:-/tmp}/linear-cli.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
 
-echo "Downloading linear-cli to ${TARGET}"
-curl -fsSL "$URL" -o "$TARGET"
+echo "Downloading linear-cli ${VERSION} to ${TARGET}"
+curl -fsSL "$URL" -o "$TMP"
+if ! verify_sha256 "$TMP"; then
+  echo "Checksum verification failed for ${URL}" >&2
+  echo "Expected SHA-256: ${EXPECTED_SHA256}" >&2
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "Actual:   $(sha256sum "$TMP" | awk '{print $1}')" >&2
+  elif command -v shasum >/dev/null 2>&1; then
+    echo "Actual:   $(shasum -a 256 "$TMP" | awk '{print $1}')" >&2
+  fi
+  exit 1
+fi
+# Install only after checksum passes (fail closed).
+mkdir -p "$(dirname "$TARGET")"
+mv "$TMP" "$TARGET"
+trap - EXIT
 chmod +x "$TARGET"
 
 echo ""
-echo "Installed: $TARGET"
+echo "Installed: $TARGET (${VERSION})"
 if ! echo ":$PATH:" | grep -q ":${INSTALL_DIR}:"; then
   echo ""
   echo "Note: ${INSTALL_DIR} is not on your PATH. Add this to your shell rc:"

@@ -39,7 +39,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -49,6 +49,10 @@ _UNSET = object()
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
 API_URL = "https://api.linear.app/graphql"
+
+# Config holds the Linear API key — keep it private on multi-user boxes.
+CONFIG_DIR_MODE = 0o700
+CONFIG_FILE_MODE = 0o600
 
 # How long a cached agent roster stays fresh before an auto-refresh. Agent apps
 # (Claude, Codex, Kimi, …) are installed/removed rarely, so a periodic refresh
@@ -60,13 +64,44 @@ AGENTS_TTL_SECONDS = 6 * 3600
 # Config
 # ---------------------------------------------------------------------------
 
+def _harden_config_perms() -> None:
+    """Best-effort: force 0700/0600 on an existing config tree.
+
+    Upgrades written before this release (or created with a loose umask) stay
+    world-readable until the next `save_config`. Touching modes on every load
+    closes that window without requiring a re-setup.
+    """
+    try:
+        if CONFIG_PATH.parent.exists():
+            CONFIG_PATH.parent.chmod(CONFIG_DIR_MODE)
+        if CONFIG_PATH.exists():
+            CONFIG_PATH.chmod(CONFIG_FILE_MODE)
+    except OSError:
+        pass
+
+
+def write_config_file(cfg: dict) -> None:
+    """Write config.json with private dir/file modes (API key lives here)."""
+    CONFIG_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+    # mkdir(mode=…) is ignored when the dir already exists — always re-assert.
+    CONFIG_PATH.parent.chmod(CONFIG_DIR_MODE)
+    data = (json.dumps(cfg, indent=2) + "\n").encode()
+    # O_CREAT with mode is masked by umask; chmod after write is the real gate.
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONFIG_FILE_MODE)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    CONFIG_PATH.chmod(CONFIG_FILE_MODE)
+
+
 def load_config() -> dict:
     if CONFIG_PATH.exists():
+        _harden_config_perms()
         return json.loads(CONFIG_PATH.read_text())
     if LEGACY_CONFIG_PATH.exists():
         cfg = json.loads(LEGACY_CONFIG_PATH.read_text())
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        write_config_file(cfg)
         print(f"Migrated config: {LEGACY_CONFIG_PATH} -> {CONFIG_PATH}", file=sys.stderr)
         return cfg
     return {}
@@ -80,13 +115,14 @@ def save_config(cfg: dict) -> bool:
     command that triggered the refresh — the in-memory values are still good for
     this run. `setup` checks the return value, because there persistence IS the
     operation.
+
+    Always writes dir `0700` and file `0600` so the API key is not world-readable.
     """
     # Volatile cfg (e.g. --team override) opts out of persistence.
     if cfg.get("__volatile__"):
         return True
     try:
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        write_config_file(cfg)
         return True
     except OSError as e:
         print(f"Warning: could not write {CONFIG_PATH}: {e}", file=sys.stderr)
