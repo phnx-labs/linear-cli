@@ -16,6 +16,8 @@ linear tasks ANT-42                    # detail view for one issue
 linear update ANT-42 --pickup          # move to In Progress
 linear update ANT-42 --comment "..."    # drop a progress note
 linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
+linear queue                           # closes waiting on a rate limit
+linear queue drain                     # apply queued closes with backoff
 linear create "Title" --label foo --priority high --description "..."
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
@@ -185,6 +187,21 @@ linear tasks --json | jq '.issues[] | {id: .identifier, title, state: .state.nam
 - Plain text (appended as a line)
 
 Use it on `update --done` so reviewers see evidence without digging.
+
+## Durable closes
+
+If `linear update <id> --done --proof ...` hits a Linear rate limit or transient
+API error, the close is persisted to `~/.linear-cli/queue/` instead of being
+dropped. Retry with exponential backoff happens automatically on the next
+`linear update --done`, or explicitly via:
+
+```
+linear queue drain          # apply all queued closes now
+linear queue drain --dry-run # preview without applying
+```
+
+The queue is keyed by issue identifier and idempotent: a duplicate close
+collapses to the latest proof, and an already-closed issue is skipped.
 
 ## Common mistakes
 

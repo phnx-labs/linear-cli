@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`linear queue` / `linear queue drain`** — durable local queue for closes
+  that cannot be written immediately. `linear update <id> --done --proof ...`
+  now persists the intent before attempting the API; on a Linear rate limit
+  (429) or transient error the intent is retained in `~/.linear-cli/queue/`
+  and retried later. `linear queue drain` applies pending closes with
+  exponential backoff; `linear queue drain --dry-run` previews them. The next
+  `linear update --done` automatically drains the queue first.
+- **Idempotent queued closes.** Duplicate intents for the same ticket collapse
+  to the latest proof/comment. A drain that finds the issue already in the
+  desired state removes the intent without re-posting proof.
+- **Bounded queue growth.** `MAX_QUEUE_SIZE` caps the number of distinct
+  intents; new intents are rejected when full, but existing intents can still
+  be updated. `MAX_QUEUE_ATTEMPTS` limits retries so stuck items do not linger
+  forever.
+
+### Changed
+
+- `gql` now surfaces HTTP status codes in GraphQL error extensions so callers
+  can distinguish rate limits (429) and transient errors from permanent
+  failures.
+
+### Docs
+
+- README and `skill.md` document `linear queue`, `linear queue drain`, and the
+  durable-close behavior.
+
 ## [0.17.0] - 2026-08-06
 
 ### Added
