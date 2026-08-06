@@ -50,7 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and **including archived issues** — `list_team_labels` also returns
   workspace-scoped labels, so a team-scoped scan finding no hits does not mean
   unused, and Linear's `issues` connection excludes archived issues unless asked,
-  so a label carried only by archived work would have looked free to delete. The
+  so a label carried only by archived work would have looked free to delete. A
+  label carried by more than 200 issues is kept outright: the gate subtracts what
+  the run clears, so a truncated carrier list whose every entry happened to be
+  cleared would subtract to empty and read as free. The
   dry run projects the post-migration state, so it previews the deletes the run
   would make rather than reporting every label as still carried by the very
   issues it just said it would strip.

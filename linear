@@ -2982,8 +2982,12 @@ def classify_agent_labels(node: dict, label_names: list[str], roster: list[str])
     return "conflict", f"delegated to {current}, label says {target}"
 
 
-def label_carrier_ids(api_key: str, label_id: str) -> set[str] | None:
-    """Ids of the issues carrying this label, workspace-wide. None on API error.
+CARRIER_PAGE = 200
+
+
+def label_carrier_ids(api_key: str, label_id: str) -> tuple[set[str], bool] | None:
+    """(ids of the issues carrying this label, truncated?) — workspace-wide.
+    None on API error.
 
     Deliberately not team-scoped: `list_team_labels` also returns workspace-wide
     labels (`team: { null: true }`), so a label this team has finished with may
@@ -2992,20 +2996,26 @@ def label_carrier_ids(api_key: str, label_id: str) -> set[str] | None:
 
     `includeArchived: true` matters — the connection excludes archived issues by
     default, so a label carried only by archived issues would look unused and be
-    deleted. Bounded at 200: past that it is emphatically still in use, and the
-    only question this answers is "is anything left?".
+    deleted.
+
+    The truncation flag is load-bearing, not bookkeeping. The caller subtracts
+    the issues this run clears from this set, so a *partial* page whose every
+    entry happens to be cleared subtracts to empty and reads as "nothing carries
+    it" — deleting a label that hundreds of untouched issues still use. Asking
+    for one more than the page size is how we can tell.
     """
     data = gql(api_key, """
-        query($id: ID!) {
+        query($id: ID!, $first: Int!) {
             issues(filter: { labels: { id: { eq: $id } } },
-                   includeArchived: true, first: 200) {
+                   includeArchived: true, first: $first) {
                 nodes { id }
             }
         }
-    """, {"id": label_id})
+    """, {"id": label_id, "first": CARRIER_PAGE + 1})
     if check_errors(data):
         return None
-    return {n["id"] for n in ((data.get("data") or {}).get("issues") or {}).get("nodes", [])}
+    nodes = ((data.get("data") or {}).get("issues") or {}).get("nodes", [])
+    return {n["id"] for n in nodes[:CARRIER_PAGE]}, len(nodes) > CARRIER_PAGE
 
 
 def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
@@ -3134,26 +3144,30 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
     # on a conflicting, unresolved, or failed issue is deliberately kept, and so
     # is one still carried outside the scanned team.
     delete_failures = 0
-    scanned_ids = {n["id"] for n, _, _, _ in rows}
     labels = [l for l in list_team_labels(api_key, team_id)
               if l["name"].startswith(AGENT_LABEL_PREFIX)]
     for l in sorted(labels, key=lambda x: x["name"]):
         if l["name"] in blocked_labels:
             print(f"  keep       label {l['name']} — still in use by an unmigrated issue")
             continue
-        carriers = label_carrier_ids(api_key, l["id"])
-        if carriers is None:
+        found = label_carrier_ids(api_key, l["id"])
+        if found is None:
             print(f"  FAILED     label {l['name']} — could not look up what carries it",
                   file=sys.stderr)
             delete_failures += 1
             continue
+        carriers, truncated = found
+        if truncated:
+            print(f"  keep       label {l['name']} — more than {CARRIER_PAGE} issues "
+                  f"carry it; too many to confirm it is free")
+            continue
         # Whatever this run clears no longer counts against the label. In a dry
-        # run that projection is the whole point of the preview.
-        remaining = carriers - cleared_ids
-        if remaining:
-            where = ("outside the scanned team" if remaining - scanned_ids
-                     else "by an issue this run did not migrate")
-            print(f"  keep       label {l['name']} — still carried {where}")
+        # run that projection is the whole point of the preview. The remainder
+        # may be on another team, or archived, or simply not scanned — the one
+        # thing worth saying is that this run did not clear it.
+        if carriers - cleared_ids:
+            print(f"  keep       label {l['name']} — still carried by an issue "
+                  f"this run did not migrate")
             continue
         if not args.apply:
             print(f"  delete     label {l['name']} (nothing carries it after migration)")
@@ -3174,14 +3188,16 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
 
     left_behind = of("conflict") or of("unresolved") or write_failures or delete_failures
     if not args.apply:
-        if delete_failures:
-            print("Dry run only. Could not reach the API to check what still carries "
-                  "some labels — re-run once it responds.")
-        elif left_behind:
+        # These are independent: a lookup failure must not swallow the guidance
+        # for conflicts a human still has to resolve.
+        if of("conflict") or of("unresolved"):
             print("Dry run only. The entries above need a human before --apply can "
                   "finish: resolve each conflict, and rename or remove any label "
                   "whose suffix is not an agent.")
-        else:
+        if delete_failures:
+            print("Could not reach the API to check what still carries some labels "
+                  "— re-run once it responds.")
+        if not left_behind:
             print("Dry run only. Re-run with --apply to write.")
         return
     if left_behind:
