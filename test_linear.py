@@ -887,7 +887,9 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
                 nodes = [{"id": i["id"]} for i in issues
                          if any(l["id"] == lid for l in i["labels"]["nodes"])]
                 nodes += [{"id": x} for x in (extra_carriers or {}).get(lid, [])]
-                return {"data": {"issues": {"nodes": nodes}}}
+                # Honour the requested page size the way the API does, so a
+                # truncated page is a truncated page in the test too.
+                return {"data": {"issues": {"nodes": nodes[:(variables or {}).get("first", 201)]}}}
             ident = next((i["identifier"] for i in issues
                           if i["id"] == (variables or {}).get("id")), "R-?")
             if not update_ok:
@@ -1014,7 +1016,20 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
             extra_carriers={"l-ws": ["uuid-other-team"]})
         self.assertEqual(code, 0, err)
         self.assertEqual(self._deletes(calls), [])
-        self.assertIn("still carried outside the scanned team", out)
+        self.assertIn("still carried by an issue this run did not migrate", out)
+
+    def test_a_truncated_carrier_page_never_deletes(self):
+        # The gate subtracts the issues this run clears, so a PARTIAL page whose
+        # every entry happens to be cleared subtracts to empty and would read as
+        # "nothing carries it" — deleting a label hundreds of untouched issues
+        # still use. Every carrier here migrates; the page is still truncated.
+        issues = [self._raw(f"R-{i}", f"uuid-{i}", labels=[("l-big", "agent:claude")])
+                  for i in range(linear_cli.CARRIER_PAGE + 5)]
+        code, out, err, calls = self._run(issues, [{"id": "l-big", "name": "agent:claude"}],
+                                          apply=True)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._deletes(calls), [])
+        self.assertIn(f"more than {linear_cli.CARRIER_PAGE} issues carry it", out)
 
     def test_dry_run_previews_the_delete_of_a_label_it_would_strip(self):
         # The carrier IS the issue this run would migrate. Gating on the live

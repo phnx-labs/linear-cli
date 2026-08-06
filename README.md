@@ -253,7 +253,7 @@ Run `linear migrate-agent-labels`. It is a dry run by default and prints exactly
 
 It never overwrites an existing delegate. An issue already delegated to someone other than its label claims — or carrying two `agent:*` labels that name different agents — is reported as a `CONFLICT` and left untouched. A label whose suffix is not a delegatable agent (a machine name, a workflow flag) is reported as `UNRESOLVED` and kept, along with any sibling label on the same issue: mixed state needs a human, and migrating half of it silently is worse.
 
-Each issue gets at most one write, so two labels on one issue can't resurrect each other. A label is deleted only when nothing carries it **workspace-wide**, not merely nothing in the scanned team.
+Each issue gets at most one write, so two labels on one issue can't resurrect each other. A label is deleted only when nothing carries it **workspace-wide** (archived issues included), not merely nothing in the scanned team — and a label carried by more than 200 issues is kept outright, because a truncated carrier list can't prove a label is free.
 
 `--apply` exits non-zero if anything was left behind — a conflict, an unresolved label, or a failed write. A dry run exits 0 and tells you what needs a human; it is an inspection, not a migration.
 
