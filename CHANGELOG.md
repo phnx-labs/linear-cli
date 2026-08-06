@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-08-05
+
+### Changed
+
+- **BREAKING: `delegate` is the only ownership model. `agent:<name>` labels no
+  longer own anything.** `linear tasks --agent <name>` filtered on an
+  `agent:<name>` *label* and `linear tasks --board` grouped its columns by the
+  same label, so an issue delegated to Claude through Linear's own delegation UI
+  did not appear in Claude's queue, and an issue merely tagged `agent:claude`
+  did. Both now read the native `delegate` field; "unowned" means exactly
+  `delegate` is null. A leftover `agent:*` label is inert — it is an ordinary
+  label with no effect on any queue.
+- **An unknown `--agent` aborts instead of listing an empty queue.** The name is
+  resolved against the workspace agent roster (`linear agents`); a typo exits
+  non-zero and prints the delegatable names. An unattended drain reading a silent
+  empty list as "queue clear" was the failure this prevents.
+- **`--label` now composes with `--agent`.** It used to be dropped whenever an
+  agent filter was active, because ownership was itself a label and the two label
+  filters fought. Ownership is the delegate field now, so the two are orthogonal.
+
+### Added
+
+- **`linear migrate-agent-labels`** — one-time migration off the legacy labels.
+  Dry run by default; `--apply` writes. It sets the delegate from a resolvable
+  `agent:<name>` label, strips the migrated label, and deletes each `agent:*`
+  label once nothing carries it. It **never overwrites an existing delegate**: an
+  issue already delegated to a different agent is reported as `CONFLICT` and left
+  untouched, and a label whose suffix is not a delegatable agent (a machine name,
+  a workflow flag) is reported as `UNRESOLVED` and kept. Either case exits
+  non-zero so a partial migration cannot read as a clean one.
+
 ## [0.15.1] - 2026-08-05
 
 ### Fixed

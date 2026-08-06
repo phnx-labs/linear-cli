@@ -605,5 +605,349 @@ class BoardJsonScopeTest(unittest.TestCase):
         self.assertEqual(_json.loads(buf.getvalue())["scope"], "active")
 
 
+def _issue(ident, delegate=None, labels=(), priority=2, state="Todo"):
+    """An issue node shaped the way ISSUE_FIELDS returns it."""
+    return {
+        "identifier": ident,
+        "title": f"title for {ident}",
+        "state": {"name": state, "type": "unstarted"},
+        "priority": priority,
+        "labels": {"nodes": [{"name": n} for n in labels]},
+        "assignee": {"name": "Muqsit"},
+        "delegate": {"name": delegate} if delegate else None,
+        "project": None,
+        "projectMilestone": None,
+        "cycle": {"number": 23, "name": "Cycle 23"},
+        "dueDate": None,
+        "createdAt": "2026-08-01T00:00:00.000Z",
+        "url": f"https://linear.app/x/issue/{ident}",
+    }
+
+
+class _ListTasksHarness:
+    """Drives the real list_tasks/show_board against a fixed issue page.
+
+    Only the two network edges are substituted (cycle resolution and the issue
+    page); every line of ownership logic under test — the delegate filter, the
+    unowned rule, the header counts, the board grouping — is the shipping code.
+    """
+
+    ROSTER = [{"id": "id-claude", "name": "Claude"},
+              {"id": "id-codex", "name": "Codex"}]
+
+    def __init__(self, nodes):
+        self.nodes = nodes
+        self._saved = {}
+
+    def __enter__(self):
+        for name in ("build_cycle_scope", "paginate_issues", "get_agents"):
+            self._saved[name] = getattr(linear_cli, name)
+        linear_cli.build_cycle_scope = lambda a, t, s: (
+            'cycle: { id: { eq: "x" } }', "Cycle 23", {"id": "x"})
+        linear_cli.paginate_issues = lambda a, f: list(self.nodes)
+        linear_cli.get_agents = lambda a, c, force=False: list(self.ROSTER)
+        return self
+
+    def __exit__(self, *exc):
+        for name, fn in self._saved.items():
+            setattr(linear_cli, name, fn)
+        return False
+
+
+def _list_args(**overrides):
+    args = types.SimpleNamespace(
+        cycle=None, project=None, milestone=None, since=None, all=False,
+        agent=None, label=None, assignee=None, query=None, status=None,
+        json=True, by_milestone=False, board=False,
+    )
+    for k, v in overrides.items():
+        setattr(args, k, v)
+    return args
+
+
+def _run_list(nodes, cfg=None, **overrides):
+    args = _list_args(**overrides)
+    cfg = {"agent": "claude"} if cfg is None else cfg
+    buf = io.StringIO()
+    with _ListTasksHarness(nodes):
+        with contextlib.redirect_stdout(buf):
+            linear_cli.list_tasks(args, cfg, "api-key", "team-id")
+    import json as _json
+    return _json.loads(buf.getvalue())
+
+
+class DelegateOwnershipTest(unittest.TestCase):
+    """`agent:*` labels carry no ownership; the native delegate is the only owner."""
+
+    def test_delegate_of_reads_native_field_and_none_means_unowned(self):
+        self.assertEqual(linear_cli.delegate_of(_issue("R-1", delegate="Claude")), "Claude")
+        self.assertIsNone(linear_cli.delegate_of(_issue("R-2")))
+
+    def test_agent_label_does_not_make_an_issue_owned(self):
+        # The whole point of the migration: a leftover agent:claude label is
+        # inert. This issue is unowned because its delegate is null.
+        n = _issue("R-3", labels=["agent:claude"])
+        self.assertIsNone(linear_cli.delegate_of(n))
+        self.assertFalse(linear_cli.delegated_to(n, "claude"))
+
+    def test_delegated_to_is_case_insensitive(self):
+        n = _issue("R-4", delegate="Claude")
+        self.assertTrue(linear_cli.delegated_to(n, "claude"))
+        self.assertTrue(linear_cli.delegated_to(n, "CLAUDE"))
+        self.assertFalse(linear_cli.delegated_to(n, "codex"))
+
+
+class ListTasksDelegateFilterTest(unittest.TestCase):
+    def test_default_view_is_my_delegated_issues_plus_undelegated(self):
+        nodes = [
+            _issue("R-1", delegate="Claude"),
+            _issue("R-2", delegate="Codex"),
+            _issue("R-3"),                                  # unowned
+            _issue("R-4", labels=["agent:claude"]),          # label only -> unowned
+        ]
+        out = _run_list(nodes)
+        self.assertEqual([i["identifier"] for i in out["issues"]],
+                         ["R-1", "R-3", "R-4"])
+
+    def test_explicit_agent_excludes_unowned(self):
+        nodes = [_issue("R-1", delegate="Claude"), _issue("R-2")]
+        out = _run_list(nodes, agent="claude")
+        self.assertEqual([i["identifier"] for i in out["issues"]], ["R-1"])
+
+    def test_agent_filter_matches_roster_casing(self):
+        # config/CLI say "codex"; Linear returns the delegate as "Codex".
+        nodes = [_issue("R-1", delegate="Codex"), _issue("R-2", delegate="Claude")]
+        out = _run_list(nodes, agent="codex")
+        self.assertEqual([i["identifier"] for i in out["issues"]], ["R-1"])
+
+    def test_all_shows_every_agents_issues(self):
+        nodes = [_issue("R-1", delegate="Claude"), _issue("R-2", delegate="Codex"),
+                 _issue("R-3")]
+        out = _run_list(nodes, all=True)
+        self.assertEqual(sorted(i["identifier"] for i in out["issues"]),
+                         ["R-1", "R-2", "R-3"])
+
+    def test_unknown_agent_fails_loud_instead_of_listing_an_empty_queue(self):
+        # A silent empty list reads as "queue is clear" to an unattended drain.
+        nodes = [_issue("R-1", delegate="Claude")]
+        args = _list_args(agent="nosuchagent")
+        err = io.StringIO()
+        with _ListTasksHarness(nodes):
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                linear_cli.list_tasks(args, {}, "api-key", "team-id")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Unknown agent 'nosuchagent'", err.getvalue())
+        self.assertIn("Claude", err.getvalue())
+
+    def test_label_filter_composes_with_the_agent_queue(self):
+        # It used to be dropped whenever an agent filter was set, because
+        # ownership was itself a label. Ownership is the delegate now.
+        captured = []
+        args = _list_args(agent="claude", label="kind:build")
+        with _ListTasksHarness([]):
+            def capture(api_key, filter_str):
+                captured.append(filter_str)
+                return []
+            linear_cli.paginate_issues = capture
+            with contextlib.redirect_stdout(io.StringIO()):
+                linear_cli.list_tasks(args, {}, "api-key", "team-id")
+        self.assertEqual(len(captured), 1)
+        self.assertIn('labels: { name: { eq: "kind:build" } }', captured[0])
+
+
+class BoardDelegateGroupingTest(unittest.TestCase):
+    def _board(self, nodes):
+        args = types.SimpleNamespace(cycle=None, json=False, board=True)
+        buf = io.StringIO()
+        with _ListTasksHarness(nodes):
+            with contextlib.redirect_stdout(buf):
+                linear_cli.show_board(args, "api-key", "team-id", {})
+        return buf.getvalue()
+
+    def test_columns_are_delegates_and_labelled_issues_land_in_unassigned(self):
+        out = self._board([
+            _issue("R-1", delegate="Claude"),
+            _issue("R-2", delegate="Codex"),
+            _issue("R-3", labels=["agent:claude"]),   # inert label -> unassigned
+            _issue("R-4"),
+        ])
+        self.assertIn("@Claude (1)", out)
+        self.assertIn("@Codex (1)", out)
+        self.assertIn("unassigned (2)", out)
+        # R-3 must not appear under a @claude column derived from its label.
+        self.assertNotIn("@claude", out)
+
+    def test_board_has_no_column_when_nothing_is_delegated(self):
+        out = self._board([_issue("R-1"), _issue("R-2", labels=["agent:codex"])])
+        self.assertIn("unassigned (2)", out)
+        self.assertNotIn("@Codex", out)
+
+
+class SaveConfigUnwritableTest(unittest.TestCase):
+    """A cache refresh must not take down the read command that triggered it."""
+
+    def _with_config_path(self, path):
+        saved = linear_cli.CONFIG_PATH
+        linear_cli.CONFIG_PATH = path
+        self.addCleanup(lambda: setattr(linear_cli, "CONFIG_PATH", saved))
+
+    def test_unwritable_config_warns_and_returns_false(self):
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            # A regular file where the config *directory* should be: mkdir and
+            # write both raise OSError, the same way a read-only mount does.
+            blocker = os.path.join(d, "not-a-dir")
+            with open(blocker, "w") as fh:
+                fh.write("x")
+            self._with_config_path(pathlib.Path(blocker) / "config.json")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                ok = linear_cli.save_config({"agent": "claude"})
+            self.assertFalse(ok)
+            self.assertIn("could not write", err.getvalue())
+
+    def test_writable_config_round_trips(self):
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            self._with_config_path(pathlib.Path(d) / "sub" / "config.json")
+            self.assertTrue(linear_cli.save_config({"agent": "claude"}))
+            self.assertEqual(linear_cli.load_config()["agent"], "claude")
+
+
+class MigrateAgentLabelsClassifyTest(unittest.TestCase):
+    ROSTER = ["Claude", "Codex"]
+
+    def test_resolvable_label_on_an_undelegated_issue_migrates(self):
+        v, detail = linear_cli.classify_agent_label_issue(
+            _issue("R-1"), "agent:claude", self.ROSTER)
+        self.assertEqual(v, "migrate")
+        self.assertEqual(detail, "Claude")
+
+    def test_matching_existing_delegate_is_a_strip_not_a_rewrite(self):
+        v, detail = linear_cli.classify_agent_label_issue(
+            _issue("R-2", delegate="Claude"), "agent:claude", self.ROSTER)
+        self.assertEqual(v, "already")
+        self.assertEqual(detail, "Claude")
+
+    def test_conflicting_delegate_is_never_overwritten(self):
+        v, detail = linear_cli.classify_agent_label_issue(
+            _issue("R-3", delegate="Codex"), "agent:claude", self.ROSTER)
+        self.assertEqual(v, "conflict")
+        self.assertIn("delegated to Codex", detail)
+        self.assertIn("label says Claude", detail)
+
+    def test_label_suffix_that_is_not_an_agent_is_unresolved(self):
+        # Real cases in this workspace: agent:hold (a workflow flag) and
+        # agent:yosemite-s0 (a worker machine) — neither is a delegatable agent.
+        for suffix in ("hold", "yosemite-s0"):
+            v, detail = linear_cli.classify_agent_label_issue(
+                _issue("R-4"), f"agent:{suffix}", self.ROSTER)
+            self.assertEqual(v, "unresolved", suffix)
+            self.assertIn(suffix, detail)
+
+
+class MigrateAgentLabelsRunTest(unittest.TestCase):
+    """Drives cmd_migrate_agent_labels end to end over a substituted transport."""
+
+    def _run(self, issues, labels, apply=False):
+        calls = []
+
+        def fake_paginate_connection(api_key, query, path, variables=None):
+            if path == ["issues"]:
+                return list(issues)
+            return list(labels)
+
+        def fake_gql(api_key, query, variables=None):
+            calls.append((query, variables))
+            if "issueLabelDelete" in query:
+                return {"data": {"issueLabelDelete": {"success": True}}}
+            ident = next((i["identifier"] for i in issues
+                          if i["id"] == (variables or {}).get("id")), "R-?")
+            dg = ((variables or {}).get("input", {}) or {}).get("delegateId")
+            return {"data": {"issueUpdate": {
+                "success": True,
+                "issue": {"identifier": ident,
+                          "delegate": {"name": "Claude"} if dg else None,
+                          "labels": {"nodes": []}}}}}
+
+        saved = (linear_cli.paginate_connection, linear_cli.gql,
+                 linear_cli.get_agents, linear_cli.list_team_labels,
+                 linear_cli.resolve_agent_id)
+        linear_cli.paginate_connection = fake_paginate_connection
+        linear_cli.gql = fake_gql
+        linear_cli.get_agents = lambda a, c, force=False: [
+            {"id": "id-claude", "name": "Claude"}, {"id": "id-codex", "name": "Codex"}]
+        linear_cli.list_team_labels = lambda a, t: list(labels)
+        linear_cli.resolve_agent_id = lambda a, c, n: f"id-{n.lower()}"
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                linear_cli.cmd_migrate_agent_labels(
+                    types.SimpleNamespace(apply=apply), {}, "api-key", "team-id")
+        except SystemExit as e:
+            code = e.code
+        finally:
+            (linear_cli.paginate_connection, linear_cli.gql,
+             linear_cli.get_agents, linear_cli.list_team_labels,
+             linear_cli.resolve_agent_id) = saved
+        return code, out.getvalue(), err.getvalue(), calls
+
+    def test_apply_sets_the_delegate_and_drops_only_the_agent_label(self):
+        issue = {"id": "uuid-1", "identifier": "R-1", "title": "t",
+                 "state": {"name": "Todo"}, "delegate": None,
+                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:claude"},
+                                      {"id": "l-keep", "name": "kind:build"}]}}
+        code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:claude"}],
+                                          apply=True)
+        self.assertEqual(code, 0, err)
+        update = next(v for q, v in calls if "issueUpdate" in q)
+        self.assertEqual(update["input"]["delegateId"], "id-claude")
+        self.assertEqual(update["input"]["labelIds"], ["l-keep"])   # kind:build survives
+        self.assertIn("deleted", out)
+
+    def test_conflict_is_reported_and_nothing_is_written(self):
+        issue = {"id": "uuid-2", "identifier": "R-2", "title": "t",
+                 "state": {"name": "Todo"}, "delegate": {"name": "Codex"},
+                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:claude"}]}}
+        code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:claude"}],
+                                          apply=True)
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICT", err)
+        self.assertFalse([q for q, _ in calls if "issueUpdate" in q])
+        # The label is still in use, so it must survive.
+        self.assertNotIn("deleted", out)
+        self.assertIn("keep      label agent:claude", out)
+
+    def test_unresolvable_suffix_fails_loud_and_keeps_the_label(self):
+        issue = {"id": "uuid-3", "identifier": "R-3", "title": "t",
+                 "state": {"name": "Todo"}, "delegate": None,
+                 "labels": {"nodes": [{"id": "l-hold", "name": "agent:hold"}]}}
+        code, out, err, calls = self._run([issue], [{"id": "l-hold", "name": "agent:hold"}],
+                                          apply=True)
+        self.assertEqual(code, 1)
+        self.assertIn("UNRESOLVED", err)
+        self.assertIn("'hold' is not a delegatable agent", err)
+        self.assertFalse([q for q, _ in calls if "issueUpdate" in q])
+        self.assertFalse([q for q, _ in calls if "issueLabelDelete" in q])
+
+    def test_dry_run_writes_nothing(self):
+        issue = {"id": "uuid-4", "identifier": "R-4", "title": "t",
+                 "state": {"name": "Todo"}, "delegate": None,
+                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:codex"}]}}
+        code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:codex"}])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls, [])
+        self.assertIn("migrate   R-4", out)
+        self.assertIn("Dry run only", out)
+
+    def test_unused_label_is_deleted_once_nothing_carries_it(self):
+        code, out, err, calls = self._run([], [{"id": "l-dead", "name": "agent:mac-mini"}],
+                                          apply=True)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([v for q, v in calls if "issueLabelDelete" in q],
+                         [{"id": "l-dead"}])
+
+
 if __name__ == "__main__":
     unittest.main()

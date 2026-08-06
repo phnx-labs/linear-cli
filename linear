@@ -18,6 +18,8 @@ Commands:
     labels              List / create / update / delete labels
     users               List assignable users
     agents              List agent members you can --delegate to (auto-detected)
+    migrate-agent-labels
+                        One-time: move legacy agent:<name> labels onto delegates
     states              List the team's workflow states
 
 Config: ~/.linear-cli/config.json
@@ -37,7 +39,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.15.1"
+__version__ = "0.16.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -70,12 +72,25 @@ def load_config() -> dict:
     return {}
 
 
-def save_config(cfg: dict):
+def save_config(cfg: dict) -> bool:
+    """Persist config. Returns False when the file could not be written.
+
+    Most writes are cache refreshes (the agent roster, the states map) on a
+    read path. A read-only or unwritable config dir must not take down the
+    command that triggered the refresh — the in-memory values are still good for
+    this run. `setup` checks the return value, because there persistence IS the
+    operation.
+    """
     # Volatile cfg (e.g. --team override) opts out of persistence.
     if cfg.get("__volatile__"):
-        return
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        return True
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        return True
+    except OSError as e:
+        print(f"Warning: could not write {CONFIG_PATH}: {e}", file=sys.stderr)
+        return False
 
 
 def get_api_key(cfg: dict) -> str:
@@ -351,6 +366,31 @@ def resolve_agent_id(api_key: str, cfg: dict, name: str) -> str | None:
                 return agent["id"]
         # only bother with the forced refresh if the first pass missed
     return None
+
+
+def resolve_agent_name(api_key: str, cfg: dict, name: str) -> str | None:
+    """Resolve an agent name to the roster's canonical spelling ('claude' ->
+    'Claude'), case- and space-insensitive. Ownership is Linear's native
+    `delegate` field and delegate names come back in roster spelling, so a queue
+    filter has to compare against the canonical name, not the raw argument."""
+    want = name.strip().lower()
+    for force in (False, True):
+        for agent in get_agents(api_key, cfg, force=force):
+            if agent["name"].lower() == want:
+                return agent["name"]
+    return None
+
+
+def delegate_of(node: dict) -> str | None:
+    """The agent an issue is delegated to, or None when it is unowned.
+    Unowned means exactly one thing: the native `delegate` field is null."""
+    return (node.get("delegate") or {}).get("name") or None
+
+
+def delegated_to(node: dict, agent_name: str) -> bool:
+    """True when this issue's native delegate is `agent_name` (case-insensitive)."""
+    dn = delegate_of(node)
+    return dn is not None and dn.lower() == agent_name.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1289,11 @@ def cmd_setup(args, cfg):
     cfg.pop("states", None)
     states = get_states(api_key, team["id"], cfg)
 
-    save_config(cfg)
+    # Here persistence IS the operation — a setup that didn't land is a failure,
+    # not a warning, or the next command silently runs unconfigured.
+    if not save_config(cfg):
+        print(f"Setup failed: could not persist {CONFIG_PATH}", file=sys.stderr)
+        sys.exit(1)
     print(f"\nConfigured: team={team['name']}, states={len(states)}")
     if agent:
         print(f"Agent identity: {agent}")
@@ -1274,7 +1318,8 @@ def cmd_tasks(args, cfg, api_key, team_id):
 
 
 def list_tasks(args, cfg, api_key, team_id):
-    """Default view: my agent's tasks + tasks with no agent:* label (unowned).
+    """Default view: issues delegated to my agent + issues with no delegate
+    (unowned). Ownership is Linear's native `delegate` field — nothing else.
     `--agent X` narrows to a specific agent. `--all` shows literally every task.
     `--cycle` scopes to the active cycle (default), next cycle, the whole team
     (`all`, cross-cycle + backlog), or the backlog only (`none`).
@@ -1307,21 +1352,38 @@ def list_tasks(args, cfg, api_key, team_id):
             return
         filters.append(f'createdAt: {{ gte: "{since}T00:00:00.000Z" }}')
 
-    # Resolve which agent filter to apply (if any). `--all` overrides config default.
+    # Resolve which agent's queue to show (if any). `--all` overrides config default.
     if args.all:
-        explicit_agent = None
+        requested_agent = None
         include_unowned = False  # --all means show everything including other agents
     elif args.agent:
-        explicit_agent = args.agent
+        requested_agent = args.agent
         include_unowned = False  # explicit agent request — just show their queue
     elif cfg.get("agent"):
-        explicit_agent = cfg.get("agent")
+        requested_agent = cfg.get("agent")
         include_unowned = True   # default view = my queue + unowned
     else:
-        explicit_agent = None
+        requested_agent = None
         include_unowned = False
 
-    if args.label and not explicit_agent:
+    # Ownership is the native `delegate` field, so the requested agent has to be
+    # a real member of the workspace agent roster. Fail loud on an unknown name:
+    # silently returning "no matching tasks" reads as an empty queue, and
+    # unattended drains act on that.
+    explicit_agent = None
+    if requested_agent:
+        explicit_agent = resolve_agent_name(api_key, cfg, requested_agent)
+        if not explicit_agent:
+            names = ", ".join(a["name"] for a in get_agents(api_key, cfg)) or "none"
+            print(f"Unknown agent '{requested_agent}'. Delegatable agents: {names}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    # `--label` composes with the agent queue. It used to be suppressed whenever
+    # an agent filter was active, because ownership was itself a label and the two
+    # label filters fought; ownership is the `delegate` field now, so they are
+    # orthogonal and a caller asking for both gets both.
+    if args.label:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
 
     # Project scope. Strict resolution: a mistyped project must abort, not
@@ -1396,19 +1458,14 @@ def list_tasks(args, cfg, api_key, team_id):
     if nodes is None:
         return
 
-    # Apply agent ownership filter client-side so "my tasks + unowned" is expressible.
+    # Apply the delegate filter client-side so "my tasks + unowned" is expressible
+    # in one pass (Linear can't express `delegate = X OR delegate IS NULL` in a
+    # single server-side filter, and the page is already fetched).
     if explicit_agent:
-        target_label = f"agent:{explicit_agent}"
-
         def match(n):
-            names = [l["name"] for l in n.get("labels", {}).get("nodes", [])]
-            has_target = target_label in names
-            has_any_agent = any(x.startswith("agent:") for x in names)
-            if has_target:
+            if delegated_to(n, explicit_agent):
                 return True
-            if include_unowned and not has_any_agent:
-                return True
-            return False
+            return include_unowned and delegate_of(n) is None
 
         nodes = [n for n in nodes if match(n)]
 
@@ -1429,7 +1486,7 @@ def list_tasks(args, cfg, api_key, team_id):
 
     header_note = ""
     if explicit_agent and include_unowned:
-        owned = sum(1 for n in nodes if any(l["name"] == f"agent:{explicit_agent}" for l in n.get("labels", {}).get("nodes", [])))
+        owned = sum(1 for n in nodes if delegated_to(n, explicit_agent))
         unowned = len(nodes) - owned
         header_note = f"  ({owned} yours, {unowned} unowned)"
     print(f"{scope_label} -- {len(nodes)} task(s){header_note}")
@@ -1483,16 +1540,15 @@ def show_board(args, api_key, team_id, cfg):
         print(f"No open tasks in {cycle_name}.")
         return
 
+    # Group by the native delegate. An issue has at most one delegate, so a board
+    # column is exactly one agent's queue; no delegate means unassigned.
     agents: dict[str, list] = {}
     unassigned: list = []
 
     for n in nodes:
-        labels = [l["name"] for l in n.get("labels", {}).get("nodes", [])]
-        agent_labels = [l for l in labels if l.startswith("agent:")]
-        if agent_labels:
-            for al in agent_labels:
-                agent_name = al.split(":", 1)[1]
-                agents.setdefault(agent_name, []).append(n)
+        dn = delegate_of(n)
+        if dn:
+            agents.setdefault(dn, []).append(n)
         else:
             unassigned.append(n)
 
@@ -2860,6 +2916,157 @@ def _label_delete(args, api_key, team_id):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# migrate-agent-labels — one-time retirement of the legacy `agent:<name>` labels
+# ---------------------------------------------------------------------------
+
+AGENT_LABEL_PREFIX = "agent:"
+
+
+def classify_agent_label_issue(node: dict, label_name: str, roster: list[str]) -> tuple[str, str]:
+    """Decide what to do with one issue carrying one legacy `agent:<name>` label.
+
+    Returns (verdict, detail) where verdict is one of:
+      migrate    — `<name>` is a real agent and the issue has no delegate yet
+      already    — the issue is already delegated to that same agent
+      conflict   — the issue is delegated to a *different* agent; never overwrite
+      unresolved — `<name>` is not a member of the agent roster
+
+    Pure decision logic, no I/O, so the conflict and unresolved paths are
+    testable without touching the workspace.
+    """
+    suffix = label_name[len(AGENT_LABEL_PREFIX):].strip()
+    match = next((r for r in roster if r.lower() == suffix.lower()), None)
+    if not match:
+        return "unresolved", f"'{suffix}' is not a delegatable agent"
+    current = delegate_of(node)
+    if current is None:
+        return "migrate", match
+    if current.lower() == match.lower():
+        return "already", match
+    return "conflict", f"delegated to {current}, label says {match}"
+
+
+def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
+    """Migrate legacy `agent:<name>` ownership labels to native delegates.
+
+    Dry-run by default; `--apply` writes. An issue already delegated to a
+    different agent is never overwritten — it is reported as a conflict and left
+    exactly as it was. A label whose suffix is not a delegatable agent is
+    reported as unresolved and left in place. Both are failures: the command
+    exits non-zero so an unattended run cannot mistake a partial migration for a
+    clean one.
+    """
+    roster = [a["name"] for a in get_agents(api_key, cfg)]
+    if not roster:
+        print("No agent members found in this workspace; nothing can be resolved.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Every issue in the team carrying any `agent:*` label, in any state — a Done
+    # issue keeps its label until we strip it, and the label can't be deleted
+    # while it is still in use.
+    issue_filter = {
+        "team": {"id": {"eq": team_id}},
+        "labels": {"name": {"startsWith": AGENT_LABEL_PREFIX}},
+    }
+    query = """query($filter: IssueFilter!, $cursor: String) {
+        issues(filter: $filter, first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id identifier title
+                state { name }
+                delegate { name }
+                labels { nodes { id name } }
+            }
+        }
+    }"""
+    nodes = paginate_connection(api_key, query, ["issues"], {"filter": issue_filter})
+    if nodes is None:
+        sys.exit(1)
+
+    planned, already, conflicts, unresolved = [], [], [], []
+    for n in nodes:
+        for l in n.get("labels", {}).get("nodes", []):
+            if not l["name"].startswith(AGENT_LABEL_PREFIX):
+                continue
+            verdict, detail = classify_agent_label_issue(n, l["name"], roster)
+            row = (n, l, detail)
+            {"migrate": planned, "already": already,
+             "conflict": conflicts, "unresolved": unresolved}[verdict].append(row)
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"[{mode}] {len(nodes)} issue(s) carry a legacy '{AGENT_LABEL_PREFIX}*' label")
+    print()
+
+    for n, l, agent in planned:
+        print(f"  migrate   {n['identifier']:<10} {l['name']:<22} -> delegate: {agent}")
+    for n, l, agent in already:
+        print(f"  strip     {n['identifier']:<10} {l['name']:<22} (already delegated to {agent})")
+    for n, l, why in conflicts:
+        print(f"  CONFLICT  {n['identifier']:<10} {l['name']:<22} {why}", file=sys.stderr)
+    for n, l, why in unresolved:
+        print(f"  UNRESOLVED {n['identifier']:<9} {l['name']:<22} {why}", file=sys.stderr)
+    print()
+
+    if args.apply:
+        for n, l, agent in planned + already:
+            keep = [x["id"] for x in n["labels"]["nodes"] if x["id"] != l["id"]]
+            input_obj = {"labelIds": keep}
+            if (n, l, agent) in planned:
+                aid = resolve_agent_id(api_key, cfg, agent)
+                if not aid:
+                    print(f"  FAILED    {n['identifier']} — could not resolve agent id for {agent}",
+                          file=sys.stderr)
+                    conflicts.append((n, l, f"agent id lookup failed for {agent}"))
+                    continue
+                input_obj["delegateId"] = aid
+            data = gql(api_key, """
+                mutation($id: String!, $input: IssueUpdateInput!) {
+                    issueUpdate(id: $id, input: $input) {
+                        success
+                        issue { identifier delegate { name } labels { nodes { name } } }
+                    }
+                }
+            """, {"id": n["id"], "input": input_obj})
+            if check_errors(data) or not ((data.get("data") or {}).get("issueUpdate") or {}).get("success"):
+                print(f"  FAILED    {n['identifier']} — issueUpdate did not succeed", file=sys.stderr)
+                conflicts.append((n, l, "issueUpdate failed"))
+                continue
+            issue = data["data"]["issueUpdate"]["issue"]
+            dg = (issue.get("delegate") or {}).get("name") or "none"
+            print(f"  done      {issue['identifier']:<10} delegate={dg}")
+
+    # Retire every `agent:*` label that no longer has a single use left. A label
+    # still carried by a conflicting or unresolved issue is deliberately kept.
+    remaining = {l["name"] for _, l, _ in conflicts + unresolved}
+    labels = [l for l in list_team_labels(api_key, team_id)
+              if l["name"].startswith(AGENT_LABEL_PREFIX)]
+    for l in sorted(labels, key=lambda x: x["name"]):
+        if l["name"] in remaining:
+            print(f"  keep      label {l['name']} — still in use by an unmigrated issue")
+            continue
+        if not args.apply:
+            print(f"  delete    label {l['name']} (0 uses after migration)")
+            continue
+        data = gql(api_key, """
+            mutation($id: String!) { issueLabelDelete(id: $id) { success } }
+        """, {"id": l["id"]})
+        ok = not check_errors(data) and (data.get("data") or {}).get("issueLabelDelete", {}).get("success")
+        print(f"  {'deleted' if ok else 'FAILED  '}   label {l['name']}",
+              file=sys.stdout if ok else sys.stderr)
+
+    print()
+    print(f"migrated={len(planned)} stripped={len(already)} "
+          f"conflicts={len(conflicts)} unresolved={len(unresolved)}")
+    if conflicts or unresolved:
+        print("Migration incomplete — resolve the entries above by hand, then re-run.",
+              file=sys.stderr)
+        sys.exit(1)
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to write.")
+
+
 def cmd_users(args, cfg, api_key, team_id):
     """List workspace members, grouped into humans (assign with --assign) and
     agents (delegate with --delegate) — the two are distinct in Linear."""
@@ -3064,7 +3271,7 @@ def main():
     # tasks (list + view + board)
     p_tasks = sub.add_parser("tasks", help="List tasks, view details, or show team board")
     p_tasks.add_argument("identifier", nargs="?", help="Issue identifier for detail view (e.g. ANT-42)")
-    p_tasks.add_argument("--agent", help="Filter by agent label (e.g. --agent claude)")
+    p_tasks.add_argument("--agent", help="Filter to the agent this issue is delegated to (e.g. --agent claude). See: linear agents")
     p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter, show all")
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
     p_tasks.add_argument("--label", help="Filter by any label")
@@ -3258,6 +3465,13 @@ def main():
                           help="Force an immediate re-fetch (after installing/removing an agent app)")
     p_agents.add_argument("--json", action="store_true", help="JSON output")
 
+    # migrate-agent-labels (one-time: legacy `agent:<name>` labels -> delegates)
+    p_migrate = sub.add_parser(
+        "migrate-agent-labels",
+        help="One-time: move legacy agent:<name> ownership labels onto native delegates")
+    p_migrate.add_argument("--apply", action="store_true",
+                           help="Write the changes (default: dry run)")
+
     # states (workflow states for the team)
     p_states = sub.add_parser("states", help="List the team's workflow states")
     p_states.add_argument("--json", action="store_true", help="JSON output")
@@ -3336,6 +3550,8 @@ def main():
         cmd_users(args, cfg, api_key, team_id)
     elif args.command == "agents":
         cmd_agents(args, cfg, api_key, team_id)
+    elif args.command == "migrate-agent-labels":
+        cmd_migrate_agent_labels(args, cfg, api_key, team_id)
     elif args.command == "states":
         cmd_states(args, cfg, api_key, team_id)
     elif args.command == "inbox":

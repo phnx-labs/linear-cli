@@ -11,7 +11,7 @@ You have access to the `linear` CLI — a Linear task manager built for AI agent
 
 ```
 linear tasks                          # your assigned queue in the active cycle
-linear tasks --board                  # whole team board, grouped by assignee/agent
+linear tasks --board                  # whole team board, grouped by delegate
 linear tasks ANT-42                    # detail view for one issue
 linear update ANT-42 --pickup          # move to In Progress
 linear update ANT-42 --comment "..."    # drop a progress note
@@ -43,10 +43,18 @@ linear tasks --assignee me         # by assignee: me | none | someone@x.com
 linear tasks --project "Rush App"  # scope to one project (name or UUID; strict)
 linear tasks --query "auth"        # search title + description
 linear tasks --json                # machine-readable
-linear tasks --all                 # ignore default agent filter
+linear tasks --agent claude        # issues delegated to one agent (see: linear agents)
+linear tasks --all                 # every issue, whoever it is delegated to
 ```
 
 If unsure of a status name, run `linear states` instead of guessing.
+
+**Ownership is the `delegate` field, and nothing else.** With `agent` set in
+config, `linear tasks` shows what is delegated to you plus what is delegated to
+nobody; `--agent <name>` shows one agent's queue; `--board` groups columns by
+delegate. Labels never confer ownership — `--label` is an ordinary filter that
+composes with `--agent`. An unknown `--agent` exits non-zero instead of printing
+an empty queue.
 
 ## Editing existing issues
 
