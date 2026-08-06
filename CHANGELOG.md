@@ -47,8 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels gets exactly one write; two writes computed from the same pre-mutation
   snapshot would resurrect each other's stripped label and silently overwrite
   the delegate. A label is deleted only when nothing carries it **workspace-wide**
-  — `list_team_labels` also returns workspace-scoped labels, so a team-scoped
-  scan finding no hits does not mean unused.
+  and **including archived issues** — `list_team_labels` also returns
+  workspace-scoped labels, so a team-scoped scan finding no hits does not mean
+  unused, and Linear's `issues` connection excludes archived issues unless asked,
+  so a label carried only by archived work would have looked free to delete. The
+  dry run projects the post-migration state, so it previews the deletes the run
+  would make rather than reporting every label as still carried by the very
+  issues it just said it would strip.
 
   `--apply` exits non-zero when anything is left behind, including a failed
   `issueUpdate` or a failed `issueLabelDelete`, and the summary counters report

@@ -850,6 +850,11 @@ class MigrateAgentLabelsClassifyTest(unittest.TestCase):
             self.assertEqual(v, "unresolved", suffix)
             self.assertIn(suffix, detail)
 
+    def test_no_labels_is_a_no_op_not_an_index_error(self):
+        # The caller filters these out, but the docstring sells this as pure,
+        # independently testable decision logic — so it must not raise.
+        self.assertEqual(self.c(_issue("R-0"), []), ("already", ""))
+
     def test_one_unresolvable_label_blocks_its_resolvable_sibling(self):
         # Mixed state needs a human — migrating half of it silently is worse.
         v, detail = self.c(_issue("R-7"), ["agent:claude", "agent:hold"])
@@ -861,7 +866,7 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
     """Drives cmd_migrate_agent_labels end to end over a substituted transport."""
 
     def _run(self, issues, labels, apply=False, update_ok=True, delete_ok=True,
-             label_uses=0):
+             extra_carriers=None, carriers_ok=True):
         calls = []
 
         def fake_paginate_connection(api_key, query, path, variables=None):
@@ -872,9 +877,17 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
             if "issueLabelDelete" in query:
                 return {"data": {"issueLabelDelete": {"success": bool(delete_ok)}}}
             if "labels: { id:" in query:
-                n = label_uses if isinstance(label_uses, int) else label_uses(variables)
-                return {"data": {"issues": {"nodes": [{"identifier": f"X-{i}"}
-                                                      for i in range(n)]}}}
+                # Carriers derived from the fixture, the way the live API would
+                # answer: every issue that currently has this label, plus any
+                # caller-declared carrier outside the scanned team. A constant
+                # here once hid a real regression in the dry-run preview.
+                if not carriers_ok:
+                    return {"errors": [{"message": "boom"}]}
+                lid = (variables or {}).get("id")
+                nodes = [{"id": i["id"]} for i in issues
+                         if any(l["id"] == lid for l in i["labels"]["nodes"])]
+                nodes += [{"id": x} for x in (extra_carriers or {}).get(lid, [])]
+                return {"data": {"issues": {"nodes": nodes}}}
             ident = next((i["identifier"] for i in issues
                           if i["id"] == (variables or {}).get("id")), "R-?")
             if not update_ok:
@@ -996,11 +1009,44 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
     def test_label_still_used_outside_this_team_is_never_deleted(self):
         # list_team_labels also returns workspace-wide labels, and the issue scan
         # is team-scoped — so "no hits in my team" does not mean "unused".
-        code, out, err, calls = self._run([], [{"id": "l-ws", "name": "agent:claude"}],
-                                          apply=True, label_uses=1)
+        code, out, err, calls = self._run(
+            [], [{"id": "l-ws", "name": "agent:claude"}], apply=True,
+            extra_carriers={"l-ws": ["uuid-other-team"]})
         self.assertEqual(code, 0, err)
         self.assertEqual(self._deletes(calls), [])
-        self.assertIn("still carried by an issue outside this team", out)
+        self.assertIn("still carried outside the scanned team", out)
+
+    def test_dry_run_previews_the_delete_of_a_label_it_would_strip(self):
+        # The carrier IS the issue this run would migrate. Gating on the live
+        # count made the preview report every such label as still in use — by the
+        # issue it had just said it would strip three lines above.
+        issue = self._raw("R-9", "uuid-9", labels=[("l-agent", "agent:codex")])
+        code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:codex"}])
+        self.assertEqual(code, 0, err)
+        self.assertIn("migrate    R-9", out)
+        self.assertIn("delete     label agent:codex", out)
+        self.assertNotIn("keep       label agent:codex", out)
+
+    def test_a_label_carried_by_an_unmigrated_issue_is_named_as_such(self):
+        # Two issues on one label: one migrates, one conflicts. The label stays,
+        # and the reason must point at the unmigrated issue, not another team.
+        good = self._raw("R-10", "uuid-10", labels=[("l-a", "agent:claude")])
+        bad = self._raw("R-11", "uuid-11", delegate="Codex",
+                        labels=[("l-a", "agent:claude")])
+        code, out, err, calls = self._run([good, bad],
+                                          [{"id": "l-a", "name": "agent:claude"}],
+                                          apply=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(self._deletes(calls), [])
+        self.assertIn("still in use by an unmigrated issue", out)
+
+    def test_a_carrier_lookup_failure_is_a_failure_not_a_delete(self):
+        code, out, err, calls = self._run([], [{"id": "l-x", "name": "agent:claude"}],
+                                          apply=True, carriers_ok=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(self._deletes(calls), [])
+        self.assertIn("could not look up what carries it", err)
+        self.assertIn("failures=1", out)
 
     def test_dry_run_writes_nothing_and_exits_zero(self):
         issue = self._raw("R-7", "uuid-7", labels=[("l-agent", "agent:codex")])
