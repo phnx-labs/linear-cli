@@ -27,15 +27,17 @@ Use the same shell contract whether you're typing or a subagent is: query the qu
 
 ## Install
 
+Preferred (pinned tag + SHA-256 verify via `install.sh`):
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.16.1/install.sh | sh
 ```
 
-Or manually:
+Manual pin (same tag; no checksum — prefer `install.sh` above):
 
 ```bash
-curl -o /usr/local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/main/linear
-chmod +x /usr/local/bin/linear
+curl -o ~/.local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.16.1/linear
+chmod +x ~/.local/bin/linear
 ```
 
 ## Setup
