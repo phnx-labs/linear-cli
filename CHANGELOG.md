@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An unknown `--agent` aborts instead of listing an empty queue.** The name is
   resolved against the workspace agent roster (`linear agents`); a typo exits
   non-zero and prints the delegatable names. An unattended drain reading a silent
-  empty list as "queue clear" was the failure this prevents.
+  empty list as "queue clear" was the failure this prevents. The *configured*
+  default agent only warns: `get_agents` degrades to an empty roster on a
+  transient API error, and bricking the most-used command on a users-query blip
+  is worse than the typo it would catch. The filter compares delegate names
+  case-insensitively either way, so the raw name still matches.
 - **`--label` now composes with `--agent`.** It used to be dropped whenever an
   agent filter was active, because ownership was itself a label and the two label
   filters fought. Ownership is the delegate field now, so the two are orthogonal.
@@ -29,12 +33,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`linear migrate-agent-labels`** — one-time migration off the legacy labels.
   Dry run by default; `--apply` writes. It sets the delegate from a resolvable
-  `agent:<name>` label, strips the migrated label, and deletes each `agent:*`
-  label once nothing carries it. It **never overwrites an existing delegate**: an
-  issue already delegated to a different agent is reported as `CONFLICT` and left
-  untouched, and a label whose suffix is not a delegatable agent (a machine name,
-  a workflow flag) is reported as `UNRESOLVED` and kept. Either case exits
-  non-zero so a partial migration cannot read as a clean one.
+  `agent:<name>` label, strips the migrated labels, and deletes each `agent:*`
+  label once nothing carries it.
+
+  It **never overwrites an existing delegate**. An issue already delegated to
+  someone other than its label claims, or carrying two `agent:*` labels naming
+  different agents, is reported as `CONFLICT` and left untouched. A label whose
+  suffix is not a delegatable agent (a machine name, a workflow flag) is
+  reported as `UNRESOLVED` and kept together with any sibling label on that
+  issue — mixed state needs a human, and migrating half of it silently is worse.
+
+  Decisions are per **issue**, not per label, so an issue with two `agent:*`
+  labels gets exactly one write; two writes computed from the same pre-mutation
+  snapshot would resurrect each other's stripped label and silently overwrite
+  the delegate. A label is deleted only when nothing carries it **workspace-wide**
+  — `list_team_labels` also returns workspace-scoped labels, so a team-scoped
+  scan finding no hits does not mean unused.
+
+  `--apply` exits non-zero when anything is left behind, including a failed
+  `issueUpdate` or a failed `issueLabelDelete`, and the summary counters report
+  writes that actually landed rather than writes that were planned. A dry run
+  exits 0: it is an inspection, and reporting work-to-do as a failed migration
+  left no path to a green run.
 
 ## [0.15.1] - 2026-08-05
 

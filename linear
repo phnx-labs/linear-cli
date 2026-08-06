@@ -1366,18 +1366,30 @@ def list_tasks(args, cfg, api_key, team_id):
         requested_agent = None
         include_unowned = False
 
-    # Ownership is the native `delegate` field, so the requested agent has to be
-    # a real member of the workspace agent roster. Fail loud on an unknown name:
-    # silently returning "no matching tasks" reads as an empty queue, and
-    # unattended drains act on that.
+    # Ownership is the native `delegate` field. Resolving the requested name
+    # against the roster is a *check*, not a requirement: the filter compares
+    # delegate names case-insensitively, so the raw name already matches.
+    #
+    # A typed `--agent` that doesn't resolve is a typo — exit, because silently
+    # returning "no matching tasks" reads as an empty queue and unattended drains
+    # act on that. The config-derived default is different: `get_agents` degrades
+    # to [] on a transient API error (see its `return cached or []`), and bricking
+    # the most-used command on a users-query blip is worse than the typo it would
+    # catch. Warn and keep going there.
     explicit_agent = None
     if requested_agent:
         explicit_agent = resolve_agent_name(api_key, cfg, requested_agent)
         if not explicit_agent:
             names = ", ".join(a["name"] for a in get_agents(api_key, cfg)) or "none"
-            print(f"Unknown agent '{requested_agent}'. Delegatable agents: {names}",
+            if args.agent:
+                print(f"Unknown agent '{requested_agent}'. Delegatable agents: {names}",
+                      file=sys.stderr)
+                sys.exit(1)
+            print(f"Warning: configured agent '{requested_agent}' is not in the agent "
+                  f"roster ({names}). Filtering on the name as given — "
+                  f"re-run `linear setup --agent <name>` if it was renamed.",
                   file=sys.stderr)
-            sys.exit(1)
+            explicit_agent = requested_agent
 
     # `--label` composes with the agent queue. It used to be suppressed whenever
     # an agent filter was active, because ownership was itself a label and the two
@@ -2923,39 +2935,81 @@ def _label_delete(args, api_key, team_id):
 AGENT_LABEL_PREFIX = "agent:"
 
 
-def classify_agent_label_issue(node: dict, label_name: str, roster: list[str]) -> tuple[str, str]:
-    """Decide what to do with one issue carrying one legacy `agent:<name>` label.
+def classify_agent_labels(node: dict, label_names: list[str], roster: list[str]) -> tuple[str, str]:
+    """Decide what to do with ONE issue and ALL the legacy `agent:*` labels on it.
+
+    Deciding per issue rather than per label is the whole point: an issue can
+    carry two of these labels, and `issueUpdate(labelIds:)` replaces the entire
+    label set, so two writes computed from the same pre-mutation snapshot would
+    resurrect each other's stripped label and the second delegate would silently
+    overwrite the first.
 
     Returns (verdict, detail) where verdict is one of:
-      migrate    — `<name>` is a real agent and the issue has no delegate yet
-      already    — the issue is already delegated to that same agent
-      conflict   — the issue is delegated to a *different* agent; never overwrite
-      unresolved — `<name>` is not a member of the agent roster
+      migrate    — the labels agree on one real agent and the issue has no delegate
+      already    — that agent is already the delegate; just strip the labels
+      conflict   — the labels disagree, or they name someone other than the
+                   current delegate. Never overwrite; a human decides.
+      unresolved — at least one label suffix is not a delegatable agent
 
-    Pure decision logic, no I/O, so the conflict and unresolved paths are
-    testable without touching the workspace.
+    Pure decision logic, no I/O, so every branch is testable without touching a
+    workspace.
     """
-    suffix = label_name[len(AGENT_LABEL_PREFIX):].strip()
-    match = next((r for r in roster if r.lower() == suffix.lower()), None)
-    if not match:
-        return "unresolved", f"'{suffix}' is not a delegatable agent"
+    suffixes = [n[len(AGENT_LABEL_PREFIX):].strip() for n in label_names]
+    resolved, unknown = [], []
+    for s in suffixes:
+        match = next((r for r in roster if r.lower() == s.lower()), None)
+        (resolved if match else unknown).append(match or s)
+
+    if unknown:
+        # Mixed state needs a human: leave the issue exactly as it is, including
+        # any sibling label that would have resolved.
+        return "unresolved", ", ".join(f"'{s}' is not a delegatable agent" for s in unknown)
+
+    targets = sorted(set(resolved), key=str.lower)
+    if len(targets) > 1:
+        return "conflict", f"labels name {' and '.join(targets)} — cannot pick one"
+
+    target = targets[0]
     current = delegate_of(node)
     if current is None:
-        return "migrate", match
-    if current.lower() == match.lower():
-        return "already", match
-    return "conflict", f"delegated to {current}, label says {match}"
+        return "migrate", target
+    if current.lower() == target.lower():
+        return "already", target
+    return "conflict", f"delegated to {current}, label says {target}"
+
+
+def count_label_uses(api_key: str, label_id: str) -> int | None:
+    """How many issues carry this label, workspace-wide. None on API error.
+
+    Deliberately not team-scoped: `list_team_labels` also returns workspace-wide
+    labels (`team: { null: true }`), so a label this team has finished with may
+    still be carrying ownership on another team's issues. Deleting on the
+    strength of a team-scoped scan would strip those silently.
+    """
+    data = gql(api_key, """
+        query($id: ID!) {
+            issues(filter: { labels: { id: { eq: $id } } }, first: 1) {
+                nodes { identifier }
+            }
+        }
+    """, {"id": label_id})
+    if check_errors(data):
+        return None
+    return len(((data.get("data") or {}).get("issues") or {}).get("nodes", []))
 
 
 def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
     """Migrate legacy `agent:<name>` ownership labels to native delegates.
 
-    Dry-run by default; `--apply` writes. An issue already delegated to a
+    Dry run by default; `--apply` writes. An issue already delegated to a
     different agent is never overwritten — it is reported as a conflict and left
     exactly as it was. A label whose suffix is not a delegatable agent is
-    reported as unresolved and left in place. Both are failures: the command
-    exits non-zero so an unattended run cannot mistake a partial migration for a
-    clean one.
+    reported as unresolved and left in place.
+
+    `--apply` exits non-zero when anything is left behind, so an unattended run
+    cannot mistake a partial migration for a clean one. A dry run exits 0: it is
+    an inspection, and reporting work-to-do as a failure is what made every
+    future run red.
     """
     roster = [a["name"] for a in get_agents(api_key, cfg)]
     if not roster:
@@ -2985,86 +3039,131 @@ def cmd_migrate_agent_labels(args, cfg, api_key, team_id):
     if nodes is None:
         sys.exit(1)
 
-    planned, already, conflicts, unresolved = [], [], [], []
+    # One row per issue: (node, [agent labels on it], verdict, detail).
+    rows = []
     for n in nodes:
-        for l in n.get("labels", {}).get("nodes", []):
-            if not l["name"].startswith(AGENT_LABEL_PREFIX):
-                continue
-            verdict, detail = classify_agent_label_issue(n, l["name"], roster)
-            row = (n, l, detail)
-            {"migrate": planned, "already": already,
-             "conflict": conflicts, "unresolved": unresolved}[verdict].append(row)
+        labels = [l for l in n.get("labels", {}).get("nodes", [])
+                  if l["name"].startswith(AGENT_LABEL_PREFIX)]
+        if not labels:
+            continue
+        verdict, detail = classify_agent_labels(n, [l["name"] for l in labels], roster)
+        rows.append((n, labels, verdict, detail))
+
+    def of(kind):
+        return [r for r in rows if r[2] == kind]
 
     mode = "APPLY" if args.apply else "DRY RUN"
-    print(f"[{mode}] {len(nodes)} issue(s) carry a legacy '{AGENT_LABEL_PREFIX}*' label")
+    print(f"[{mode}] {len(rows)} issue(s) carry a legacy '{AGENT_LABEL_PREFIX}*' label")
     print()
 
-    for n, l, agent in planned:
-        print(f"  migrate   {n['identifier']:<10} {l['name']:<22} -> delegate: {agent}")
-    for n, l, agent in already:
-        print(f"  strip     {n['identifier']:<10} {l['name']:<22} (already delegated to {agent})")
-    for n, l, why in conflicts:
-        print(f"  CONFLICT  {n['identifier']:<10} {l['name']:<22} {why}", file=sys.stderr)
-    for n, l, why in unresolved:
-        print(f"  UNRESOLVED {n['identifier']:<9} {l['name']:<22} {why}", file=sys.stderr)
+    def names(labels):
+        return ",".join(l["name"] for l in labels)
+
+    for n, labels, _, agent in of("migrate"):
+        print(f"  migrate    {n['identifier']:<10} {names(labels):<24} -> delegate: {agent}")
+    for n, labels, _, agent in of("already"):
+        print(f"  strip      {n['identifier']:<10} {names(labels):<24} (already delegated to {agent})")
+    for n, labels, _, why in of("conflict"):
+        print(f"  CONFLICT   {n['identifier']:<10} {names(labels):<24} {why}", file=sys.stderr)
+    for n, labels, _, why in of("unresolved"):
+        print(f"  UNRESOLVED {n['identifier']:<10} {names(labels):<24} {why}", file=sys.stderr)
     print()
+
+    # Counters must reflect what actually happened, not what was planned — the
+    # summary line is what a person or a script reads to call the job done.
+    migrated = stripped = 0
+    write_failures = 0
+    blocked_labels = {l["name"] for _, labels, v, _ in rows
+                      if v in ("conflict", "unresolved") for l in labels}
 
     if args.apply:
-        for n, l, agent in planned + already:
-            keep = [x["id"] for x in n["labels"]["nodes"] if x["id"] != l["id"]]
+        for n, labels, verdict, detail in rows:
+            if verdict not in ("migrate", "already"):
+                continue
+            drop = {l["id"] for l in labels}
+            keep = [x["id"] for x in n["labels"]["nodes"] if x["id"] not in drop]
             input_obj = {"labelIds": keep}
-            if (n, l, agent) in planned:
-                aid = resolve_agent_id(api_key, cfg, agent)
+            if verdict == "migrate":
+                aid = resolve_agent_id(api_key, cfg, detail)
                 if not aid:
-                    print(f"  FAILED    {n['identifier']} — could not resolve agent id for {agent}",
+                    print(f"  FAILED     {n['identifier']} — no agent id for {detail}",
                           file=sys.stderr)
-                    conflicts.append((n, l, f"agent id lookup failed for {agent}"))
+                    write_failures += 1
+                    blocked_labels.update(l["name"] for l in labels)
                     continue
                 input_obj["delegateId"] = aid
             data = gql(api_key, """
                 mutation($id: String!, $input: IssueUpdateInput!) {
                     issueUpdate(id: $id, input: $input) {
                         success
-                        issue { identifier delegate { name } labels { nodes { name } } }
+                        issue { identifier delegate { name } }
                     }
                 }
             """, {"id": n["id"], "input": input_obj})
             if check_errors(data) or not ((data.get("data") or {}).get("issueUpdate") or {}).get("success"):
-                print(f"  FAILED    {n['identifier']} — issueUpdate did not succeed", file=sys.stderr)
-                conflicts.append((n, l, "issueUpdate failed"))
+                print(f"  FAILED     {n['identifier']} — issueUpdate did not succeed",
+                      file=sys.stderr)
+                write_failures += 1
+                blocked_labels.update(l["name"] for l in labels)
                 continue
             issue = data["data"]["issueUpdate"]["issue"]
             dg = (issue.get("delegate") or {}).get("name") or "none"
-            print(f"  done      {issue['identifier']:<10} delegate={dg}")
+            print(f"  done       {issue['identifier']:<10} delegate={dg}")
+            if verdict == "migrate":
+                migrated += 1
+            else:
+                stripped += 1
 
-    # Retire every `agent:*` label that no longer has a single use left. A label
-    # still carried by a conflicting or unresolved issue is deliberately kept.
-    remaining = {l["name"] for _, l, _ in conflicts + unresolved}
+    # Retire every `agent:*` label that nothing carries any more. A label still
+    # on a conflicting, unresolved, or failed issue is deliberately kept, and so
+    # is one still in use outside this team.
+    delete_failures = 0
     labels = [l for l in list_team_labels(api_key, team_id)
               if l["name"].startswith(AGENT_LABEL_PREFIX)]
     for l in sorted(labels, key=lambda x: x["name"]):
-        if l["name"] in remaining:
-            print(f"  keep      label {l['name']} — still in use by an unmigrated issue")
+        if l["name"] in blocked_labels:
+            print(f"  keep       label {l['name']} — still in use by an unmigrated issue")
+            continue
+        uses = count_label_uses(api_key, l["id"])
+        if uses is None:
+            print(f"  FAILED     label {l['name']} — could not count its uses",
+                  file=sys.stderr)
+            delete_failures += 1
+            continue
+        if uses > 0:
+            print(f"  keep       label {l['name']} — still carried by an issue "
+                  f"outside this team")
             continue
         if not args.apply:
-            print(f"  delete    label {l['name']} (0 uses after migration)")
+            print(f"  delete     label {l['name']} (0 uses after migration)")
             continue
         data = gql(api_key, """
             mutation($id: String!) { issueLabelDelete(id: $id) { success } }
         """, {"id": l["id"]})
-        ok = not check_errors(data) and (data.get("data") or {}).get("issueLabelDelete", {}).get("success")
-        print(f"  {'deleted' if ok else 'FAILED  '}   label {l['name']}",
-              file=sys.stdout if ok else sys.stderr)
+        if check_errors(data) or not (data.get("data") or {}).get("issueLabelDelete", {}).get("success"):
+            print(f"  FAILED     label {l['name']} — delete did not succeed", file=sys.stderr)
+            delete_failures += 1
+            continue
+        print(f"  deleted    label {l['name']}")
 
     print()
-    print(f"migrated={len(planned)} stripped={len(already)} "
-          f"conflicts={len(conflicts)} unresolved={len(unresolved)}")
-    if conflicts or unresolved:
+    print(f"migrated={migrated} stripped={stripped} "
+          f"conflicts={len(of('conflict'))} unresolved={len(of('unresolved'))} "
+          f"failures={write_failures + delete_failures}")
+
+    left_behind = of("conflict") or of("unresolved") or write_failures or delete_failures
+    if not args.apply:
+        if left_behind:
+            print("Dry run only. The entries above need a human before --apply can "
+                  "finish: resolve each conflict, and rename or remove any label "
+                  "whose suffix is not an agent.")
+        else:
+            print("Dry run only. Re-run with --apply to write.")
+        return
+    if left_behind:
         print("Migration incomplete — resolve the entries above by hand, then re-run.",
               file=sys.stderr)
         sys.exit(1)
-    if not args.apply:
-        print("Dry run only. Re-run with --apply to write.")
 
 
 def cmd_users(args, cfg, api_key, team_id):

@@ -817,58 +817,73 @@ class SaveConfigUnwritableTest(unittest.TestCase):
 class MigrateAgentLabelsClassifyTest(unittest.TestCase):
     ROSTER = ["Claude", "Codex"]
 
+    def c(self, node, labels):
+        return linear_cli.classify_agent_labels(node, labels, self.ROSTER)
+
     def test_resolvable_label_on_an_undelegated_issue_migrates(self):
-        v, detail = linear_cli.classify_agent_label_issue(
-            _issue("R-1"), "agent:claude", self.ROSTER)
-        self.assertEqual(v, "migrate")
-        self.assertEqual(detail, "Claude")
+        self.assertEqual(self.c(_issue("R-1"), ["agent:claude"]), ("migrate", "Claude"))
 
     def test_matching_existing_delegate_is_a_strip_not_a_rewrite(self):
-        v, detail = linear_cli.classify_agent_label_issue(
-            _issue("R-2", delegate="Claude"), "agent:claude", self.ROSTER)
-        self.assertEqual(v, "already")
-        self.assertEqual(detail, "Claude")
+        self.assertEqual(self.c(_issue("R-2", delegate="Claude"), ["agent:claude"]),
+                         ("already", "Claude"))
 
     def test_conflicting_delegate_is_never_overwritten(self):
-        v, detail = linear_cli.classify_agent_label_issue(
-            _issue("R-3", delegate="Codex"), "agent:claude", self.ROSTER)
+        v, detail = self.c(_issue("R-3", delegate="Codex"), ["agent:claude"])
         self.assertEqual(v, "conflict")
         self.assertIn("delegated to Codex", detail)
         self.assertIn("label says Claude", detail)
+
+    def test_two_labels_naming_different_agents_is_a_conflict_not_a_coin_flip(self):
+        v, detail = self.c(_issue("R-4"), ["agent:claude", "agent:codex"])
+        self.assertEqual(v, "conflict")
+        self.assertIn("Claude and Codex", detail)
+
+    def test_two_labels_naming_the_same_agent_still_migrates(self):
+        self.assertEqual(self.c(_issue("R-5"), ["agent:claude", "agent:Claude"]),
+                         ("migrate", "Claude"))
 
     def test_label_suffix_that_is_not_an_agent_is_unresolved(self):
         # Real cases in this workspace: agent:hold (a workflow flag) and
         # agent:yosemite-s0 (a worker machine) — neither is a delegatable agent.
         for suffix in ("hold", "yosemite-s0"):
-            v, detail = linear_cli.classify_agent_label_issue(
-                _issue("R-4"), f"agent:{suffix}", self.ROSTER)
+            v, detail = self.c(_issue("R-6"), [f"agent:{suffix}"])
             self.assertEqual(v, "unresolved", suffix)
             self.assertIn(suffix, detail)
+
+    def test_one_unresolvable_label_blocks_its_resolvable_sibling(self):
+        # Mixed state needs a human — migrating half of it silently is worse.
+        v, detail = self.c(_issue("R-7"), ["agent:claude", "agent:hold"])
+        self.assertEqual(v, "unresolved")
+        self.assertIn("hold", detail)
 
 
 class MigrateAgentLabelsRunTest(unittest.TestCase):
     """Drives cmd_migrate_agent_labels end to end over a substituted transport."""
 
-    def _run(self, issues, labels, apply=False):
+    def _run(self, issues, labels, apply=False, update_ok=True, delete_ok=True,
+             label_uses=0):
         calls = []
 
         def fake_paginate_connection(api_key, query, path, variables=None):
-            if path == ["issues"]:
-                return list(issues)
-            return list(labels)
+            return list(issues) if path == ["issues"] else list(labels)
 
         def fake_gql(api_key, query, variables=None):
             calls.append((query, variables))
             if "issueLabelDelete" in query:
-                return {"data": {"issueLabelDelete": {"success": True}}}
+                return {"data": {"issueLabelDelete": {"success": bool(delete_ok)}}}
+            if "labels: { id:" in query:
+                n = label_uses if isinstance(label_uses, int) else label_uses(variables)
+                return {"data": {"issues": {"nodes": [{"identifier": f"X-{i}"}
+                                                      for i in range(n)]}}}
             ident = next((i["identifier"] for i in issues
                           if i["id"] == (variables or {}).get("id")), "R-?")
+            if not update_ok:
+                return {"data": {"issueUpdate": {"success": False, "issue": None}}}
             dg = ((variables or {}).get("input", {}) or {}).get("delegateId")
             return {"data": {"issueUpdate": {
                 "success": True,
                 "issue": {"identifier": ident,
-                          "delegate": {"name": "Claude"} if dg else None,
-                          "labels": {"nodes": []}}}}}
+                          "delegate": {"name": "Claude"} if dg else None}}}}
 
         saved = (linear_cli.paginate_connection, linear_cli.gql,
                  linear_cli.get_agents, linear_cli.list_team_labels,
@@ -893,60 +908,122 @@ class MigrateAgentLabelsRunTest(unittest.TestCase):
              linear_cli.resolve_agent_id) = saved
         return code, out.getvalue(), err.getvalue(), calls
 
+    @staticmethod
+    def _raw(ident, uid, delegate=None, labels=()):
+        return {"id": uid, "identifier": ident, "title": "t",
+                "state": {"name": "Todo"},
+                "delegate": {"name": delegate} if delegate else None,
+                "labels": {"nodes": [{"id": lid, "name": name} for lid, name in labels]}}
+
+    def _updates(self, calls):
+        return [v for q, v in calls if "issueUpdate" in q]
+
+    def _deletes(self, calls):
+        return [v for q, v in calls if "issueLabelDelete" in q]
+
     def test_apply_sets_the_delegate_and_drops_only_the_agent_label(self):
-        issue = {"id": "uuid-1", "identifier": "R-1", "title": "t",
-                 "state": {"name": "Todo"}, "delegate": None,
-                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:claude"},
-                                      {"id": "l-keep", "name": "kind:build"}]}}
+        issue = self._raw("R-1", "uuid-1", labels=[("l-agent", "agent:claude"),
+                                                   ("l-keep", "kind:build")])
         code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:claude"}],
                                           apply=True)
         self.assertEqual(code, 0, err)
-        update = next(v for q, v in calls if "issueUpdate" in q)
+        update = self._updates(calls)[0]
         self.assertEqual(update["input"]["delegateId"], "id-claude")
         self.assertEqual(update["input"]["labelIds"], ["l-keep"])   # kind:build survives
-        self.assertIn("deleted", out)
+        self.assertIn("deleted    label agent:claude", out)
+        self.assertIn("migrated=1 stripped=0 conflicts=0 unresolved=0 failures=0", out)
+
+    def test_two_agent_labels_are_one_write_that_drops_both(self):
+        # Two writes computed from the same snapshot would resurrect each other's
+        # stripped label and silently overwrite the delegate.
+        issue = self._raw("R-2", "uuid-2", labels=[("l-a", "agent:claude"),
+                                                   ("l-b", "agent:Claude"),
+                                                   ("l-keep", "kind:build")])
+        code, out, err, calls = self._run(
+            [issue], [{"id": "l-a", "name": "agent:claude"}], apply=True)
+        self.assertEqual(code, 0, err)
+        updates = self._updates(calls)
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["input"]["labelIds"], ["l-keep"])
+        self.assertEqual(updates[0]["input"]["delegateId"], "id-claude")
+
+    def test_two_labels_naming_different_agents_writes_nothing(self):
+        issue = self._raw("R-3", "uuid-3", labels=[("l-a", "agent:claude"),
+                                                   ("l-b", "agent:codex")])
+        code, out, err, calls = self._run(
+            [issue], [{"id": "l-a", "name": "agent:claude"}], apply=True)
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICT", err)
+        self.assertEqual(self._updates(calls), [])
+        self.assertEqual(self._deletes(calls), [])
 
     def test_conflict_is_reported_and_nothing_is_written(self):
-        issue = {"id": "uuid-2", "identifier": "R-2", "title": "t",
-                 "state": {"name": "Todo"}, "delegate": {"name": "Codex"},
-                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:claude"}]}}
+        issue = self._raw("R-4", "uuid-4", delegate="Codex",
+                          labels=[("l-agent", "agent:claude")])
         code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:claude"}],
                                           apply=True)
         self.assertEqual(code, 1)
         self.assertIn("CONFLICT", err)
-        self.assertFalse([q for q, _ in calls if "issueUpdate" in q])
-        # The label is still in use, so it must survive.
-        self.assertNotIn("deleted", out)
-        self.assertIn("keep      label agent:claude", out)
+        self.assertEqual(self._updates(calls), [])
+        self.assertIn("keep       label agent:claude", out)
 
     def test_unresolvable_suffix_fails_loud_and_keeps_the_label(self):
-        issue = {"id": "uuid-3", "identifier": "R-3", "title": "t",
-                 "state": {"name": "Todo"}, "delegate": None,
-                 "labels": {"nodes": [{"id": "l-hold", "name": "agent:hold"}]}}
+        issue = self._raw("R-5", "uuid-5", labels=[("l-hold", "agent:hold")])
         code, out, err, calls = self._run([issue], [{"id": "l-hold", "name": "agent:hold"}],
                                           apply=True)
         self.assertEqual(code, 1)
         self.assertIn("UNRESOLVED", err)
         self.assertIn("'hold' is not a delegatable agent", err)
-        self.assertFalse([q for q, _ in calls if "issueUpdate" in q])
-        self.assertFalse([q for q, _ in calls if "issueLabelDelete" in q])
+        self.assertEqual(self._updates(calls), [])
+        self.assertEqual(self._deletes(calls), [])
 
-    def test_dry_run_writes_nothing(self):
-        issue = {"id": "uuid-4", "identifier": "R-4", "title": "t",
-                 "state": {"name": "Todo"}, "delegate": None,
-                 "labels": {"nodes": [{"id": "l-agent", "name": "agent:codex"}]}}
+    def test_a_failed_write_is_not_counted_as_migrated(self):
+        issue = self._raw("R-6", "uuid-6", labels=[("l-agent", "agent:claude")])
+        code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:claude"}],
+                                          apply=True, update_ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", err)
+        self.assertIn("migrated=0 stripped=0 conflicts=0 unresolved=0 failures=1", out)
+        self.assertEqual(self._deletes(calls), [])   # label still in use
+
+    def test_a_failed_label_delete_exits_non_zero(self):
+        code, out, err, calls = self._run([], [{"id": "l-dead", "name": "agent:mac-mini"}],
+                                          apply=True, delete_ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED     label agent:mac-mini", err)
+        self.assertIn("failures=1", out)
+
+    def test_label_still_used_outside_this_team_is_never_deleted(self):
+        # list_team_labels also returns workspace-wide labels, and the issue scan
+        # is team-scoped — so "no hits in my team" does not mean "unused".
+        code, out, err, calls = self._run([], [{"id": "l-ws", "name": "agent:claude"}],
+                                          apply=True, label_uses=1)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._deletes(calls), [])
+        self.assertIn("still carried by an issue outside this team", out)
+
+    def test_dry_run_writes_nothing_and_exits_zero(self):
+        issue = self._raw("R-7", "uuid-7", labels=[("l-agent", "agent:codex")])
         code, out, err, calls = self._run([issue], [{"id": "l-agent", "name": "agent:codex"}])
         self.assertEqual(code, 0, err)
-        self.assertEqual(calls, [])
-        self.assertIn("migrate   R-4", out)
-        self.assertIn("Dry run only", out)
+        self.assertEqual(self._updates(calls), [])
+        self.assertEqual(self._deletes(calls), [])
+        self.assertIn("migrate    R-7", out)
+        self.assertIn("Re-run with --apply to write.", out)
+
+    def test_dry_run_with_a_blocker_still_exits_zero_but_says_so(self):
+        # An inspection that found work to review is not a failed migration.
+        issue = self._raw("R-8", "uuid-8", labels=[("l-hold", "agent:hold")])
+        code, out, err, calls = self._run([issue], [{"id": "l-hold", "name": "agent:hold"}])
+        self.assertEqual(code, 0)
+        self.assertIn("UNRESOLVED", err)
+        self.assertIn("need a human before --apply can finish", out)
 
     def test_unused_label_is_deleted_once_nothing_carries_it(self):
         code, out, err, calls = self._run([], [{"id": "l-dead", "name": "agent:mac-mini"}],
                                           apply=True)
         self.assertEqual(code, 0, err)
-        self.assertEqual([v for q, v in calls if "issueLabelDelete" in q],
-                         [{"id": "l-dead"}])
+        self.assertEqual(self._deletes(calls), [{"id": "l-dead"}])
 
 
 if __name__ == "__main__":
