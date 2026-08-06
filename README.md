@@ -135,7 +135,7 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Assignee-as-queue.** `linear tasks` returns what *you* own in the active cycle. Widen with `--cycle all` (whole team) or `--cycle none` (backlog), or filter by `--assignee me|none|<email>`. No dashboards, no saved views.
 - **Milestones as deliverables.** `--milestone` scopes to one deliverable across all cycles; `--by-milestone` groups a project's issues by milestone (with a *No milestone* bucket for unmatched work), each row annotated with its cycle so you see which iteration a deliverable's work is scheduled in. `linear projects` / `milestones list` roll up per-milestone % done, so a deliverable's progress sits next to its target date. Scoping to `--project`/`--milestone` widens to all cycles by default (the whole deliverable, not just this cycle's slice).
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
-- **Shared-seat fallback.** If your agents share one Linear seat, set `--agent claude` at setup and `linear tasks` filters to issues labeled for that agent. Labels are a fallback lane, not the primary handoff model.
+- **One ownership model.** `delegate` is the only thing that owns an issue. `linear tasks --agent claude` filters to issues delegated to Claude; the default view adds the issues nobody has been delegated (`delegate` is null). `linear tasks --board` groups its columns by delegate. There is no label lane — an unknown `--agent` aborts rather than printing an empty queue.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
 - **JSON everywhere.** `--json` on every read command. Pipe to `jq` or hand to a subagent.
 
@@ -241,11 +241,17 @@ If you want the MCP, use it. If you want a subagent to burn through 50 tickets w
 
 ## FAQ
 
-### Can the agent be the assignee directly, instead of routing by label?
+### Can the agent be the assignee directly, instead of the delegate?
 
-Yes. If your agent has its own Linear account (many teams provision one seat per agent — e.g. `claude@yourcompany.com`, `codex@yourcompany.com`), run `linear setup --api-key <agent's own key>` without `--agent`. Then `linear tasks` returns tickets assigned *directly to the agent's user*. No labels, no filtering — the assignee IS the lane.
+Yes. If your agent has its own Linear account (many teams provision one seat per agent — e.g. `claude@yourcompany.com`, `codex@yourcompany.com`), run `linear setup --api-key <agent's own key>` without `--agent`. Then `linear tasks` returns tickets assigned *directly to the agent's user* — the assignee IS the lane.
 
-Use `--agent <label>` when you want multiple agents to share one Linear seat; skip it when each agent has its own. To query any assignee on demand, `linear tasks --assignee me|none|<email>`.
+Use `--agent <name>` when your agents are installed as Linear app users and share a human's seat; skip it when each agent has its own account. To query any assignee on demand, `linear tasks --assignee me|none|<email>`.
+
+### I have old `agent:<name>` labels from before delegation existed
+
+Run `linear migrate-agent-labels`. It is a dry run by default and prints exactly what it would do: which issues get a delegate, which labels get stripped, and which labels get deleted once nothing carries them. `--apply` writes.
+
+It never overwrites an existing delegate — an issue already delegated to a different agent than its label says is reported as a `CONFLICT` and left untouched. A label whose suffix is not a delegatable agent (a machine name, a workflow flag) is reported as `UNRESOLVED` and kept. Either case exits non-zero, so an unattended run can't mistake a partial migration for a clean one.
 
 ### What about Linear's native agents (app users)?
 
