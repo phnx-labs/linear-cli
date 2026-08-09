@@ -7,15 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-09
+
 ### Added
 
-- **`linear queue` / `linear queue drain`** — durable local queue for closes
-  that cannot be written immediately. `linear update <id> --done --proof ...`
-  now persists the intent before attempting the API; on a Linear rate limit
-  (429) or transient error the intent is retained in `~/.linear-cli/queue/`
-  and retried later. `linear queue drain` applies pending closes with
-  exponential backoff; `linear queue drain --dry-run` previews them. The next
-  `linear update --done` automatically drains the queue first.
+- **`linear queue` / `linear queue list` / `linear queue drain`** — durable
+  local queue for closes that cannot be written immediately (RUSH-2307).
+  `linear update <id> --done --proof ...` persists the intent before
+  attempting the API; on a Linear rate limit (429) or transient error the
+  intent is retained in `~/.linear-cli/queue/` and retried later.
+  `linear queue drain` applies pending closes with exponential backoff;
+  `linear queue drain --once` applies a single due intent; `linear queue
+  drain --dry-run` previews them. The next `linear update --done` also
+  drains automatically.
+- **Concurrent drain safety.** `queue_drain_lock` (`fcntl.flock` on
+  `~/.linear-cli/queue/.drain.lock`) serializes drains on one machine so two
+  processes cannot double-apply or corrupt intents.
+- **Retry-After honored.** `gql` surfaces HTTP `Retry-After` in GraphQL error
+  extensions; drain prefers that delay over exponential backoff (still
+  capped).
 - **Idempotent queued closes.** Duplicate intents for the same ticket collapse
   to the latest proof/comment. A drain that finds the issue already in the
   desired state removes the intent without re-posting proof.
@@ -26,14 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `gql` now surfaces HTTP status codes in GraphQL error extensions so callers
-  can distinguish rate limits (429) and transient errors from permanent
-  failures.
+- `gql` surfaces HTTP status codes (and Retry-After) in GraphQL error
+  extensions so callers can distinguish rate limits (429) and transient
+  errors from permanent failures.
 
 ### Docs
 
-- README and `skill.md` document `linear queue`, `linear queue drain`, and the
-  durable-close behavior.
+- README and `skill.md` document the queue surface and a rate-limit runbook
+  for agents (close batches with queue, never tight-loop).
 
 ## [0.17.0] - 2026-08-06
 
