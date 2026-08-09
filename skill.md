@@ -17,7 +17,9 @@ linear update ANT-42 --pickup          # move to In Progress
 linear update ANT-42 --comment "..."    # drop a progress note
 linear update ANT-42 --done --proof <url-or-file> --proof "deployed at X"
 linear queue                           # closes waiting on a rate limit
+linear queue list                      # same as bare queue
 linear queue drain                     # apply queued closes with backoff
+linear queue drain --once              # apply one due intent
 linear create "Title" --label foo --priority high --description "..."
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
@@ -188,20 +190,31 @@ linear tasks --json | jq '.issues[] | {id: .identifier, title, state: .state.nam
 
 Use it on `update --done` so reviewers see evidence without digging.
 
-## Durable closes
+## Durable closes (rate-limit runbook)
 
-If `linear update <id> --done --proof ...` hits a Linear rate limit or transient
-API error, the close is persisted to `~/.linear-cli/queue/` instead of being
-dropped. Retry with exponential backoff happens automatically on the next
-`linear update --done`, or explicitly via:
+Closing work requires `linear update <id> --done --proof <url>` — proof is
+mandatory. When Linear is rate-limited (fleet reality: many agents share one
+token; `Only 2500 requests are allowed per 1 hour`), the close is **queued**,
+not dropped.
 
 ```
-linear queue drain          # apply all queued closes now
-linear queue drain --dry-run # preview without applying
+linear update RUSH-N --done --proof https://pr/123
+# success path:  RUSH-N -> Done
+# rate limited:  RUSH-N -> queued for retry (rate limited / transient)
+
+linear queue list              # what is waiting
+linear queue drain             # apply all due intents (file-locked)
+linear queue drain --once      # apply one due intent
+linear queue drain --dry-run   # preview without applying
 ```
 
-The queue is keyed by issue identifier and idempotent: a duplicate close
-collapses to the latest proof, and an already-closed issue is skipped.
+Intents live under `~/.linear-cli/queue/`. Drain prefers server `Retry-After`
+when present, otherwise exponential backoff (capped). Concurrent drains on
+one machine serialize via `fcntl.flock`. The next `linear update --done` also
+drains automatically.
+
+**Do not tight-loop bulk closes.** Space batch closes, or let the queue absorb
+429s and drain later on one box.
 
 ## Common mistakes
 

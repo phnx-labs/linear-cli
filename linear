@@ -31,7 +31,9 @@ Config: ~/.linear-cli/config.json
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
+import fcntl
 import json
 import mimetypes
 import os
@@ -42,7 +44,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -179,6 +181,41 @@ def get_team_id(cfg: dict) -> str:
 # GraphQL client
 # ---------------------------------------------------------------------------
 
+def _header_retry_after(err: BaseException) -> int | None:
+    """Parse Retry-After (seconds) from an HTTPError-like response, if present."""
+    headers = getattr(err, "headers", None)
+    if headers is None:
+        return None
+    raw = None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return seconds
+
+
+def _annotate_error_extensions(err: dict, status: int | None,
+                               retry_after: int | None) -> None:
+    """Attach HTTP status / Retry-After onto a GraphQL error's extensions."""
+    if not isinstance(err, dict):
+        return
+    if status is None and retry_after is None:
+        return
+    ext = err.setdefault("extensions", {})
+    if status is not None:
+        ext.setdefault("status", status)
+    if retry_after is not None:
+        ext.setdefault("retry_after", retry_after)
+
+
 def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
     payload: dict = {"query": query}
     if variables:
@@ -196,23 +233,22 @@ def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
         # HTTPError has a response body with actual GraphQL error details
         body = ""
         status = getattr(e, "code", None)
+        retry_after = _header_retry_after(e)
         if hasattr(e, "read"):
             try:
                 body = e.read().decode("utf-8", errors="replace")
                 parsed = json.loads(body)
                 if "errors" in parsed:
-                    # Surface the HTTP status so callers can distinguish
-                    # rate-limit (429) and other transient errors.
+                    # Surface the HTTP status / Retry-After so callers can
+                    # distinguish rate-limit (429) and honor server backoff.
                     for err in parsed.get("errors", []):
-                        if isinstance(err, dict) and status is not None:
-                            err.setdefault("extensions", {})["status"] = status
+                        _annotate_error_extensions(err, status, retry_after)
                     return parsed
             except (json.JSONDecodeError, Exception):
                 pass
         detail = body if body else str(e)
         err: dict = {"message": detail}
-        if status is not None:
-            err["extensions"] = {"status": status}
+        _annotate_error_extensions(err, status, retry_after)
         return {"errors": [err]}
 
 
@@ -233,6 +269,19 @@ def _error_status(err: dict) -> int | None:
 
 def _error_message(err: dict) -> str:
     return str(err.get("message", "")).lower()
+
+
+def _error_retry_after(err: dict) -> int | None:
+    """Retry-After seconds from a GraphQL error extension, if any."""
+    ext = err.get("extensions") or {}
+    raw = ext.get("retry_after")
+    if raw is None:
+        return None
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def is_rate_limited(data: dict) -> bool:
@@ -266,6 +315,20 @@ def is_transient_error(data: dict) -> bool:
         if any(p in msg for p in transient_phrases):
             return True
     return False
+
+
+def response_retry_after_seconds(data: dict) -> int | None:
+    """Best Retry-After (seconds) from a GraphQL error response, if any."""
+    best: int | None = None
+    for err in data.get("errors", []):
+        if not isinstance(err, dict):
+            continue
+        seconds = _error_retry_after(err)
+        if seconds is None:
+            continue
+        if best is None or seconds > best:
+            best = seconds
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +414,57 @@ def queue_backoff_delay(attempts: int) -> int:
     )
 
 
+def resolve_backoff_delay(attempts: int, retry_after: int | None = None) -> int:
+    """Prefer server Retry-After when present; otherwise exponential backoff.
+
+    Both paths are capped at QUEUE_BACKOFF_MAX_SECONDS so a pathological
+    Retry-After cannot stall the queue indefinitely.
+    """
+    if retry_after is not None:
+        try:
+            seconds = int(retry_after)
+        except (TypeError, ValueError):
+            seconds = -1
+        if seconds >= 0:
+            return min(max(seconds, 0), QUEUE_BACKOFF_MAX_SECONDS)
+    return queue_backoff_delay(attempts)
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@contextlib.contextmanager
+def queue_drain_lock(blocking: bool = False):
+    """Exclusive flock around drain so concurrent drains on one machine are safe.
+
+    Yields True when the lock is held. Yields False when non-blocking and another
+    drain already holds the lock (caller should skip, not corrupt intents).
+    """
+    _ensure_queue_dir()
+    lock_path = queue_dir() / ".drain.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    held = False
+    try:
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(fd, flags)
+            held = True
+        except (BlockingIOError, OSError):
+            held = False
+        yield held
+    finally:
+        if held:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def build_close_intent(identifier: str, issue_id: str, state: str,
@@ -386,17 +498,28 @@ def apply_close_intent(api_key: str, team_id: str, cfg: dict,
 
     Idempotent: if the issue already has the desired state, the intent is
     considered successful and no duplicate proof is posted.
+
+    On a transient failure, any server Retry-After is stashed on the intent as
+    ``last_retry_after`` so drain can honor it.
     """
     identifier = intent.get("identifier", "")
     issue_id = intent.get("issue_id")
     desired_state = intent.get("state", "")
+    intent.pop("last_retry_after", None)
+
+    def _transient(data: dict | None = None) -> tuple[bool, bool]:
+        if data is not None:
+            ra = response_retry_after_seconds(data)
+            if ra is not None:
+                intent["last_retry_after"] = ra
+        return False, True
 
     # Resolve fresh state each attempt so a close that already landed is a no-op.
     issue = resolve_issue(api_key, team_id, identifier)
     if not issue:
         # resolve_issue already printed the error. Treat as transient because
         # "not found" after a rate limit is often a misleading symptom.
-        return False, True
+        return _transient()
 
     current_state = (issue.get("state") or {}).get("name", "")
     if current_state == desired_state:
@@ -425,7 +548,7 @@ def apply_close_intent(api_key: str, team_id: str, cfg: dict,
             }
         """, {"input": {"issueId": issue_id, "body": proof_body}})
         if is_transient_error(data):
-            return False, True
+            return _transient(data)
         if check_errors(data):
             # A non-transient proof failure (e.g. missing file) should not
             # block forever; the caller will count attempts and eventually drop.
@@ -445,7 +568,7 @@ def apply_close_intent(api_key: str, team_id: str, cfg: dict,
     """, {"id": issue_id, "stateId": state_id})
 
     if is_transient_error(data):
-        return False, True
+        return _transient(data)
     if check_errors(data):
         return False, False
 
@@ -456,13 +579,28 @@ def apply_close_intent(api_key: str, team_id: str, cfg: dict,
 
 
 def drain_queue(api_key: str, team_id: str, cfg: dict,
-                quiet: bool = False) -> tuple[int, int]:
-    """Apply all queued intents that are due. Returns (applied, remaining).
+                quiet: bool = False, once: bool = False,
+                acquire_lock: bool = True) -> tuple[int, int]:
+    """Apply queued intents that are due. Returns (applied, remaining).
 
-    Each intent is retried with exponential backoff up to MAX_QUEUE_ATTEMPTS.
-    Intents that exhaust attempts are dropped so the queue cannot grow forever
-    on permanently stuck items.
+    Each intent is retried with exponential backoff (or server Retry-After)
+    up to MAX_QUEUE_ATTEMPTS. Intents that exhaust attempts are dropped so the
+    queue cannot grow forever on permanently stuck items.
+
+    Concurrent drains on one machine serialize via ``queue_drain_lock``. When
+    another drain holds the lock, this call is a no-op (returns 0, remaining).
+    Pass ``once=True`` to process at most one due intent.
     """
+    if acquire_lock:
+        with queue_drain_lock(blocking=False) as held:
+            if not held:
+                if not quiet:
+                    print("Another drain holds the queue lock; skipping.",
+                          file=sys.stderr)
+                return 0, len(list_queue_intents())
+            return drain_queue(api_key, team_id, cfg, quiet=quiet, once=once,
+                               acquire_lock=False)
+
     intents = list_queue_intents()
     if not intents:
         if not quiet:
@@ -471,7 +609,7 @@ def drain_queue(api_key: str, team_id: str, cfg: dict,
 
     applied = 0
     remaining = 0
-    now = _now_utc()
+    processed_due = 0
     for intent in intents:
         identifier = intent.get("identifier", "")
         attempts = intent.get("attempts", 0) or 0
@@ -480,6 +618,11 @@ def drain_queue(api_key: str, team_id: str, cfg: dict,
             remaining += 1
             continue
 
+        if once and processed_due >= 1:
+            remaining += 1
+            continue
+
+        processed_due += 1
         ok, transient = apply_close_intent(api_key, team_id, cfg, intent)
         if ok:
             remove_queue_intent(identifier)
@@ -496,7 +639,10 @@ def drain_queue(api_key: str, team_id: str, cfg: dict,
                     print(f"Gave up on {identifier} after {attempts} attempts.",
                           file=sys.stderr)
             else:
-                delay = queue_backoff_delay(attempts)
+                delay = resolve_backoff_delay(
+                    attempts, intent.get("last_retry_after"),
+                )
+                intent.pop("last_retry_after", None)
                 intent["attempts"] = attempts
                 intent["next_attempt"] = (
                     _now_utc() + timedelta(seconds=delay)
@@ -4270,6 +4416,28 @@ def cmd_agents(args, cfg, api_key, team_id):
         print(f"  {a['name']:20s}  delegate: linear update <ID> --delegate {a['name'].lower()}")
 
 
+def print_queue_list(detailed: bool = False) -> None:
+    """Print queued close intents (shared by bare `queue` and `queue list`)."""
+    intents = list_queue_intents()
+    if not intents:
+        print("Queue empty.")
+        return
+    print(f"{len(intents)} close intent(s) queued:")
+    for intent in intents:
+        ident = intent.get("identifier", "?")
+        state = intent.get("state", "Done")
+        attempts = intent.get("attempts", 0) or 0
+        if detailed:
+            nxt = intent.get("next_attempt")
+            status = f"attempts={attempts}"
+            if nxt:
+                status += f", next {nxt}"
+            print(f"  {ident} -> {state} ({status})")
+        else:
+            print(f"  {ident} -> {state} (attempts={attempts})")
+    print("Run `linear queue drain` to apply them.")
+
+
 def cmd_queue(args, cfg, api_key, team_id):
     """Manage the durable local queue for closes that could not be written
     immediately (typically because Linear returned a rate limit)."""
@@ -4290,25 +4458,23 @@ def cmd_queue(args, cfg, api_key, team_id):
                     status += f", next {nxt}"
                 print(f"{ident} -> {state} ({status})")
             return
-        applied, remaining = drain_queue(api_key, team_id, cfg, quiet=False)
+        once = bool(getattr(args, "once", False))
+        applied, remaining = drain_queue(
+            api_key, team_id, cfg, quiet=False, once=once,
+        )
         if remaining == 0:
             print(f"Drained {applied} intent(s). Queue empty.")
         else:
             print(f"Applied {applied}, {remaining} pending retry.")
         return
 
-    # Bare `linear queue` lists intents and a hint.
-    intents = list_queue_intents()
-    if not intents:
-        print("Queue empty.")
+    # Bare `linear queue` and `linear queue list` both list intents.
+    if action in (None, "list"):
+        print_queue_list(detailed=(action == "list"))
         return
-    print(f"{len(intents)} close intent(s) queued:")
-    for intent in intents:
-        ident = intent.get("identifier", "?")
-        state = intent.get("state", "Done")
-        attempts = intent.get("attempts", 0) or 0
-        print(f"  {ident} -> {state} (attempts={attempts})")
-    print("Run `linear queue drain` to apply them.")
+
+    print(f"Unknown queue action: {action}", file=sys.stderr)
+    sys.exit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -4610,10 +4776,14 @@ def main():
     p_queue = sub.add_parser("queue",
                              help="Manage the durable local close queue")
     queue_sub = p_queue.add_subparsers(dest="queue_action")
+    queue_sub.add_parser("list",
+                         help="List queued close intents (same as bare queue)")
     q_drain = queue_sub.add_parser("drain",
                                    help="Apply queued closes with backoff")
     q_drain.add_argument("--dry-run", action="store_true",
                          help="List queued intents without applying them")
+    q_drain.add_argument("--once", action="store_true",
+                         help="Apply at most one due intent, then stop")
 
     # Back-compat + ergonomics: `projects <name>` / `initiatives <name>` (a bare
     # name, not a verb) is shorthand for `<group> show <name>`. Insert the

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -1669,6 +1670,142 @@ class CloseQueueTest(unittest.TestCase):
             finally:
                 (linear_cli.gql, linear_cli.resolve_issue,
                  linear_cli.get_states) = saved
+
+    def test_resolve_backoff_prefers_retry_after_and_caps(self):
+        self.assertEqual(linear_cli.resolve_backoff_delay(1, retry_after=42), 42)
+        self.assertEqual(
+            linear_cli.resolve_backoff_delay(1, retry_after=10_000),
+            linear_cli.QUEUE_BACKOFF_MAX_SECONDS,
+        )
+        # Missing / invalid Retry-After falls back to exponential.
+        self.assertEqual(linear_cli.resolve_backoff_delay(3, retry_after=None), 8)
+        self.assertEqual(linear_cli.resolve_backoff_delay(2, retry_after="nope"), 4)
+
+    def test_drain_honors_retry_after_from_error_extensions(self):
+        with self._temp_queue():
+            def fake_gql(_api_key, _query, _variables=None):
+                return {
+                    "errors": [{
+                        "message": "Rate limit exceeded",
+                        "extensions": {"status": 429, "retry_after": 17},
+                    }]
+                }
+
+            def fake_resolve(_api_key, _team_id, ident):
+                return {
+                    "id": "issue-1",
+                    "identifier": ident,
+                    "state": {"name": "In Progress"},
+                }
+
+            saved = (linear_cli.gql, linear_cli.resolve_issue, linear_cli.get_states)
+            linear_cli.gql = fake_gql
+            linear_cli.resolve_issue = fake_resolve
+            linear_cli.get_states = lambda _a, _t, _c: {
+                "Done": {"id": "state-done", "type": "completed"}
+            }
+            try:
+                linear_cli.save_queue_intent(
+                    linear_cli.build_close_intent("RUSH-1", "issue-1", "Done")
+                )
+                applied, remaining = linear_cli.drain_queue(
+                    "api-key", "team-id", {}
+                )
+                self.assertEqual(applied, 0)
+                self.assertEqual(remaining, 1)
+                loaded = linear_cli.list_queue_intents()[0]
+                self.assertEqual(loaded["attempts"], 1)
+                # next_attempt is ~17s ahead (not the exponential 2s).
+                nxt = datetime.fromisoformat(loaded["next_attempt"])
+                delta = (nxt - datetime.now(timezone.utc)).total_seconds()
+                self.assertGreater(delta, 10)
+                self.assertLess(delta, 25)
+                self.assertNotIn("last_retry_after", loaded)
+            finally:
+                (linear_cli.gql, linear_cli.resolve_issue,
+                 linear_cli.get_states) = saved
+
+    def test_drain_once_processes_only_one_due_intent(self):
+        with self._temp_queue():
+            calls = []
+
+            def fake_gql(_api_key, query, _variables=None):
+                calls.append(query)
+                if "issueUpdate" in query:
+                    return {
+                        "data": {
+                            "issueUpdate": {
+                                "success": True,
+                                "issue": {
+                                    "identifier": "X",
+                                    "title": "T",
+                                    "state": {"name": "Done"},
+                                },
+                            }
+                        }
+                    }
+                return {"data": {"commentCreate": {"success": True}}}
+
+            def fake_resolve(_api_key, _team_id, ident):
+                return {
+                    "id": f"id-{ident}",
+                    "identifier": ident,
+                    "state": {"name": "In Progress"},
+                }
+
+            saved = (linear_cli.gql, linear_cli.resolve_issue, linear_cli.get_states)
+            linear_cli.gql = fake_gql
+            linear_cli.resolve_issue = fake_resolve
+            linear_cli.get_states = lambda _a, _t, _c: {
+                "Done": {"id": "state-done", "type": "completed"}
+            }
+            try:
+                for ident in ("RUSH-1", "RUSH-2"):
+                    linear_cli.save_queue_intent(
+                        linear_cli.build_close_intent(ident, f"id-{ident}", "Done")
+                    )
+                applied, remaining = linear_cli.drain_queue(
+                    "api-key", "team-id", {}, once=True,
+                )
+                self.assertEqual(applied, 1)
+                self.assertEqual(remaining, 1)
+                left = {i["identifier"] for i in linear_cli.list_queue_intents()}
+                self.assertEqual(len(left), 1)
+            finally:
+                (linear_cli.gql, linear_cli.resolve_issue,
+                 linear_cli.get_states) = saved
+
+    def test_concurrent_drain_is_serialized_by_file_lock(self):
+        """A second drain while the first holds the lock is a no-op."""
+        with self._temp_queue():
+            linear_cli.save_queue_intent(
+                linear_cli.build_close_intent("RUSH-1", "issue-1", "Done")
+            )
+            with linear_cli.queue_drain_lock(blocking=True) as held:
+                self.assertTrue(held)
+                # Nested non-blocking acquire must fail (lock already held).
+                with linear_cli.queue_drain_lock(blocking=False) as held2:
+                    self.assertFalse(held2)
+                # drain_queue with lock acquisition should skip, not double-apply.
+                applied, remaining = linear_cli.drain_queue(
+                    "api-key", "team-id", {}, quiet=True,
+                )
+                self.assertEqual(applied, 0)
+                self.assertEqual(remaining, 1)
+                self.assertTrue(linear_cli._intent_path("RUSH-1").exists())
+
+    def test_print_queue_list_and_cmd_queue_list(self):
+        with self._temp_queue():
+            linear_cli.save_queue_intent(
+                linear_cli.build_close_intent("RUSH-9", "i9", "Done")
+            )
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                linear_cli.print_queue_list(detailed=True)
+            out = buf.getvalue()
+            self.assertIn("1 close intent(s) queued", out)
+            self.assertIn("RUSH-9", out)
+            self.assertIn("attempts=0", out)
 
 
 if __name__ == "__main__":

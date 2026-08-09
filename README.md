@@ -30,13 +30,13 @@ Use the same shell contract whether you're typing or a subagent is: query the qu
 Preferred (pinned tag + SHA-256 verify via `install.sh`):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.17.0/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.18.0/install.sh | sh
 ```
 
 Manual pin (same tag; no checksum — prefer `install.sh` above):
 
 ```bash
-curl -o ~/.local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.17.0/linear
+curl -o ~/.local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.18.0/linear
 chmod +x ~/.local/bin/linear
 ```
 
@@ -94,7 +94,9 @@ linear tasks --cycle all --json | jq -r '.issues[].identifier' \
   | linear update --stdin --label triage                 # bulk via stdin (xargs-style)
 
 linear queue                            # list closes waiting on rate limits
+linear queue list                       # same as bare queue
 linear queue drain                      # apply queued closes with backoff
+linear queue drain --once               # apply one due intent, then stop
 linear queue drain --dry-run            # preview queued closes without applying
 
 linear create "Fix auth bug" --label security --priority high
@@ -147,7 +149,7 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
 - **One ownership model.** `delegate` is the only thing that owns an issue. `linear tasks --agent claude` filters to issues delegated to Claude; the default view adds the issues nobody has been delegated (`delegate` is null). `linear tasks --board` groups its columns by delegate. There is no label lane — an unknown `--agent` aborts rather than printing an empty queue.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
-- **Durable closes.** If a `--done` call hits a Linear rate limit or transient error, the close intent is persisted to `~/.linear-cli/queue/` and retried with exponential backoff. `linear queue drain` applies pending closes; the next `linear update --done` also drains automatically so the board stays honest.
+- **Durable closes.** If a `--done` call hits a Linear rate limit or transient error, the close intent is persisted to `~/.linear-cli/queue/` and retried with exponential backoff (or server `Retry-After`). `linear queue list` / `linear queue drain` inspect and apply pending closes; concurrent drains on one machine are serialized with a file lock. The next `linear update --done` also drains automatically so the board stays honest. **Never tight-loop bulk closes** — use the queue and `linear queue drain` (or `--once`) instead of a bare `for id in …; do linear update $id --done; done` without sleep.
 - **JSON everywhere.** `--json` on every read command. Pipe to `jq` or hand to a subagent.
 
 <p align="center">
