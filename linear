@@ -995,7 +995,7 @@ def list_team_projects(api_key: str, team_id: str) -> list[dict]:
             projects(first: 100, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
-                    id name state progress scope
+                    id name state progress scope priority
                     startDate targetDate updatedAt
                     lead { name }
                 }
@@ -3174,7 +3174,8 @@ def cmd_projects(args, cfg, api_key, team_id):
         state = p.get("state") or "-"
         lead = (p.get("lead") or {}).get("name") or "-"
         count = int(p.get("scope") or 0)
-        print(f"  {p['name']:40s}  {state:12s}  {progress:>3}%  "
+        pri = PRIORITY_MAP.get(p.get("priority") or 0, "-")
+        print(f"  {p['name']:40s}  {state:12s}  {pri:7s}  {progress:>3}%  "
               f"{count:>4} issue(s)  lead: {lead}")
 
 
@@ -3202,7 +3203,7 @@ def _project_show(args, api_key, team_id):
     data = gql(api_key, """
         query($id: String!) {
             project(id: $id) {
-                id name state progress scope
+                id name state progress scope priority
                 description
                 startDate targetDate
                 lead { name email }
@@ -3225,6 +3226,7 @@ def _project_show(args, api_key, team_id):
     count = int(proj.get("scope") or 0)
     print(f"{proj['name']}")
     print(f"  State:    {proj.get('state', '-')}")
+    print(f"  Priority: {PRIORITY_MAP.get(proj.get('priority') or 0, '-')}")
     print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
     print(f"  Issues:   {count}")
     print(f"  Lead:     {lead}")
@@ -3290,7 +3292,7 @@ def _project_create(args, api_key, team_id):
 def _project_update(args, api_key, team_id):
     """Update a project via projectUpdate. Strict name resolution — a mistyped
     project aborts rather than no-opping. Supports description, name, lead,
-    start/target TimelessDates, and state (resolved to statusId)."""
+    start/target TimelessDates, priority, and state (resolved to statusId)."""
     try:
         pid = resolve_project_id(api_key, team_id, args.project, strict=True)
     except LookupError as e:
@@ -3330,6 +3332,10 @@ def _project_update(args, api_key, team_id):
     if getattr(args, "target", None) is not None:
         input_obj["targetDate"] = parse_timeless_date(args.target, "--target")
 
+    if getattr(args, "priority", None) is not None:
+        # Same names as issue --priority: urgent, high, medium, low, none.
+        input_obj["priority"] = parse_priority(args.priority)
+
     if getattr(args, "state", None) is not None:
         try:
             input_obj["statusId"] = resolve_project_status_id(api_key, args.state)
@@ -3339,7 +3345,7 @@ def _project_update(args, api_key, team_id):
 
     if not input_obj:
         print("Nothing to update. Use --description, --name, --lead, "
-              "--start, --target, or --state.", file=sys.stderr)
+              "--start, --target, --priority, or --state.", file=sys.stderr)
         sys.exit(1)
 
     data = gql(api_key, """
@@ -3347,7 +3353,7 @@ def _project_update(args, api_key, team_id):
             projectUpdate(id: $id, input: $input) {
                 success
                 project {
-                    id name state description
+                    id name state description priority
                     startDate targetDate
                     lead { name email }
                     status { id name type }
@@ -3365,6 +3371,7 @@ def _project_update(args, api_key, team_id):
     lead = (p.get("lead") or {}).get("name") or "-"
     print(f"Updated project '{p['name']}'  ({p['id']})")
     print(f"  State:    {p.get('state') or (p.get('status') or {}).get('type') or '-'}")
+    print(f"  Priority: {PRIORITY_MAP.get(p.get('priority') or 0, '-')}")
     print(f"  Lead:     {lead}")
     print(f"  Start:    {p.get('startDate') or '-'}")
     print(f"  Target:   {p.get('targetDate') or '-'}")
@@ -4636,7 +4643,7 @@ def main():
     ps_create.add_argument("--lead", default=None, metavar="EMAIL", help="Lead by email")
     ps_create.add_argument("--start", default=None, metavar="YYYY-MM-DD", help="Start date")
     ps_create.add_argument("--target", default=None, metavar="YYYY-MM-DD", help="Target date")
-    ps_update = proj_sub.add_parser("update", help="Update a project (description, lead, dates, state)")
+    ps_update = proj_sub.add_parser("update", help="Update a project (description, lead, dates, priority, state)")
     ps_update.add_argument("project", help="Project name or id (strict)")
     ps_update.add_argument("--name", default=None, help="Rename the project")
     ps_update.add_argument("--description", default=None, help="Set project description")
@@ -4648,6 +4655,8 @@ def main():
                            help="Start date; 'none' clears")
     ps_update.add_argument("--target", default=None, metavar="YYYY-MM-DD",
                            help="Target date; 'none' clears")
+    ps_update.add_argument("--priority", default=None,
+                           help="Project priority: urgent, high, medium, low, or none")
     ps_update.add_argument("--state", default=None,
                            help="Project state/status: backlog|planned|started|paused|"
                                 "completed|canceled, or a status name")

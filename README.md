@@ -110,6 +110,7 @@ linear projects                       # list projects + progress + issue count
 linear projects "Phoenix"             # detail view: milestones with per-milestone % done
 linear projects create --name "Phoenix" --lead you@co.com --target 2026-09-30
 linear projects update "Phoenix" --description "..."  # description / lead / dates / state
+linear projects update "Phoenix" --priority low       # urgent | high | medium | low | none
 linear projects archive "Old Project" # remove a project (moves to trash)
 linear initiatives                    # workspace initiatives (list / show / create / link)
 linear initiatives "Company goal"     # detail + linked projects with progress

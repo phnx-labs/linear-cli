@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`linear projects update --priority`** — set a project's priority
+  (`urgent|high|medium|low|none`), the same names `--priority` already takes on
+  issues. Previously the only way to change a project's priority from the CLI
+  was a raw `projectUpdate` GraphQL call.
+- **Priority is now readable.** `linear projects` prints a Priority column and
+  `linear projects <name>` prints a `Priority:` line, so a change made with
+  `--priority` can be confirmed without opening Linear.
+
 ## [0.18.0] - 2026-08-09
 
 ### Added
