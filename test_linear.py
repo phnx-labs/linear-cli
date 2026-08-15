@@ -1808,6 +1808,65 @@ class CloseQueueTest(unittest.TestCase):
             self.assertIn("attempts=0", out)
 
 
+class WindowsLockFallbackTest(unittest.TestCase):
+    """`import fcntl` at module scope broke every command on Windows (v0.18.0,
+    v0.19.0): `linear --version` died with ModuleNotFoundError before argparse
+    ran. The import is optional now and the lock dispatches per platform."""
+
+    def test_fcntl_import_is_optional(self):
+        # The name must exist either way — None on Windows, the module on POSIX.
+        self.assertTrue(hasattr(linear_cli, "fcntl"))
+        self.assertTrue(hasattr(linear_cli, "msvcrt"))
+
+    def test_windows_path_uses_msvcrt_locking(self):
+        calls = []
+
+        class FakeMsvcrt:
+            LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+            @staticmethod
+            def locking(fd, mode, nbytes):
+                calls.append((mode, nbytes))
+
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None            # simulate Windows
+        linear_cli.msvcrt = FakeMsvcrt
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    self.assertTrue(linear_cli._lock_fd(fd, blocking=False))
+                    linear_cli._unlock_fd(fd)
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
+
+        self.assertEqual(calls, [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)])
+
+    def test_contended_windows_lock_reports_not_held(self):
+        class FakeMsvcrt:
+            LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+            @staticmethod
+            def locking(fd, mode, nbytes):
+                raise OSError(36, "Resource deadlock avoided")
+
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None
+        linear_cli.msvcrt = FakeMsvcrt
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    # Must be False, not an exception — the caller skips the drain.
+                    self.assertFalse(linear_cli._lock_fd(fd, blocking=False))
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
+
+
 class ProjectPriorityTest(unittest.TestCase):
     """`projects update --priority` must reach projectUpdate as an Int."""
 
