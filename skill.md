@@ -24,6 +24,7 @@ linear create "Title" --label foo --priority high --description "..."
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
 linear projects update "Name" --description "..."  # set description / lead / dates / state
+linear projects update "Name" --priority low      # project priority (shown by `linear projects`)
 linear initiatives                    # workspace initiatives (list / show / create / link)
 linear milestones list "Name"         # a project's milestones
 linear labels                         # list available labels
@@ -122,6 +123,7 @@ linear projects                                       # list + progress + issue 
 linear projects "Rush App"                            # detail: exact name or id
 linear projects create --name "Rush App" --lead you@co.com --target 2026-09-30
 linear projects update "Rush App" --description "..." # set description / lead / dates / state
+linear projects update "Rush App" --priority low      # urgent|high|medium|low|none
 linear projects archive "Old Project"                 # remove (moves to Linear trash)
 
 linear initiatives                                    # workspace initiatives

@@ -1808,5 +1808,56 @@ class CloseQueueTest(unittest.TestCase):
             self.assertIn("attempts=0", out)
 
 
+class ProjectPriorityTest(unittest.TestCase):
+    """`projects update --priority` must reach projectUpdate as an Int."""
+
+    def _run(self, priority):
+        sent = {}
+
+        def fake_gql(_key, query, variables=None):
+            sent["query"] = query
+            sent["input"] = (variables or {}).get("input")
+            return {"data": {"projectUpdate": {
+                "success": True,
+                "project": {"id": "p1", "name": "CLIs", "state": "backlog",
+                            "priority": (variables or {})["input"].get("priority"),
+                            "description": "", "startDate": None,
+                            "targetDate": None, "lead": None, "status": None},
+            }}}
+
+        args = types.SimpleNamespace(
+            project="CLIs", name=None, description=None, description_file=None,
+            lead=None, start=None, target=None, priority=priority, state=None,
+        )
+        original_gql = linear_cli.gql
+        original_resolve = linear_cli.resolve_project_id
+        linear_cli.gql = fake_gql
+        linear_cli.resolve_project_id = lambda *a, **k: "p1"
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                linear_cli._project_update(args, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original_gql
+            linear_cli.resolve_project_id = original_resolve
+        return sent, buf.getvalue()
+
+    def test_named_priority_maps_to_linear_int(self):
+        # low -> 4 is what Linear's ProjectUpdateInput.priority expects; sending
+        # the string would be accepted-looking locally and rejected by the API.
+        sent, out = self._run("low")
+        self.assertEqual(sent["input"], {"priority": 4})
+        self.assertIn("projectUpdate", sent["query"])
+        self.assertIn("Priority: Low", out)
+
+    def test_none_clears_to_no_priority(self):
+        sent, _ = self._run("none")
+        self.assertEqual(sent["input"], {"priority": 0})
+
+    def test_invalid_priority_aborts_without_writing(self):
+        with self.assertRaises(SystemExit):
+            self._run("sorta-urgent")
+
+
 if __name__ == "__main__":
     unittest.main()
