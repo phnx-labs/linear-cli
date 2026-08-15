@@ -1844,6 +1844,52 @@ class WindowsLockFallbackTest(unittest.TestCase):
 
         self.assertEqual(calls, [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)])
 
+    def test_blocking_windows_lock_retries_past_lk_lock_timeout(self):
+        # LK_LOCK gives up after ~10s where flock's LOCK_EX waits forever.
+        # blocking=True must keep retrying, not report "not held".
+        attempts = []
+
+        class FakeMsvcrt:
+            LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+            @staticmethod
+            def locking(fd, mode, nbytes):
+                attempts.append(mode)
+                if len(attempts) < 3:
+                    raise OSError(36, "timed out, still held")
+
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None
+        linear_cli.msvcrt = FakeMsvcrt
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    self.assertTrue(linear_cli._lock_fd(fd, blocking=True))
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
+
+        self.assertEqual(attempts, [FakeMsvcrt.LK_LOCK] * 3)
+
+    def test_no_backend_warns_instead_of_silently_claiming_the_lock(self):
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None
+        linear_cli.msvcrt = None
+        err = io.StringIO()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    with contextlib.redirect_stderr(err):
+                        self.assertTrue(linear_cli._lock_fd(fd, blocking=False))
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
+        self.assertIn("not serialized", err.getvalue())
+
     def test_contended_windows_lock_reports_not_held(self):
         class FakeMsvcrt:
             LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0

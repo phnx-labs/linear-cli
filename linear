@@ -458,18 +458,30 @@ def _lock_fd(fd: int, blocking: bool) -> bool:
         except (BlockingIOError, OSError):
             return False
     if msvcrt is not None:
-        # Byte-range lock on the first byte. LK_LOCK retries ~10s then raises;
-        # LK_NBLCK fails immediately — the same blocking/non-blocking split.
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        # Byte-range lock on the first byte, from the current file position —
+        # hence the seek before both lock and unlock.
+        #
+        # LK_LOCK is NOT flock's LOCK_EX: it retries for ~10s and then raises,
+        # where LOCK_EX waits forever. Loop it so blocking=True means blocking
+        # on both platforms instead of quietly returning "not held" after 10s.
         try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, mode, 1)
-            return True
-        except OSError:
+            while True:
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                    return True
+                except OSError:
+                    if not blocking:
+                        return False
+                    # blocking: LK_LOCK timed out with the lock still held
+                    # elsewhere — keep waiting, same as LOCK_EX would.
+        except KeyboardInterrupt:
             return False
-    # No OS locking primitive: single-process correctness only. Concurrent
-    # drains on such a platform are not serialized — say so rather than
-    # pretending the lock was taken.
+    # Neither backend exists (not a platform Python actually ships today: POSIX
+    # has fcntl, Windows has msvcrt). Nothing serializes concurrent drains here,
+    # so warn rather than let a caller believe it holds an exclusive lock.
+    print("warning: no file-locking primitive on this platform; concurrent "
+          "`queue drain` runs are not serialized.", file=sys.stderr)
     return True
 
 
