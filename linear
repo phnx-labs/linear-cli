@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import difflib
+import errno
 import json
 import mimetypes
 import os
@@ -55,6 +56,15 @@ try:
     import msvcrt
 except ImportError:  # POSIX
     msvcrt = None
+
+# msvcrt.locking reports contention as EDEADLOCK (Windows spells it that way;
+# POSIX errno only has EDEADLK) or EACCES. Resolved once, defensively, so the
+# lookup can't AttributeError on whichever platform is running.
+_LOCK_CONTENDED_ERRNOS = tuple(
+    e for e in (getattr(errno, "EDEADLOCK", None), getattr(errno, "EDEADLK", None),
+                getattr(errno, "EACCES", None))
+    if e is not None
+)
 
 __version__ = "0.19.0"
 
@@ -464,23 +474,25 @@ def _lock_fd(fd: int, blocking: bool) -> bool:
         # LK_LOCK is NOT flock's LOCK_EX: it retries for ~10s and then raises,
         # where LOCK_EX waits forever. Loop it so blocking=True means blocking
         # on both platforms instead of quietly returning "not held" after 10s.
-        try:
-            while True:
-                os.lseek(fd, 0, os.SEEK_SET)
-                try:
-                    msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
-                    return True
-                except OSError:
-                    if not blocking:
-                        return False
-                    # blocking: LK_LOCK timed out with the lock still held
-                    # elsewhere — keep waiting, same as LOCK_EX would.
-        except KeyboardInterrupt:
-            return False
+        while True:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError as exc:
+                if not blocking:
+                    return False
+                # Contention is EDEADLOCK (LK_LOCK gave up after its own ~10s of
+                # retries) or EACCES. Keep waiting on those, the way LOCK_EX
+                # would. Anything else is a real I/O failure — surface it rather
+                # than retry a broken fd forever.
+                if exc.errno not in _LOCK_CONTENDED_ERRNOS:
+                    raise
+                # Ctrl-C during the wait propagates, same as on POSIX.
     # Neither backend exists (not a platform Python actually ships today: POSIX
     # has fcntl, Windows has msvcrt). Nothing serializes concurrent drains here,
     # so warn rather than let a caller believe it holds an exclusive lock.
-    print("warning: no file-locking primitive on this platform; concurrent "
+    print("Warning: no file-locking primitive on this platform; concurrent "
           "`queue drain` runs are not serialized.", file=sys.stderr)
     return True
 

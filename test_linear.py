@@ -5,6 +5,7 @@ The CLI is intentionally dependency-free, so tests use only stdlib unittest.
 """
 
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -1856,7 +1857,8 @@ class WindowsLockFallbackTest(unittest.TestCase):
             def locking(fd, mode, nbytes):
                 attempts.append(mode)
                 if len(attempts) < 3:
-                    raise OSError(36, "timed out, still held")
+                    raise OSError(linear_cli._LOCK_CONTENDED_ERRNOS[0],
+                                  "timed out, still held")
 
         original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
         linear_cli.fcntl = None
@@ -1872,6 +1874,55 @@ class WindowsLockFallbackTest(unittest.TestCase):
             linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
 
         self.assertEqual(attempts, [FakeMsvcrt.LK_LOCK] * 3)
+
+    def test_real_io_error_surfaces_instead_of_retrying_forever(self):
+        # EDEADLOCK/EACCES mean "still contended, keep waiting". A bad fd is a
+        # real failure — retrying it forever would hang the drain silently.
+        class FakeMsvcrt:
+            LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+            @staticmethod
+            def locking(fd, mode, nbytes):
+                raise OSError(errno.EBADF, "bad file descriptor")
+
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None
+        linear_cli.msvcrt = FakeMsvcrt
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    with self.assertRaises(OSError) as ctx:
+                        linear_cli._lock_fd(fd, blocking=True)
+                    self.assertEqual(ctx.exception.errno, errno.EBADF)
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
+
+    def test_keyboard_interrupt_propagates_like_posix(self):
+        # Ctrl-C during a blocking wait must not be reported as "lock held by
+        # another process" — POSIX lets it propagate, so Windows must too.
+        class FakeMsvcrt:
+            LK_LOCK, LK_NBLCK, LK_UNLCK = 1, 2, 0
+
+            @staticmethod
+            def locking(fd, mode, nbytes):
+                raise KeyboardInterrupt
+
+        original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
+        linear_cli.fcntl = None
+        linear_cli.msvcrt = FakeMsvcrt
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                fd = os.open(os.path.join(d, "lk"), os.O_CREAT | os.O_RDWR)
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        linear_cli._lock_fd(fd, blocking=True)
+                finally:
+                    os.close(fd)
+        finally:
+            linear_cli.fcntl, linear_cli.msvcrt = original_fcntl, original_msvcrt
 
     def test_no_backend_warns_instead_of_silently_claiming_the_lock(self):
         original_fcntl, original_msvcrt = linear_cli.fcntl, linear_cli.msvcrt
