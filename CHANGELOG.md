@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-08-14
+
+### Fixed
+
+- **Windows: the CLI ran at all.** `import fcntl` sat at module scope, so every
+  command — not just `queue` — died with `ModuleNotFoundError` on Windows from
+  v0.18.0 onward. `fcntl` and `msvcrt` are both optional imports now, and the
+  drain lock dispatches per platform: `fcntl.flock` on POSIX,
+  `msvcrt.locking` on Windows.
+- Windows `LK_LOCK` gives up after ~10s where `flock`'s `LOCK_EX` waits
+  forever; `blocking=True` retries instead of reporting the timeout as "another
+  drain holds the lock".
+- A real I/O error during a blocking lock (bad fd, invalid argument) is raised
+  instead of retried forever. Only documented contention codes retry.
+
 ## [0.19.0] - 2026-08-14
 
 ### Added
