@@ -1190,6 +1190,29 @@ def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
     return (None, None)
 
 
+def resolve_auto_project_id(api_key: str, team_id: str, value: str) -> str | None:
+    """Validate an auto-detected (cwd) project id/name against the team's live
+    projects. Returns the matching projectId, or None when it doesn't match.
+
+    NEVER raises and never exits — the key difference from
+    resolve_project_id(strict=True). An explicit --project that doesn't resolve
+    is a user typo worth aborting on (RUSH-1496); an auto-detected value that
+    doesn't resolve just means the `agents projects` binding drifted (a project
+    renamed/recreated, or a stale recorded id) — a condition outside this CLI's
+    control that must fall back to the unscoped view, not brick the most-common
+    command. Membership is checked against the live project list, so it also
+    catches a stale-but-UUID-shaped id that resolve_project_id's shape-only UUID
+    passthrough would wave through into a filter that silently matches nothing.
+    """
+    if not value:
+        return None
+    want = value.lower()
+    for p in list_team_projects(api_key, team_id):
+        if p.get("id") == value or (p.get("name") or "").lower() == want:
+            return p.get("id")
+    return None
+
+
 def list_project_statuses(api_key: str) -> list[dict]:
     """Workspace project statuses (Backlog / Planned / In Progress / ...)."""
     data = gql(api_key, """
@@ -2076,23 +2099,42 @@ def list_tasks(args, cfg, api_key, team_id):
     #      auto-scope to it — cwd behaves like an implicit --project.
     # This is the fix for "an agent launched in a project subfolder lists every
     # project's tasks and picks the wrong one". Opt out with `autoScope: false`
-    # in config. Fail-open: an unbound cwd resolves to None and nothing changes.
+    # in config.
+    #
+    # The two sources have DIFFERENT failure policies: a mistyped --project must
+    # abort (RUSH-1496), but a stale/malformed cwd binding — which comes from
+    # `agents projects`, outside this CLI's control — must fall back to the
+    # unscoped view, never brick the single most-common command. So the explicit
+    # path resolves strictly (crash on no-match) and the auto path validates
+    # fail-open (drift -> None -> unscoped + a one-line stderr note).
     explicit_project = getattr(args, "project", None)
-    project = explicit_project
+    pid = None
     auto_project_name = None
-    if not project and not args.all and cfg.get("autoScope", True) is not False:
+    if explicit_project:
+        try:
+            pid = resolve_project_id(api_key, team_id, explicit_project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif not args.all and cfg.get("autoScope", True) is not False:
         cwd_pid, cwd_pname = resolve_cwd_project()
         if cwd_pid:
-            project = cwd_pid
-            auto_project_name = cwd_pname or cwd_pid
+            pid = resolve_auto_project_id(api_key, team_id, cwd_pid)
+            if pid:
+                auto_project_name = cwd_pname or cwd_pid
+            else:
+                print(f"linear: the current directory's project "
+                      f"'{cwd_pname or cwd_pid}' (from agents projects) is not a "
+                      f"live project on this team — showing the whole team. Use "
+                      f"--project to scope explicitly.", file=sys.stderr)
 
     filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
 
     # Cycle scope. active/next resolve to a concrete cycle id (and a header
     # name); `all` drops the cycle filter; `none`/`backlog` lists the backlog;
-    # any other value is treated as a cycle name or id and resolved. A project
-    # scope (explicit or auto) widens to all cycles.
-    scope = resolve_task_scope(args.cycle, project,
+    # any other value is treated as a cycle name or id and resolved. A resolved
+    # project scope (explicit or auto) widens to all cycles.
+    scope = resolve_task_scope(args.cycle, pid,
                                getattr(args, "milestone", None))
     fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
     if fragment is None:
@@ -2159,17 +2201,9 @@ def list_tasks(args, cfg, api_key, team_id):
     if args.label:
         filters.append(f'labels: {{ name: {{ eq: "{args.label}" }} }}')
 
-    # Project scope. Strict resolution: a mistyped project must abort, not
-    # silently drop the filter and return the whole team queue (unattended
-    # consumers act on whatever this lists). `project` was resolved up front
-    # (explicit --project, or the auto-detected cwd project id).
-    pid = None
-    if project:
-        try:
-            pid = resolve_project_id(api_key, team_id, project, strict=True)
-        except LookupError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+    # Project scope filter. `pid` was resolved up front: an explicit --project
+    # crashed on a typo, an auto-detected cwd project fell back to None on drift.
+    if pid:
         filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
 
     # Milestone scope. Strict like --project: a mistyped milestone aborts rather
@@ -2251,7 +2285,7 @@ def list_tasks(args, cfg, api_key, team_id):
             # The effective project scope, so machine consumers can tell an
             # auto-scoped queue from the whole workspace. Null when unscoped.
             "project": ({"id": pid, "name": auto_project_name or explicit_project,
-                         "auto": bool(auto_project_name)} if project else None),
+                         "auto": bool(auto_project_name)} if pid else None),
             "count": len(nodes),
             "issues": nodes,
         }, indent=2))
@@ -2279,7 +2313,7 @@ def list_tasks(args, cfg, api_key, team_id):
     # Group by milestone when asked (--by-milestone) or when scoped to a project
     # (the natural project view). The milestone name is already on each issue via
     # ISSUE_FIELDS, so this is a local group-by with no extra API calls.
-    if getattr(args, "by_milestone", False) or bool(project):
+    if getattr(args, "by_milestone", False) or bool(pid):
         print_by_milestone(nodes)
     else:
         for n in nodes:
@@ -2306,9 +2340,11 @@ def show_board(args, api_key, team_id, cfg):
     if fragment:
         filters.append(fragment)
 
-    # Same project scoping as list_tasks: an explicit --project wins, --all shows
-    # every project, otherwise the board auto-scopes to the cwd's project so a
-    # board opened inside a project folder is that project's board. Fail-open.
+    # Same project scoping (and the same split failure policy) as list_tasks: an
+    # explicit --project resolves strictly and aborts on a typo; --all shows
+    # every project; otherwise the board auto-scopes to the cwd's project,
+    # validated fail-open so a stale/malformed binding falls back to the whole
+    # team instead of rendering a misleadingly-empty board.
     explicit_project = getattr(args, "project", None)
     auto_project_name = None
     pid = None
@@ -2319,7 +2355,16 @@ def show_board(args, api_key, team_id, cfg):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     elif not getattr(args, "all", False) and cfg.get("autoScope", True) is not False:
-        pid, auto_project_name = resolve_cwd_project()
+        cwd_pid, cwd_pname = resolve_cwd_project()
+        if cwd_pid:
+            pid = resolve_auto_project_id(api_key, team_id, cwd_pid)
+            if pid:
+                auto_project_name = cwd_pname or cwd_pid
+            else:
+                print(f"linear: the current directory's project "
+                      f"'{cwd_pname or cwd_pid}' (from agents projects) is not a "
+                      f"live project on this team — showing the whole team. Use "
+                      f"--project to scope explicitly.", file=sys.stderr)
     if pid:
         filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
 
