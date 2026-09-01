@@ -1148,9 +1148,10 @@ def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
     The directory -> project mapping is owned by the `agents` CLI: `agents
     projects` binds a repo root and its monorepo subpaths to a Linear project
     (`linear.projectId` / `linear.name`). We ask it rather than re-deriving the
-    mapping, because `for-cwd` does a longest-match over every bound root and
-    subpath — a worktree, a subdir, and two projects sharing one monorepo root
-    all resolve correctly, none of which a basename comparison could do.
+    mapping, because `projects view <dir>` does a longest-match over every bound
+    root and subpath — a worktree, a subdir, and two projects sharing one
+    monorepo root all resolve correctly, none of which a basename comparison
+    could do.
 
     Returns (projectId, projectName), or (None, None) when nothing claims this
     directory. Fail-open by design: no `agents` on PATH, no def for this cwd, a
@@ -1158,36 +1159,26 @@ def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
     the caller falls back to the unscoped team view. Never raises — this runs on
     the hot path of the most-used command and must not brick it.
 
-    Two bounded subprocess calls, ~0.3s each on an idle box. `for-cwd` returns
-    the LOCAL def name ("prix"); `list` carries the Linear binding, and several
-    defs may point at one project, so the id/name come from the matched def.
+    One bounded subprocess call (~0.3s on an idle box): `agents projects view .
+    --json` longest-matches the cwd and returns `{name, linear:{name,
+    projectId}, root}` in a single shot (an unmatched cwd returns those fields
+    as null with exit 0).
     """
-    def _agents_json(*argv: str):
-        try:
-            out = subprocess.run(["agents", *argv], capture_output=True,
-                                 text=True, timeout=timeout)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return None
-        if out.returncode != 0 or not out.stdout.strip():
-            return None
-        try:
-            return json.loads(out.stdout)
-        except (ValueError, TypeError):
-            return None
-
-    for_cwd = _agents_json("projects", "for-cwd", "--json")
-    def_name = (for_cwd or {}).get("name") if isinstance(for_cwd, dict) else None
-    if not def_name:
+    try:
+        out = subprocess.run(["agents", "projects", "view", ".", "--json"],
+                             capture_output=True, text=True, timeout=timeout)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return (None, None)
-
-    defs = _agents_json("projects", "list", "--json")
-    if not isinstance(defs, list):
+    if out.returncode != 0 or not out.stdout.strip():
         return (None, None)
-    for d in defs:
-        if isinstance(d, dict) and d.get("name") == def_name:
-            lin = d.get("linear") or {}
-            return (lin.get("projectId"), lin.get("name"))
-    return (None, None)
+    try:
+        data = json.loads(out.stdout)
+    except (ValueError, TypeError):
+        return (None, None)
+    if not isinstance(data, dict):
+        return (None, None)
+    lin = data.get("linear") or {}
+    return (lin.get("projectId"), lin.get("name"))
 
 
 def resolve_auto_project_id(api_key: str, team_id: str, value: str) -> str | None:
