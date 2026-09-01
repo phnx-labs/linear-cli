@@ -777,18 +777,20 @@ class ResolveCwdProjectTest(unittest.TestCase):
         self.addCleanup(lambda: setattr(linear_cli.subprocess, "run", original))
 
     def test_resolves_cwd_to_bound_linear_project(self):
+        # One call: `projects view . --json` returns the matched project's
+        # Linear binding directly.
         self._with_run(self._fake_run({
-            "projects for-cwd --json": (0, json.dumps({"name": "prix"})),
-            "projects list --json": (0, json.dumps([
-                {"name": "other", "linear": {"projectId": _OTHER_UUID, "name": "Other"}},
-                {"name": "prix", "linear": {"projectId": _PRIX_UUID, "name": "Prix"}},
-            ])),
+            "projects view . --json": (0, json.dumps(
+                {"name": "prix", "linear": {"projectId": _PRIX_UUID, "name": "Prix"},
+                 "root": "~/src/agents"})),
         }))
         self.assertEqual(linear_cli.resolve_cwd_project(), (_PRIX_UUID, "Prix"))
 
     def test_unbound_cwd_is_none(self):
+        # An unmatched cwd: view returns null fields (exit 0).
         self._with_run(self._fake_run({
-            "projects for-cwd --json": (0, json.dumps({"name": None})),
+            "projects view . --json": (0, json.dumps(
+                {"name": None, "linear": {"name": None, "projectId": None}, "root": None})),
         }))
         self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
 
@@ -799,14 +801,13 @@ class ResolveCwdProjectTest(unittest.TestCase):
 
     def test_nonzero_exit_is_none(self):
         self._with_run(self._fake_run({
-            "projects for-cwd --json": (1, ""),
+            "projects view . --json": (1, ""),
         }))
         self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
 
-    def test_def_without_linear_binding_is_none(self):
+    def test_view_without_linear_binding_is_none(self):
         self._with_run(self._fake_run({
-            "projects for-cwd --json": (0, json.dumps({"name": "prix"})),
-            "projects list --json": (0, json.dumps([{"name": "prix"}])),
+            "projects view . --json": (0, json.dumps({"name": "prix"})),
         }))
         self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
 
