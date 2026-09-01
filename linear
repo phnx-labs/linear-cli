@@ -2321,30 +2321,12 @@ def list_tasks(args, cfg, api_key, team_id):
 
 
 def show_board(args, api_key, team_id, cfg):
-    # Same cycle scoping as list_tasks (active/next/all/none/name/id), so the
-    # board no longer hits the non-existent team.nextCycle field, and it
-    # paginates instead of silently capping at 50 open issues.
-    # --cycle defaults to None at the parser (so list_tasks can widen it); the
-    # board has no project/milestone scope to widen for, so None means active —
-    # normalize here so the --json "scope" field stays "active", not null.
-    scope = args.cycle or "active"
-    fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
-    if fragment is None:
-        print(f"Could not resolve --cycle '{scope}'.")
-        return
-
-    filters = [
-        f'team: {{ id: {{ eq: "{team_id}" }} }}',
-        'state: { type: { nin: ["completed", "canceled"] } }',
-    ]
-    if fragment:
-        filters.append(fragment)
-
-    # Same project scoping (and the same split failure policy) as list_tasks: an
-    # explicit --project resolves strictly and aborts on a typo; --all shows
-    # every project; otherwise the board auto-scopes to the cwd's project,
-    # validated fail-open so a stale/malformed binding falls back to the whole
-    # team instead of rendering a misleadingly-empty board.
+    # Full parity with list_tasks: an explicit --project resolves strictly and
+    # aborts on a typo; --all shows every project; otherwise the board
+    # auto-scopes to the cwd's project, validated fail-open so a stale/malformed
+    # binding falls back to the whole team instead of rendering a
+    # misleadingly-empty board. Resolved BEFORE the cycle scope, because — like
+    # list_tasks — a project scope widens the cycle to the whole deliverable.
     explicit_project = getattr(args, "project", None)
     auto_project_name = None
     pid = None
@@ -2365,6 +2347,25 @@ def show_board(args, api_key, team_id, cfg):
                       f"'{cwd_pname or cwd_pid}' (from agents projects) is not a "
                       f"live project on this team — showing the whole team. Use "
                       f"--project to scope explicitly.", file=sys.stderr)
+
+    # Same cycle scoping as list_tasks (active/next/all/none/name/id), so the
+    # board no longer hits the non-existent team.nextCycle field, and it
+    # paginates instead of silently capping at 50 open issues. --cycle defaults
+    # to None at the parser; a project scope widens to all cycles (the whole
+    # deliverable), otherwise the board's default is the active cycle — and
+    # normalizing None here keeps the --json "scope" field a string, not null.
+    scope = args.cycle or ("all" if pid else "active")
+    fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
+    if fragment is None:
+        print(f"Could not resolve --cycle '{scope}'.")
+        return
+
+    filters = [
+        f'team: {{ id: {{ eq: "{team_id}" }} }}',
+        'state: { type: { nin: ["completed", "canceled"] } }',
+    ]
+    if fragment:
+        filters.append(fragment)
     if pid:
         filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
 
