@@ -597,7 +597,8 @@ def _run_board(nodes, cfg=None, cwd_project=(None, None), **overrides):
     cfg = {} if cfg is None else cfg
     captured = {}
     saved = {n: getattr(linear_cli, n)
-             for n in ("build_cycle_scope", "paginate_issues", "resolve_cwd_project")}
+             for n in ("build_cycle_scope", "paginate_issues", "resolve_cwd_project",
+                       "list_team_projects")}
     linear_cli.build_cycle_scope = lambda a, t, s: (
         'cycle: { id: { eq: "x" } }', "Active cycle", {"id": "x"})
 
@@ -606,6 +607,10 @@ def _run_board(nodes, cfg=None, cwd_project=(None, None), **overrides):
         return list(nodes)
     linear_cli.paginate_issues = _pag
     linear_cli.resolve_cwd_project = lambda *a, **k: cwd_project
+    linear_cli.list_team_projects = lambda a, t: [
+        {"id": _PRIX_UUID, "name": "Prix"},
+        {"id": _OTHER_UUID, "name": "Other"},
+    ]
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
@@ -633,6 +638,13 @@ class BoardJsonScopeTest(unittest.TestCase):
 
     def test_board_all_disables_auto_scope(self):
         out = _run_board([], cwd_project=(_PRIX_UUID, "Prix"), all=True)
+        self.assertIsNone(out["project"])
+        self.assertNotIn("project:", out["_last_filter"])
+
+    def test_board_drifted_binding_falls_back_to_unscoped(self):
+        # Parity with list_tasks: a cwd id that is not a live project must leave
+        # the board unscoped instead of rendering a misleadingly-empty board.
+        out = _run_board([], cwd_project=("99999999-9999-9999-9999-999999999999", "Ghost"))
         self.assertIsNone(out["project"])
         self.assertNotIn("project:", out["_last_filter"])
 
@@ -682,13 +694,19 @@ class _ListTasksHarness:
 
     def __enter__(self):
         for name in ("build_cycle_scope", "paginate_issues", "get_agents",
-                     "resolve_cwd_project"):
+                     "resolve_cwd_project", "list_team_projects"):
             self._saved[name] = getattr(linear_cli, name)
         linear_cli.build_cycle_scope = lambda a, t, s: (
             'cycle: { id: { eq: "x" } }', "Cycle 23", {"id": "x"})
         linear_cli.paginate_issues = self._capture_paginate
         linear_cli.get_agents = lambda a, c, force=False: list(self.ROSTER)
         linear_cli.resolve_cwd_project = lambda *a, **k: self.cwd_project
+        # The live project list resolve_auto_project_id validates the cwd id
+        # against. _PRIX_UUID is a member; an unknown id is treated as drift.
+        linear_cli.list_team_projects = lambda a, t: [
+            {"id": _PRIX_UUID, "name": "Prix"},
+            {"id": _OTHER_UUID, "name": "Other"},
+        ]
         return self
 
     def __exit__(self, *exc):
@@ -792,6 +810,35 @@ class ResolveCwdProjectTest(unittest.TestCase):
         self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
 
 
+class ResolveAutoProjectIdTest(unittest.TestCase):
+    """Auto-detected cwd project ids are validated fail-open (never raise/exit)."""
+
+    def _with_projects(self, projects):
+        original = linear_cli.list_team_projects
+        linear_cli.list_team_projects = lambda a, t: projects
+        self.addCleanup(lambda: setattr(linear_cli, "list_team_projects", original))
+
+    def test_matches_by_id(self):
+        self._with_projects([{"id": _PRIX_UUID, "name": "Prix"}])
+        self.assertEqual(linear_cli.resolve_auto_project_id("k", "t", _PRIX_UUID), _PRIX_UUID)
+
+    def test_matches_by_name_case_insensitive(self):
+        self._with_projects([{"id": _PRIX_UUID, "name": "Prix"}])
+        self.assertEqual(linear_cli.resolve_auto_project_id("k", "t", "prix"), _PRIX_UUID)
+
+    def test_unknown_id_returns_none_not_raise(self):
+        self._with_projects([{"id": _PRIX_UUID, "name": "Prix"}])
+        self.assertIsNone(linear_cli.resolve_auto_project_id("k", "t", "no-such-uuid"))
+
+    def test_empty_value_returns_none(self):
+        # No API call needed for an empty value.
+        self.assertIsNone(linear_cli.resolve_auto_project_id("k", "t", ""))
+
+    def test_empty_project_list_returns_none(self):
+        self._with_projects([])
+        self.assertIsNone(linear_cli.resolve_auto_project_id("k", "t", _PRIX_UUID))
+
+
 class CwdAutoScopeTest(unittest.TestCase):
     """`linear tasks` in a project-bound folder auto-scopes to that project."""
 
@@ -829,6 +876,25 @@ class CwdAutoScopeTest(unittest.TestCase):
     def test_autoscope_false_config_opts_out(self):
         out = _run_list(self._nodes(), cfg={"agent": "claude", "autoScope": False},
                         cwd_project=(_PRIX_UUID, "Prix"))
+        self.assertIsNone(out["project"])
+        self.assertNotIn("project:", out["_last_filter"])
+
+    def test_drifted_cwd_binding_falls_back_to_unscoped(self):
+        # `agents projects` resolves the cwd to a project id that is NOT a live
+        # project on this team (renamed/recreated project, stale recorded id).
+        # The auto path must fall back to the whole-team view — NOT sys.exit(1)
+        # the way an explicit --project typo does. (Regression: the BLOCKER.)
+        ghost = "99999999-9999-9999-9999-999999999999"
+        out = _run_list(self._nodes(), cwd_project=(ghost, "Ghost"))
+        self.assertIsNone(out["project"])
+        self.assertEqual(out["scope"], "active")
+        self.assertNotIn("project:", out["_last_filter"])
+
+    def test_drifted_non_uuid_binding_does_not_crash(self):
+        # A malformed (non-UUID) recorded id would hit resolve_project_id's name
+        # path and, under strict resolution, exit 1. The fail-open auto path must
+        # swallow it and show the whole team instead.
+        out = _run_list(self._nodes(), cwd_project=("some-slug", "Slug"))
         self.assertIsNone(out["project"])
         self.assertNotIn("project:", out["_last_filter"])
 

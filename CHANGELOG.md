@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mapping comes from the `agents projects` CLI (`for-cwd` does a longest-match
   over every bound root and monorepo subpath), consulted via two bounded,
   fail-open subprocess calls: no `agents` on `PATH`, no def for this cwd, or a
-  slow/broken call leaves the queue unscoped exactly as before. Overrides:
+  slow/broken call leaves the queue unscoped exactly as before. A cwd binding
+  that resolves to a project id which is not a live project on the team (a
+  renamed/recreated project or a stale recorded id) is also validated fail-open
+  — it falls back to the whole-team view with a one-line note, never aborting
+  the command the way a mistyped explicit `--project` does. Overrides:
   `--all` (whole team), `--project X` (a specific project), or `autoScope: false`
   in `~/.linear-cli/config.json` (disable globally). The `--json` output gains a
   `project: {id, name, auto}` field (null when unscoped) so consumers can tell an
