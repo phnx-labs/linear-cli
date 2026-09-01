@@ -66,7 +66,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.19.1"
+__version__ = "0.20.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -1142,6 +1142,54 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
     return match["id"]
 
 
+def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
+    """Best-effort: which Linear project owns the current working directory?
+
+    The directory -> project mapping is owned by the `agents` CLI: `agents
+    projects` binds a repo root and its monorepo subpaths to a Linear project
+    (`linear.projectId` / `linear.name`). We ask it rather than re-deriving the
+    mapping, because `for-cwd` does a longest-match over every bound root and
+    subpath — a worktree, a subdir, and two projects sharing one monorepo root
+    all resolve correctly, none of which a basename comparison could do.
+
+    Returns (projectId, projectName), or (None, None) when nothing claims this
+    directory. Fail-open by design: no `agents` on PATH, no def for this cwd, a
+    def with no Linear binding, or a slow/broken call all yield (None, None) and
+    the caller falls back to the unscoped team view. Never raises — this runs on
+    the hot path of the most-used command and must not brick it.
+
+    Two bounded subprocess calls, ~0.3s each on an idle box. `for-cwd` returns
+    the LOCAL def name ("prix"); `list` carries the Linear binding, and several
+    defs may point at one project, so the id/name come from the matched def.
+    """
+    def _agents_json(*argv: str):
+        try:
+            out = subprocess.run(["agents", *argv], capture_output=True,
+                                 text=True, timeout=timeout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        try:
+            return json.loads(out.stdout)
+        except (ValueError, TypeError):
+            return None
+
+    for_cwd = _agents_json("projects", "for-cwd", "--json")
+    def_name = (for_cwd or {}).get("name") if isinstance(for_cwd, dict) else None
+    if not def_name:
+        return (None, None)
+
+    defs = _agents_json("projects", "list", "--json")
+    if not isinstance(defs, list):
+        return (None, None)
+    for d in defs:
+        if isinstance(d, dict) and d.get("name") == def_name:
+            lin = d.get("linear") or {}
+            return (lin.get("projectId"), lin.get("name"))
+    return (None, None)
+
+
 def list_project_statuses(api_key: str) -> list[dict]:
     """Workspace project statuses (Backlog / Planned / In Progress / ...)."""
     data = gql(api_key, """
@@ -2014,15 +2062,37 @@ def list_tasks(args, cfg, api_key, team_id):
     (`all`, cross-cycle + backlog), or the backlog only (`none`).
     `--assignee EMAIL|me|none` filters by who the issue is assigned to.
     `--project NAME|UUID` scopes to one project (strict: unknown name aborts).
+    With no `--project` and no `--all`, the queue auto-scopes to the project
+    bound to the current directory (via `agents projects`), so an agent launched
+    inside a project folder sees that project's work, not the whole workspace.
     Tasks are sorted by priority, then due date (earliest first), then id.
     Results are fully paginated — no silent truncation at Linear's 50-issue cap.
     """
+    # Project scope, resolved up front because it also widens the cycle scope (a
+    # project view spans all cycles, not just the active one). Precedence:
+    #   1. explicit --project wins (existing behavior).
+    #   2. --all forces the whole-team view (auto-scope suppressed).
+    #   3. otherwise, when `agents projects` binds this cwd to a project,
+    #      auto-scope to it — cwd behaves like an implicit --project.
+    # This is the fix for "an agent launched in a project subfolder lists every
+    # project's tasks and picks the wrong one". Opt out with `autoScope: false`
+    # in config. Fail-open: an unbound cwd resolves to None and nothing changes.
+    explicit_project = getattr(args, "project", None)
+    project = explicit_project
+    auto_project_name = None
+    if not project and not args.all and cfg.get("autoScope", True) is not False:
+        cwd_pid, cwd_pname = resolve_cwd_project()
+        if cwd_pid:
+            project = cwd_pid
+            auto_project_name = cwd_pname or cwd_pid
+
     filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
 
     # Cycle scope. active/next resolve to a concrete cycle id (and a header
     # name); `all` drops the cycle filter; `none`/`backlog` lists the backlog;
-    # any other value is treated as a cycle name or id and resolved.
-    scope = resolve_task_scope(args.cycle, getattr(args, "project", None),
+    # any other value is treated as a cycle name or id and resolved. A project
+    # scope (explicit or auto) widens to all cycles.
+    scope = resolve_task_scope(args.cycle, project,
                                getattr(args, "milestone", None))
     fragment, scope_label, cycle_meta = build_cycle_scope(api_key, team_id, scope)
     if fragment is None:
@@ -2091,8 +2161,8 @@ def list_tasks(args, cfg, api_key, team_id):
 
     # Project scope. Strict resolution: a mistyped project must abort, not
     # silently drop the filter and return the whole team queue (unattended
-    # consumers act on whatever this lists).
-    project = getattr(args, "project", None)
+    # consumers act on whatever this lists). `project` was resolved up front
+    # (explicit --project, or the auto-detected cwd project id).
     pid = None
     if project:
         try:
@@ -2178,13 +2248,25 @@ def list_tasks(args, cfg, api_key, team_id):
         print(json.dumps({
             "scope": scope,
             "cycle": cycle_meta,
+            # The effective project scope, so machine consumers can tell an
+            # auto-scoped queue from the whole workspace. Null when unscoped.
+            "project": ({"id": pid, "name": auto_project_name or explicit_project,
+                         "auto": bool(auto_project_name)} if project else None),
             "count": len(nodes),
             "issues": nodes,
         }, indent=2))
         return
 
+    # When the cwd project auto-scoped the queue, say so — otherwise a short or
+    # empty list reads as "no work" when it just means "none in THIS project".
+    if auto_project_name:
+        print(f"Scope: {auto_project_name}  (auto-detected from this directory; "
+              f"--all for the whole team, --project X to override)")
+
     if not nodes:
-        print(f"No matching tasks in {scope_label}.")
+        hint = (f" (scoped to {auto_project_name}; try --all, or --cycle all "
+                f"for the backlog)") if auto_project_name else ""
+        print(f"No matching tasks in {scope_label}.{hint}")
         return
 
     header_note = ""
@@ -2224,6 +2306,23 @@ def show_board(args, api_key, team_id, cfg):
     if fragment:
         filters.append(fragment)
 
+    # Same project scoping as list_tasks: an explicit --project wins, --all shows
+    # every project, otherwise the board auto-scopes to the cwd's project so a
+    # board opened inside a project folder is that project's board. Fail-open.
+    explicit_project = getattr(args, "project", None)
+    auto_project_name = None
+    pid = None
+    if explicit_project:
+        try:
+            pid = resolve_project_id(api_key, team_id, explicit_project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif not getattr(args, "all", False) and cfg.get("autoScope", True) is not False:
+        pid, auto_project_name = resolve_cwd_project()
+    if pid:
+        filters.append(f'project: {{ id: {{ eq: "{pid}" }} }}')
+
     nodes = paginate_issues(api_key, ", ".join(filters))
     if nodes is None:
         return
@@ -2234,13 +2333,20 @@ def show_board(args, api_key, team_id, cfg):
         print(json.dumps({
             "scope": scope,
             "cycle": cycle_meta,
+            "project": ({"id": pid, "name": auto_project_name or explicit_project,
+                         "auto": bool(auto_project_name)} if pid else None),
             "count": len(nodes),
             "issues": nodes,
         }, indent=2))
         return
 
+    if auto_project_name:
+        print(f"Scope: {auto_project_name}  (auto-detected from this directory; "
+              f"--all for the whole team, --project X to override)")
+
     if not nodes:
-        print(f"No open tasks in {cycle_name}.")
+        hint = f" (scoped to {auto_project_name}; --all for the whole team)" if auto_project_name else ""
+        print(f"No open tasks in {cycle_name}.{hint}")
         return
 
     # Group by the native delegate. An issue has at most one delegate, so a board
@@ -4571,10 +4677,10 @@ def main():
     p_tasks = sub.add_parser("tasks", help="List tasks, view details, or show team board")
     p_tasks.add_argument("identifier", nargs="?", help="Issue identifier for detail view (e.g. ANT-42)")
     p_tasks.add_argument("--agent", help="Filter to the agent this issue is delegated to (e.g. --agent claude). See: linear agents")
-    p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter, show all")
+    p_tasks.add_argument("--all", action="store_true", help="Ignore default agent filter AND cwd project auto-scope; show the whole team")
     p_tasks.add_argument("--board", action="store_true", help="Team board grouped by agent")
     p_tasks.add_argument("--label", help="Filter by any label")
-    p_tasks.add_argument("--project", help="Filter by project (name or UUID)")
+    p_tasks.add_argument("--project", help="Filter by project (name or UUID). Defaults to the cwd's project when `agents projects` binds one; --all disables that.")
     p_tasks.add_argument("--milestone",
                          help="Filter by milestone (name or UUID). Pair with "
                               "--project to disambiguate a name across projects.")
