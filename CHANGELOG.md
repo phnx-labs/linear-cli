@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-01
+
+### Added
+
+- **`linear tasks` auto-scopes to the current directory's project.** With no
+  `--project` and no `--all`, the queue (and `--board`) now scope to the Linear
+  project bound to the current working directory, so an agent launched inside a
+  project folder sees that project's work instead of the entire workspace — the
+  fix for agents picking up tasks from the wrong project. The directory→project
+  mapping comes from the `agents projects` CLI (`for-cwd` does a longest-match
+  over every bound root and monorepo subpath), consulted via two bounded,
+  fail-open subprocess calls: no `agents` on `PATH`, no def for this cwd, or a
+  slow/broken call leaves the queue unscoped exactly as before. Overrides:
+  `--all` (whole team), `--project X` (a specific project), or `autoScope: false`
+  in `~/.linear-cli/config.json` (disable globally). The `--json` output gains a
+  `project: {id, name, auto}` field (null when unscoped) so consumers can tell an
+  auto-scoped queue from the full workspace.
+
 ## [0.19.1] - 2026-08-14
 
 ### Fixed

@@ -10,8 +10,9 @@ You have access to the `linear` CLI — a Linear task manager built for AI agent
 ## Core workflow
 
 ```
-linear tasks                          # your assigned queue in the active cycle
-linear tasks --board                  # whole team board, grouped by delegate
+linear tasks                          # your queue; auto-scoped to the cwd's project when one is bound
+linear tasks --all                    # ignore the cwd project auto-scope; whole team
+linear tasks --board                  # team board (also cwd-scoped), grouped by delegate
 linear tasks ANT-42                    # detail view for one issue
 linear update ANT-42 --pickup          # move to In Progress
 linear update ANT-42 --comment "..."    # drop a progress note

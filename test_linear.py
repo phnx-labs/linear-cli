@@ -8,6 +8,7 @@ import contextlib
 import errno
 import importlib.util
 import io
+import json
 import os
 import sys
 import tempfile
@@ -586,26 +587,54 @@ class MilestoneRollupQueryTypeTest(unittest.TestCase):
         self.assertNotIn("$pid: String", captured["query"])
 
 
+def _run_board(nodes, cfg=None, cwd_project=(None, None), **overrides):
+    """Drive show_board against a fixed page. Stubs the two network edges plus
+    resolve_cwd_project so the run is hermetic (no real `agents` shell-out)."""
+    args = types.SimpleNamespace(cycle=None, json=True, board=True,
+                                 all=False, project=None)
+    for k, v in overrides.items():
+        setattr(args, k, v)
+    cfg = {} if cfg is None else cfg
+    captured = {}
+    saved = {n: getattr(linear_cli, n)
+             for n in ("build_cycle_scope", "paginate_issues", "resolve_cwd_project")}
+    linear_cli.build_cycle_scope = lambda a, t, s: (
+        'cycle: { id: { eq: "x" } }', "Active cycle", {"id": "x"})
+
+    def _pag(_api, filter_str):
+        captured["filter"] = filter_str
+        return list(nodes)
+    linear_cli.paginate_issues = _pag
+    linear_cli.resolve_cwd_project = lambda *a, **k: cwd_project
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            linear_cli.show_board(args, "api-key", "team-id", cfg)
+    finally:
+        for n, fn in saved.items():
+            setattr(linear_cli, n, fn)
+    out = json.loads(buf.getvalue())
+    out["_last_filter"] = captured.get("filter")
+    return out
+
+
 class BoardJsonScopeTest(unittest.TestCase):
     def test_default_board_scope_is_active_not_null(self):
         # Regression guard: --cycle defaults to None at the parser (so list_tasks
         # can widen); the board must normalize None -> "active" so
         # `linear tasks --board --json` never emits "scope": null.
-        args = types.SimpleNamespace(cycle=None, json=True, board=True)
-        original_bcs = linear_cli.build_cycle_scope
-        original_pag = linear_cli.paginate_issues
-        linear_cli.build_cycle_scope = lambda a, t, s: (
-            'cycle: { id: { eq: "x" } }', "Active cycle", {"id": "x"})
-        linear_cli.paginate_issues = lambda a, f: []
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                linear_cli.show_board(args, "api-key", "team-id", {})
-        finally:
-            linear_cli.build_cycle_scope = original_bcs
-            linear_cli.paginate_issues = original_pag
-        import json as _json
-        self.assertEqual(_json.loads(buf.getvalue())["scope"], "active")
+        out = _run_board([])
+        self.assertEqual(out["scope"], "active")
+
+    def test_board_auto_scopes_to_cwd_project(self):
+        out = _run_board([], cwd_project=(_PRIX_UUID, "Prix"))
+        self.assertEqual(out["project"], {"id": _PRIX_UUID, "name": "Prix", "auto": True})
+        self.assertIn(f'project: {{ id: {{ eq: "{_PRIX_UUID}" }} }}', out["_last_filter"])
+
+    def test_board_all_disables_auto_scope(self):
+        out = _run_board([], cwd_project=(_PRIX_UUID, "Prix"), all=True)
+        self.assertIsNone(out["project"])
+        self.assertNotIn("project:", out["_last_filter"])
 
 
 def _issue(ident, delegate=None, labels=(), priority=2, state="Todo"):
@@ -638,17 +667,28 @@ class _ListTasksHarness:
     ROSTER = [{"id": "id-claude", "name": "Claude"},
               {"id": "id-codex", "name": "Codex"}]
 
-    def __init__(self, nodes):
+    def __init__(self, nodes, cwd_project=(None, None)):
         self.nodes = nodes
+        # What resolve_cwd_project() returns for this run. Default (None, None)
+        # = no cwd binding, so every pre-existing test keeps its unscoped
+        # behavior and never shells out to a real `agents` binary.
+        self.cwd_project = cwd_project
+        self.last_filter = None
         self._saved = {}
 
+    def _capture_paginate(self, _api, filter_str):
+        self.last_filter = filter_str
+        return list(self.nodes)
+
     def __enter__(self):
-        for name in ("build_cycle_scope", "paginate_issues", "get_agents"):
+        for name in ("build_cycle_scope", "paginate_issues", "get_agents",
+                     "resolve_cwd_project"):
             self._saved[name] = getattr(linear_cli, name)
         linear_cli.build_cycle_scope = lambda a, t, s: (
             'cycle: { id: { eq: "x" } }', "Cycle 23", {"id": "x"})
-        linear_cli.paginate_issues = lambda a, f: list(self.nodes)
+        linear_cli.paginate_issues = self._capture_paginate
         linear_cli.get_agents = lambda a, c, force=False: list(self.ROSTER)
+        linear_cli.resolve_cwd_project = lambda *a, **k: self.cwd_project
         return self
 
     def __exit__(self, *exc):
@@ -668,15 +708,129 @@ def _list_args(**overrides):
     return args
 
 
-def _run_list(nodes, cfg=None, **overrides):
+def _run_list(nodes, cfg=None, cwd_project=(None, None), **overrides):
     args = _list_args(**overrides)
     cfg = {"agent": "claude"} if cfg is None else cfg
     buf = io.StringIO()
-    with _ListTasksHarness(nodes):
+    with _ListTasksHarness(nodes, cwd_project=cwd_project) as h:
         with contextlib.redirect_stdout(buf):
             linear_cli.list_tasks(args, cfg, "api-key", "team-id")
     import json as _json
-    return _json.loads(buf.getvalue())
+    out = _json.loads(buf.getvalue())
+    out["_last_filter"] = h.last_filter
+    return out
+
+
+_PRIX_UUID = "84849630-061b-492f-9043-ae8af40c60b1"
+_OTHER_UUID = "11111111-1111-1111-1111-111111111111"
+
+
+class ResolveCwdProjectTest(unittest.TestCase):
+    """resolve_cwd_project shells out to `agents projects`; fail-open on anything."""
+
+    @staticmethod
+    def _fake_run(outputs):
+        """outputs: dict mapping the joined argv tail to a (returncode, stdout).
+        A missing key or a value of None simulates the process raising."""
+        class _Res:
+            def __init__(self, rc, out):
+                self.returncode = rc
+                self.stdout = out
+
+        def run(argv, capture_output=True, text=True, timeout=None):
+            key = " ".join(argv[1:])          # drop the leading "agents"
+            val = outputs.get(key)
+            if val is None:
+                raise FileNotFoundError("agents")
+            rc, out = val
+            return _Res(rc, out)
+        return run
+
+    def _with_run(self, run):
+        original = linear_cli.subprocess.run
+        linear_cli.subprocess.run = run
+        self.addCleanup(lambda: setattr(linear_cli.subprocess, "run", original))
+
+    def test_resolves_cwd_to_bound_linear_project(self):
+        self._with_run(self._fake_run({
+            "projects for-cwd --json": (0, json.dumps({"name": "prix"})),
+            "projects list --json": (0, json.dumps([
+                {"name": "other", "linear": {"projectId": _OTHER_UUID, "name": "Other"}},
+                {"name": "prix", "linear": {"projectId": _PRIX_UUID, "name": "Prix"}},
+            ])),
+        }))
+        self.assertEqual(linear_cli.resolve_cwd_project(), (_PRIX_UUID, "Prix"))
+
+    def test_unbound_cwd_is_none(self):
+        self._with_run(self._fake_run({
+            "projects for-cwd --json": (0, json.dumps({"name": None})),
+        }))
+        self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
+
+    def test_missing_agents_binary_is_none(self):
+        # subprocess.run raises FileNotFoundError -> fail open, never propagate.
+        self._with_run(self._fake_run({}))
+        self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
+
+    def test_nonzero_exit_is_none(self):
+        self._with_run(self._fake_run({
+            "projects for-cwd --json": (1, ""),
+        }))
+        self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
+
+    def test_def_without_linear_binding_is_none(self):
+        self._with_run(self._fake_run({
+            "projects for-cwd --json": (0, json.dumps({"name": "prix"})),
+            "projects list --json": (0, json.dumps([{"name": "prix"}])),
+        }))
+        self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
+
+    def test_timeout_is_none(self):
+        def run(argv, **k):
+            raise linear_cli.subprocess.TimeoutExpired(cmd="agents", timeout=3)
+        self._with_run(run)
+        self.assertEqual(linear_cli.resolve_cwd_project(), (None, None))
+
+
+class CwdAutoScopeTest(unittest.TestCase):
+    """`linear tasks` in a project-bound folder auto-scopes to that project."""
+
+    def _nodes(self):
+        return [_issue("R-1", delegate="Claude"), _issue("R-2", delegate="Codex"),
+                _issue("R-3")]
+
+    def test_no_binding_leaves_queue_unscoped(self):
+        out = _run_list(self._nodes(), cwd_project=(None, None))
+        self.assertIsNone(out["project"])
+        self.assertEqual(out["scope"], "active")
+        self.assertNotIn("project:", out["_last_filter"])
+
+    def test_binding_auto_scopes_and_widens_to_all_cycles(self):
+        out = _run_list(self._nodes(), cwd_project=(_PRIX_UUID, "Prix"))
+        self.assertEqual(out["project"], {"id": _PRIX_UUID, "name": "Prix", "auto": True})
+        # A project scope widens the cycle to the whole deliverable.
+        self.assertEqual(out["scope"], "all")
+        self.assertIn(f'project: {{ id: {{ eq: "{_PRIX_UUID}" }} }}', out["_last_filter"])
+
+    def test_all_disables_auto_scope(self):
+        out = _run_list(self._nodes(), cwd_project=(_PRIX_UUID, "Prix"), all=True)
+        self.assertIsNone(out["project"])
+        self.assertNotIn("project:", out["_last_filter"])
+
+    def test_explicit_project_overrides_cwd(self):
+        # Explicit --project (a UUID, passed through without a lookup) wins; the
+        # cwd binding is ignored and the result is not marked auto.
+        out = _run_list(self._nodes(), cwd_project=(_PRIX_UUID, "Prix"),
+                        project=_OTHER_UUID)
+        self.assertEqual(out["project"], {"id": _OTHER_UUID, "name": _OTHER_UUID, "auto": False})
+        self.assertIn(f'project: {{ id: {{ eq: "{_OTHER_UUID}" }} }}', out["_last_filter"])
+        self.assertNotIn(_PRIX_UUID, out["_last_filter"])
+
+    def test_autoscope_false_config_opts_out(self):
+        out = _run_list(self._nodes(), cfg={"agent": "claude", "autoScope": False},
+                        cwd_project=(_PRIX_UUID, "Prix"))
+        self.assertIsNone(out["project"])
+        self.assertNotIn("project:", out["_last_filter"])
 
 
 class DelegateOwnershipTest(unittest.TestCase):

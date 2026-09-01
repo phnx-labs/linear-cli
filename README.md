@@ -78,7 +78,8 @@ linear tasks --assignee me           # by assignee: me | none | someone@x.com
 linear tasks --project "Rush App"    # scope to one project (name or UUID)
 linear tasks --milestone "v1.0"      # scope to one milestone (the whole deliverable)
 linear tasks --project "Rush App" --by-milestone  # group by milestone; unmatched fall in "No milestone"
-linear tasks --json | jq             # machine-readable
+linear tasks --all                   # whole team, ignoring the cwd project auto-scope
+linear tasks --json | jq             # machine-readable (adds "project": {id, name, auto})
 
 linear update ANT-42 --pickup         # claim (In Progress)
 linear update ANT-42 --comment "..."  # progress note
@@ -146,6 +147,7 @@ Full help: `linear <command> --help`.
 The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.
 
 - **Assignee-as-queue.** `linear tasks` returns what *you* own in the active cycle. Widen with `--cycle all` (whole team) or `--cycle none` (backlog), or filter by `--assignee me|none|<email>`. No dashboards, no saved views.
+- **Directory-aware scope.** When `agents projects` binds the current directory to a Linear project, `linear tasks` (and `--board`) auto-scope to that project — so an agent launched inside a project folder works that project's queue, not the whole workspace. `--all` shows every project, `--project X` overrides, and `autoScope: false` in `~/.linear-cli/config.json` disables it. Fail-open: with no `agents` CLI or no binding for the cwd, nothing changes. The `--json` output carries `project: {id, name, auto}` (null when unscoped).
 - **Milestones as deliverables.** `--milestone` scopes to one deliverable across all cycles; `--by-milestone` groups a project's issues by milestone (with a *No milestone* bucket for unmatched work), each row annotated with its cycle so you see which iteration a deliverable's work is scheduled in. `linear projects` / `milestones list` roll up per-milestone % done, so a deliverable's progress sits next to its target date. Scoping to `--project`/`--milestone` widens to all cycles by default (the whole deliverable, not just this cycle's slice).
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
 - **One ownership model.** `delegate` is the only thing that owns an issue. `linear tasks --agent claude` filters to issues delegated to Claude; the default view adds the issues nobody has been delegated (`delegate` is null). `linear tasks --board` groups its columns by delegate. There is no label lane — an unknown `--agent` aborts rather than printing an empty queue.
