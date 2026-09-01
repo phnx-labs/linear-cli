@@ -635,6 +635,13 @@ class BoardJsonScopeTest(unittest.TestCase):
         out = _run_board([], cwd_project=(_PRIX_UUID, "Prix"))
         self.assertEqual(out["project"], {"id": _PRIX_UUID, "name": "Prix", "auto": True})
         self.assertIn(f'project: {{ id: {{ eq: "{_PRIX_UUID}" }} }}', out["_last_filter"])
+        # Parity with list_tasks: a project scope widens the board to all cycles.
+        self.assertEqual(out["scope"], "all")
+
+    def test_board_unscoped_stays_on_active_cycle(self):
+        out = _run_board([], cwd_project=(None, None))
+        self.assertIsNone(out["project"])
+        self.assertEqual(out["scope"], "active")
 
     def test_board_all_disables_auto_scope(self):
         out = _run_board([], cwd_project=(_PRIX_UUID, "Prix"), all=True)
