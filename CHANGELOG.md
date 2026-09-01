@@ -16,10 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project bound to the current working directory, so an agent launched inside a
   project folder sees that project's work instead of the entire workspace — the
   fix for agents picking up tasks from the wrong project. The directory→project
-  mapping comes from the `agents projects` CLI (`for-cwd` does a longest-match
-  over every bound root and monorepo subpath), consulted via two bounded,
-  fail-open subprocess calls: no `agents` on `PATH`, no def for this cwd, or a
-  slow/broken call leaves the queue unscoped exactly as before. A cwd binding
+  mapping comes from the `agents projects` CLI — `projects view <dir> --json`
+  does a longest-match over every bound root and monorepo subpath and returns
+  the matched project's Linear binding in one shot — consulted via a single
+  bounded, fail-open subprocess call: no `agents` on `PATH`, no def for this
+  cwd, or a slow/broken call leaves the queue unscoped exactly as before. A cwd binding
   that resolves to a project id which is not a live project on the team (a
   renamed/recreated project or a stale recorded id) is also validated fail-open
   — it falls back to the whole-team view with a one-line note, never aborting
