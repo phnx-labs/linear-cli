@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an `--assign` value echoed into that message is `repr`-escaped, so a tab or
   newline in it can't split the record.
 
+### Fixed
+
+- **`--from-file` bulk output no longer corrupts its tab-separated records.**
+  Row titles were interpolated into the TSV raw, so a title containing a tab
+  added a phantom column and a title containing a newline split one row into
+  two — silently breaking any consumer doing `line.split("\t")`. Titles are now
+  escaped on the way out (both the echoed input title and the created issue's
+  title as returned by Linear). Predates the owner check; found reviewing it.
+
 ## [0.20.0] - 2026-09-01
 
 ### Added
