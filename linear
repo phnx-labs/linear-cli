@@ -3029,8 +3029,9 @@ def unassigned_error(title: str, reason: str, multiline: bool = True) -> str:
         f"  Why: {reason}.\n"
         f"  Every ticket needs a clear owner. An unassigned issue is nobody's job — it\n"
         f"  lands in the board's \"No assignee\" bucket and nobody picks it up.\n"
-        f"  Fix:  --assign <email|name>     (run `linear users` to see who you can assign)\n"
-        f"        --delegate <agent>        hands the work to an agent; the human stays owner\n"
+        f"  Fix:  --assign <email|name>   (run `linear users` to see who you can assign)\n"
+        f"  Handing the work to an agent does not replace the owner: --delegate rides\n"
+        f"  alongside --assign, it does not stand in for it.\n"
         f"  If it genuinely has no owner yet, say so explicitly: --force"
     )
 
@@ -3139,7 +3140,10 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
         if uid:
             input_obj["assigneeId"] = uid
         else:
-            unassigned_reason = (f"--assign '{assign_arg}' matched no human "
+            # !r, not '{}': this value is echoed back into the bulk --from-file
+            # error, which is one field of a tab-separated record. repr escapes
+            # any tab/newline in the value so it can't split the record.
+            unassigned_reason = (f"--assign {assign_arg!r} matched no human "
                                  f"(try an email, a name, or `linear users`)")
 
     # An issue with no assignee is nobody's job — it sits on the board unowned
