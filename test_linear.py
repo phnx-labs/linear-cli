@@ -514,6 +514,14 @@ class CreateRequiresOwnerTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(input_obj["assigneeId"], "viewer-id")
 
+    def test_delegate_alone_does_not_satisfy_the_owner_check(self):
+        # --delegate sets delegateId, never assigneeId, so it cannot stand in
+        # for an assignee. The message must not offer it as a lone fix.
+        input_obj, err = self._build(assign="none", delegate="claude")
+        self.assertIsNone(input_obj)
+        self.assertIn("does not replace the owner", err)
+        self.assertIn("rides", err)
+
     def test_bulk_error_stays_on_one_line(self):
         # --from-file prints ERROR<TAB>-<TAB>TITLE<TAB>REASON; a newline in the
         # reason would corrupt that record.
@@ -524,6 +532,22 @@ class CreateRequiresOwnerTest(unittest.TestCase):
         self.assertNotIn("\n", err)
         self.assertIn("unassigned issue refused", err)
         self.assertIn("--force", err)
+
+    def test_bulk_error_survives_tabs_and_newlines_in_the_assign_value(self):
+        # The unresolvable-assignee reason echoes the caller's --assign value
+        # back. That value is user data: a tab would add a phantom column to
+        # the TSV record and a newline would split it into two rows.
+        for hostile in ("evil\tvalue", "evil\nvalue", "evil\r\nvalue"):
+            with self.subTest(assign=hostile):
+                _, err = linear_cli._build_create_input(
+                    "api-key", "team-id", dict(self.CFG),
+                    {"title": "Bulk row", "cycle": "active", "assign": hostile},
+                    verbose=False,
+                )
+                self.assertNotIn("\t", err)
+                self.assertNotIn("\n", err)
+                self.assertNotIn("\r", err)
+                self.assertIn("matched no human", err)
 
 
 class MilestoneRollupTest(unittest.TestCase):

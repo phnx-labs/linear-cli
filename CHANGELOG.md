@@ -13,14 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignee is nobody's job — it lands in the board's "No assignee" bucket and
   nobody picks it up. `create` now fails closed with a message explaining why it
   refused and how to fix it, instead of silently producing an unowned ticket.
-  The default path is unaffected: with no `--assign`, the API key owner is still
-  the assignee. Two paths now error where they previously did not: `--assign
-  none`, and an `--assign` value that matches no human (which used to warn
-  "leaving unassigned" and create the issue anyway). Pass `--force` to create an
-  unowned issue deliberately. The check applies to `--from-file` bulk create per
-  row; `--force` waives it for the whole file, or set `"force": true` on a single
-  row. Bulk error text stays on one line so the tab-separated record is still
-  parseable.
+  The ordinary case is unchanged: with no `--assign`, the API key owner is still
+  the assignee. Three paths now error where they previously did not:
+
+  - `--assign none`
+  - an `--assign` value that matches no human — used to warn "leaving
+    unassigned" and create the issue anyway
+  - no `--assign` and an unresolvable API key owner (revoked token, failing
+    `viewer` lookup) — used to create the issue unowned with no warning at all
+
+  Pass `--force` to create an unowned issue deliberately. `--delegate` does not
+  satisfy the check: it sets `delegateId`, not `assigneeId`, so pair it with
+  `--assign`. The check applies to `--from-file` bulk create per row; `--force`
+  waives it for the whole file, or set `"force": true` on a single row. Bulk
+  error text stays on one line so the tab-separated record is still parseable —
+  an `--assign` value echoed into that message is `repr`-escaped, so a tab or
+  newline in it can't split the record.
 
 ## [0.20.0] - 2026-09-01
 

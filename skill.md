@@ -158,9 +158,14 @@ linear create --from-file plan.jsonl                  # bulk: one issue per JSON
 ### Every issue needs an owner
 
 `create` refuses to make an unassigned issue. With no `--assign`, the API key
-owner becomes the assignee — so the default is always owned. It only refuses
-when the assignee would end up empty: `--assign none`, or an `--assign` value
-that matches no human.
+owner becomes the assignee, so the ordinary case is owned without you doing
+anything. It refuses whenever the assignee would end up empty:
+
+- `--assign none`
+- an `--assign` value that matches no human
+- no `--assign` *and* the API key owner can't be resolved (a revoked token or a
+  failing `viewer` lookup) — rare, but it used to produce an unowned issue with
+  no warning at all
 
 ```
 linear create "Fix auth bug" --assign none
@@ -173,8 +178,11 @@ linear create "Fix auth bug" --assign none
 Pick one:
 
 - `--assign <email|name>` — hand it to a specific human (`linear users` lists them).
-- `--delegate <agent>` — hand the work to an agent; the human stays the owner.
 - `--force` — create it unowned anyway. Deliberate, not a default.
+
+`--delegate <agent>` is **not** a third option: it sets `delegateId`, never
+`assigneeId`, so it does not clear the check. To have an agent do the work,
+name the human who owns it too — `--assign bisma --delegate claude`.
 
 Unowned issues pile up in the board's "No assignee" bucket and nobody picks
 them up, which is why this is a hard refusal rather than a warning.
