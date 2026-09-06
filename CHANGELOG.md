@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-05
+
+### Fixed
+
+- **`linear --version` reported `0.20.0` on a 0.21.0 install.** `__version__`
+  is bumped in the feature commit, not the release commit, and 0.21.0 shipped
+  without that bump — so every 0.21.0 install ran the right code and
+  self-reported the previous version. That silently breaks any "is this box up
+  to date?" check, including a fleet-wide `linear --version` sweep. No behavior
+  change beyond the version string.
+
 ## [0.21.0] - 2026-09-05
 
 ### Changed
