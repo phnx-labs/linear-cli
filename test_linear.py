@@ -442,6 +442,90 @@ class CreateImageTest(unittest.TestCase):
             linear_cli.get_cycle_id = original_get_cycle_id
 
 
+class CreateRequiresOwnerTest(unittest.TestCase):
+    """An issue with no assignee is nobody's job. `create` refuses to make one
+    unless the caller says --force. See the "No assignee" bucket on the board."""
+
+    CFG = {
+        "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
+        "viewerId": "viewer-id",
+    }
+
+    def setUp(self):
+        self._orig_cycle = linear_cli.get_cycle_id
+        self._orig_resolve = linear_cli.resolve_assignee_id
+        linear_cli.get_cycle_id = lambda _a, _t, _w: None
+        # Only "bisma" is a real human; anything else resolves to nobody.
+        linear_cli.resolve_assignee_id = (
+            lambda _a, value: "bisma-id" if value == "bisma" else None
+        )
+
+    def tearDown(self):
+        linear_cli.get_cycle_id = self._orig_cycle
+        linear_cli.resolve_assignee_id = self._orig_resolve
+
+    def _build(self, **fields):
+        base = {"title": "Fix the login redirect", "cycle": "active"}
+        base.update(fields)
+        return linear_cli._build_create_input(
+            "api-key", "team-id", dict(self.CFG), base, verbose=True
+        )
+
+    def test_assign_none_is_refused(self):
+        input_obj, err = self._build(assign="none")
+        self.assertIsNone(input_obj)
+        self.assertIn("Refusing to create an unassigned issue", err)
+        self.assertIn("you passed --assign none", err)
+        self.assertIn("--force", err)
+        self.assertIn("--assign <email|name>", err)
+
+    def test_unresolvable_assignee_is_refused_not_silently_unassigned(self):
+        input_obj, err = self._build(assign="nobody@example.com")
+        self.assertIsNone(input_obj)
+        self.assertIn("matched no human", err)
+        self.assertIn("Refusing to create an unassigned issue", err)
+
+    def test_missing_viewer_is_refused(self):
+        cfg_without_viewer = {"states": self.CFG["states"]}
+        orig_gql = linear_cli.gql
+        linear_cli.gql = lambda *_a, **_k: {"data": {"viewer": {}}}
+        try:
+            input_obj, err = linear_cli._build_create_input(
+                "api-key", "team-id", cfg_without_viewer,
+                {"title": "No owner anywhere", "cycle": "active"}, verbose=True,
+            )
+        finally:
+            linear_cli.gql = orig_gql
+        self.assertIsNone(input_obj)
+        self.assertIn("the API key owner could not be resolved", err)
+
+    def test_force_creates_the_unassigned_issue(self):
+        input_obj, err = self._build(assign="none", force=True)
+        self.assertIsNone(err)
+        self.assertNotIn("assigneeId", input_obj)
+
+    def test_named_assignee_still_works(self):
+        input_obj, err = self._build(assign="bisma")
+        self.assertIsNone(err)
+        self.assertEqual(input_obj["assigneeId"], "bisma-id")
+
+    def test_default_assigns_the_api_key_owner(self):
+        input_obj, err = self._build()
+        self.assertIsNone(err)
+        self.assertEqual(input_obj["assigneeId"], "viewer-id")
+
+    def test_bulk_error_stays_on_one_line(self):
+        # --from-file prints ERROR<TAB>-<TAB>TITLE<TAB>REASON; a newline in the
+        # reason would corrupt that record.
+        _, err = linear_cli._build_create_input(
+            "api-key", "team-id", dict(self.CFG),
+            {"title": "Bulk row", "cycle": "active", "assign": "none"}, verbose=False,
+        )
+        self.assertNotIn("\n", err)
+        self.assertIn("unassigned issue refused", err)
+        self.assertIn("--force", err)
+
+
 class MilestoneRollupTest(unittest.TestCase):
     def test_rollup_aggregates_by_milestone_with_none_bucket(self):
         # One page of a project's issues across two milestones + an unassigned
