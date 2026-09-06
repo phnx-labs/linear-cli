@@ -155,12 +155,37 @@ linear create "Item" --project "Phoenix" --milestone "v1.0"
 linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
 ```
 
+### Every issue needs an owner
+
+`create` refuses to make an unassigned issue. With no `--assign`, the API key
+owner becomes the assignee — so the default is always owned. It only refuses
+when the assignee would end up empty: `--assign none`, or an `--assign` value
+that matches no human.
+
+```
+linear create "Fix auth bug" --assign none
+# Refusing to create an unassigned issue: 'Fix auth bug'
+#   Why: you passed --assign none.
+#   ...
+#   If it genuinely has no owner yet, say so explicitly: --force
+```
+
+Pick one:
+
+- `--assign <email|name>` — hand it to a specific human (`linear users` lists them).
+- `--delegate <agent>` — hand the work to an agent; the human stays the owner.
+- `--force` — create it unowned anyway. Deliberate, not a default.
+
+Unowned issues pile up in the board's "No assignee" bucket and nobody picks
+them up, which is why this is a hard refusal rather than a warning.
+
 Bulk output is tab-separated for easy parsing:
 ```
 OK    ANT-42  Fix auth
 ERROR  -      Other       project 'Foo' not found
 ```
-Bad lines don't stop the run.
+Bad lines don't stop the run. The owner check applies per row — set `"assign"`
+on the row, or pass `--force` to waive it for the whole file.
 
 ## Multi-team workspaces
 

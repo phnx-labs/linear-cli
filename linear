@@ -3013,11 +3013,33 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
 # create
 # ---------------------------------------------------------------------------
 
+def unassigned_error(title: str, reason: str, multiline: bool = True) -> str:
+    """The message shown when a create would leave an issue with no assignee.
+
+    Multi-line for interactive `linear create` (the operator reads it and fixes
+    the command); single-line for `--from-file`, whose per-row output is a
+    tab-separated record that a newline would corrupt.
+    """
+    if not multiline:
+        return (f"unassigned issue refused: {reason}. Every ticket needs a clear owner — "
+                f"set \"assign\" to an email or name on this row (see `linear users`), "
+                f"or pass --force to create it unowned anyway.")
+    return (
+        f"Refusing to create an unassigned issue: {title!r}\n"
+        f"  Why: {reason}.\n"
+        f"  Every ticket needs a clear owner. An unassigned issue is nobody's job — it\n"
+        f"  lands in the board's \"No assignee\" bucket and nobody picks it up.\n"
+        f"  Fix:  --assign <email|name>     (run `linear users` to see who you can assign)\n"
+        f"        --delegate <agent>        hands the work to an agent; the human stays owner\n"
+        f"  If it genuinely has no owner yet, say so explicitly: --force"
+    )
+
+
 def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
                         verbose: bool = True) -> tuple[dict | None, str | None]:
     """Build an IssueCreateInput from a flat fields dict (keys match flag names:
     title, description, description_file, priority, parent, project,
-    milestone, status, cycle, assign, due_date, label).
+    milestone, status, cycle, assign, due_date, label, force).
 
     Returns (input_obj, None) on success or (None, error) on hard failure.
     Smart defaults applied silently. Warnings go to stderr when verbose=True.
@@ -3102,19 +3124,28 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
             warn(f"no {cycle_choice} cycle found; creating without cycle.")
 
     assign_arg = fields.get("assign")
+    unassigned_reason = ""
     if assign_arg is None:
         vid = get_viewer_id(api_key, cfg)
         if vid:
             input_obj["assigneeId"] = vid
+        else:
+            unassigned_reason = ("the API key owner could not be resolved, so there is "
+                                 "no default assignee")
     elif assign_arg.lower() == "none":
-        pass
+        unassigned_reason = "you passed --assign none"
     else:
         uid = resolve_assignee_id(api_key, assign_arg)
         if uid:
             input_obj["assigneeId"] = uid
         else:
-            warn(f"--assign '{assign_arg}' matched no human "
-                 f"(try an email, a name, or 'linear users'); leaving unassigned.")
+            unassigned_reason = (f"--assign '{assign_arg}' matched no human "
+                                 f"(try an email, a name, or `linear users`)")
+
+    # An issue with no assignee is nobody's job — it sits on the board unowned
+    # and rots. Refuse by default; --force is the deliberate escape hatch.
+    if "assigneeId" not in input_obj and not fields.get("force"):
+        return None, unassigned_error(title, unassigned_reason, multiline=verbose)
 
     delegate_arg = fields.get("delegate")
     if delegate_arg and delegate_arg.lower() != "none":
@@ -3161,7 +3192,7 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
 
 def cmd_create(args, cfg, api_key, team_id):
     if args.from_file:
-        return _bulk_create(args.from_file, cfg, api_key, team_id)
+        return _bulk_create(args.from_file, cfg, api_key, team_id, force=args.force)
 
     fields = {
         "title": args.title,
@@ -3178,6 +3209,7 @@ def cmd_create(args, cfg, api_key, team_id):
         "due_date": args.due_date,
         "label": args.label or [],
         "image": args.image or [],
+        "force": args.force,
     }
     input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
     if err:
@@ -3194,10 +3226,13 @@ def cmd_create(args, cfg, api_key, team_id):
     print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
 
 
-def _bulk_create(path: str, cfg, api_key, team_id):
+def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False):
     """Bulk create from JSONL. Each line is a JSON object with field names
     matching the single-create flags. Continue-on-error; tab-separated output:
-    OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON."""
+    OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON.
+
+    `force` applies the --force owner-check bypass to every row; a row can also
+    carry its own "force": true."""
     if path == "-":
         stream = sys.stdin
     else:
@@ -3219,6 +3254,8 @@ def _bulk_create(path: str, cfg, api_key, team_id):
             err_count += 1
             continue
 
+        if force:
+            fields["force"] = True
         title_hint = fields.get("title") or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
         input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False)
         if err:
@@ -4805,7 +4842,8 @@ def main():
     p_create.add_argument("--due-date", dest="due_date",
                           help="Due date (YYYY-MM-DD)")
     p_create.add_argument("--assign", default=None,
-                          help="Assign to a human by email or name, or 'none' (default: API key owner)")
+                          help="Assign to a human by email or name (default: API key owner). "
+                               "'none' leaves it unowned and requires --force.")
     p_create.add_argument("--delegate", default=None,
                           help="Delegate the new issue to an agent by name (e.g. --delegate claude)")
     p_create.add_argument("--from-file", dest="from_file", default=None,
@@ -4816,6 +4854,9 @@ def main():
                           help="Project name or ID")
     p_create.add_argument("--milestone", default=None,
                           help="Project milestone name (resolved within --project if set)")
+    p_create.add_argument("--force", action="store_true",
+                          help="Create even with no assignee. Without it, an issue that "
+                               "would land unowned is refused — every ticket needs an owner.")
 
     # cycles (list / create / update). No delete: archiving a cycle discards
     # sprint history, so it's intentionally not exposed here.

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`linear create` refuses to create an unassigned issue.** An issue with no
+  assignee is nobody's job — it lands in the board's "No assignee" bucket and
+  nobody picks it up. `create` now fails closed with a message explaining why it
+  refused and how to fix it, instead of silently producing an unowned ticket.
+  The default path is unaffected: with no `--assign`, the API key owner is still
+  the assignee. Two paths now error where they previously did not: `--assign
+  none`, and an `--assign` value that matches no human (which used to warn
+  "leaving unassigned" and create the issue anyway). Pass `--force` to create an
+  unowned issue deliberately. The check applies to `--from-file` bulk create per
+  row; `--force` waives it for the whole file, or set `"force": true` on a single
+  row. Bulk error text stays on one line so the tab-separated record is still
+  parseable.
+
 ## [0.20.0] - 2026-09-01
 
 ### Added
