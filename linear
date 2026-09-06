@@ -3013,6 +3013,21 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
 # create
 # ---------------------------------------------------------------------------
 
+def tsv_field(value: str) -> str:
+    """Make a value safe to place in one field of a tab-separated record.
+
+    Bulk `--from-file` output is TSV, so a tab in a value would add a phantom
+    column and a newline would split the row. Both come straight from the
+    caller's JSONL (title, description) or from Linear (issue title), so
+    neither is trustworthy — escape at the point of formatting.
+    """
+    return (str(value)
+            .replace("\t", "\\t")
+            .replace("\r\n", "\\n")
+            .replace("\n", "\\n")
+            .replace("\r", "\\n"))
+
+
 def unassigned_error(title: str, reason: str, multiline: bool = True) -> str:
     """The message shown when a create would leave an issue with no assignee.
 
@@ -3260,7 +3275,10 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False):
 
         if force:
             fields["force"] = True
-        title_hint = fields.get("title") or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
+        title_hint = tsv_field(
+            fields.get("title")
+            or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
+        )
         input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False)
         if err:
             print(f"ERROR\t-\t{title_hint}\t{err}")
@@ -3271,7 +3289,7 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False):
             print(f"ERROR\t-\t{title_hint}\t{err}")
             err_count += 1
             continue
-        print(f"OK\t{issue['identifier']}\t{issue['title']}")
+        print(f"OK\t{issue['identifier']}\t{tsv_field(issue['title'])}")
         ok_count += 1
 
     if path != "-":

@@ -550,6 +550,32 @@ class CreateRequiresOwnerTest(unittest.TestCase):
                 self.assertIn("matched no human", err)
 
 
+class BulkTsvFieldTest(unittest.TestCase):
+    """Bulk --from-file output is a tab-separated record. Titles come from the
+    caller's JSONL and from Linear, so neither may carry a raw tab/newline."""
+
+    def test_tabs_and_newlines_are_escaped(self):
+        for hostile in ("a\tb", "a\nb", "a\r\nb", "a\rb"):
+            with self.subTest(value=hostile):
+                out = linear_cli.tsv_field(hostile)
+                self.assertNotIn("\t", out)
+                self.assertNotIn("\n", out)
+                self.assertNotIn("\r", out)
+
+    def test_crlf_collapses_to_one_escape(self):
+        self.assertEqual(linear_cli.tsv_field("a\r\nb"), "a\\nb")
+
+    def test_ordinary_titles_are_untouched(self):
+        self.assertEqual(linear_cli.tsv_field("Fix the login redirect"),
+                         "Fix the login redirect")
+
+    def test_bulk_row_keeps_four_fields_with_a_hostile_title(self):
+        title_hint = linear_cli.tsv_field("evil\ttitle\nsplit")
+        row = f"ERROR\t-\t{title_hint}\tsome reason"
+        self.assertEqual(len(row.split("\t")), 4)
+        self.assertEqual(len(row.splitlines()), 1)
+
+
 class MilestoneRollupTest(unittest.TestCase):
     def test_rollup_aggregates_by_milestone_with_none_bucket(self):
         # One page of a project's issues across two milestones + an unassigned
