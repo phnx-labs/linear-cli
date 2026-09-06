@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -548,6 +549,26 @@ class CreateRequiresOwnerTest(unittest.TestCase):
                 self.assertNotIn("\n", err)
                 self.assertNotIn("\r", err)
                 self.assertIn("matched no human", err)
+
+
+class VersionMatchesChangelogTest(unittest.TestCase):
+    """`__version__` lives in `linear` and is bumped in the feature commit, not
+    the release commit, so it is easy to forget — 0.21.0 shipped self-reporting
+    0.20.0, which made a fleet-wide `linear --version` sweep call every box
+    stale when it was in fact up to date."""
+
+    def test_version_matches_newest_released_changelog_entry(self):
+        changelog = Path(_HERE, "CHANGELOG.md").read_text()
+        # Released headings look like "## [0.21.1] - 2026-09-05";
+        # "## [Unreleased]" has no version and is skipped by the pattern.
+        versions = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
+        self.assertTrue(versions, "no released version headings found in CHANGELOG.md")
+        self.assertEqual(
+            linear_cli.__version__, versions[0],
+            f"__version__ is {linear_cli.__version__!r} but the newest CHANGELOG "
+            f"entry is {versions[0]!r}. Bump __version__ in `linear` when you add "
+            f"the CHANGELOG entry, not at release time.",
+        )
 
 
 class BulkTsvFieldTest(unittest.TestCase):

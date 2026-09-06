@@ -30,13 +30,13 @@ Use the same shell contract whether you're typing or a subagent is: query the qu
 Preferred (pinned tag + SHA-256 verify via `install.sh`):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.21.0/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.21.1/install.sh | sh
 ```
 
 Manual pin (same tag; no checksum — prefer `install.sh` above):
 
 ```bash
-curl -o ~/.local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.21.0/linear
+curl -o ~/.local/bin/linear https://raw.githubusercontent.com/phnx-labs/linear-cli/v0.21.1/linear
 chmod +x ~/.local/bin/linear
 ```
 
