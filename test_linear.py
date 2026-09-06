@@ -2,6 +2,12 @@
 """Regression tests for the `linear` CLI.
 
 The CLI is intentionally dependency-free, so tests use only stdlib unittest.
+
+Seeing a stale value for something you just edited in `linear`? macOS's system
+python3 sets a global sys.pycache_prefix, and because `linear` has no .py
+extension the cached name loses its separator (`linearcpython-39.pyc`), so the
+usual invalidation is easy to miss when an edit doesn't change the file length.
+Re-run with PYTHONDONTWRITEBYTECODE=1 before believing the result.
 """
 
 import contextlib
