@@ -66,7 +66,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.21.1"
+__version__ = "0.22.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -1051,22 +1051,28 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     return nodes[0]["id"] if nodes else None
 
 
+# Every non-archived project a team can see (Linear's `team.projects` leaves
+# archived ones out unless asked). Shared by the project list and the overview
+# so both read the same rows.
+_TEAM_PROJECTS_QUERY = """query($teamId: String!, $cursor: String) {
+    team(id: $teamId) {
+        projects(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+                id name state progress scope priority
+                startDate targetDate updatedAt
+                lead { name }
+            }
+        }
+    }
+}"""
+
+
 def list_team_projects(api_key: str, team_id: str) -> list[dict]:
     """All projects accessible to a team. Sorted most-recently-updated first.
     Fully paginated — no silent truncation at Linear's default page size."""
-    query = """query($teamId: String!, $cursor: String) {
-        team(id: $teamId) {
-            projects(first: 100, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                    id name state progress scope priority
-                    startDate targetDate updatedAt
-                    lead { name }
-                }
-            }
-        }
-    }"""
-    projects = paginate_connection(api_key, query, ["team", "projects"], {"teamId": team_id})
+    projects = paginate_connection(api_key, _TEAM_PROJECTS_QUERY, ["team", "projects"],
+                                   {"teamId": team_id})
     if projects is None:
         return []
     projects.sort(key=lambda p: p.get("updatedAt") or "", reverse=True)
@@ -1801,7 +1807,9 @@ def resolve_cycle_meta(api_key: str, team_id: str, which: str) -> dict | None:
 
 
 def paginate_connection(api_key: str, query: str, path: list[str],
-                        variables: dict | None = None) -> list[dict] | None:
+                        variables: dict | None = None,
+                        page_size: int = _PAGE_SIZE,
+                        partial_out: dict | None = None) -> list[dict] | None:
     """Generic relay-cursor paginator for any connection (cycles, users,
     projects, labels, ...). Companion to paginate_issues for the issue path.
 
@@ -1810,6 +1818,11 @@ def paginate_connection(api_key: str, query: str, path: list[str],
     `path` is the key sequence from the `data` root to the connection object
     (e.g. ["team", "projects"] or ["cycles"]). Returns every node across all
     pages, or None on API error (caller already printed it).
+
+    `page_size` is the query's own `first:` value — it only sizes the safety
+    rail message. When the rail stops the walk early, `partial_out` (if given)
+    receives {"rows": <rows fetched>} so a caller emitting machine output can
+    mark the result partial instead of passing off a truncated set as complete.
     """
     nodes: list[dict] = []
     cursor: str | None = None
@@ -1833,10 +1846,12 @@ def paginate_connection(api_key: str, query: str, path: list[str],
             break
         if pages >= _MAX_PAGES:
             print(
-                f"Warning: stopped after {pages * _PAGE_SIZE} rows "
+                f"Warning: stopped after {pages * page_size} rows "
                 f"(pagination safety rail).",
                 file=sys.stderr,
             )
+            if partial_out is not None:
+                partial_out["rows"] = pages * page_size
             break
     return nodes
 
@@ -3426,6 +3441,8 @@ def cmd_projects(args, cfg, api_key, team_id):
         return _project_delete(args, api_key, team_id)
     if action == "show":
         return _project_show(args, api_key, team_id)
+    if action == "overview":
+        return _project_overview(args, api_key, team_id)
 
     projects = list_team_projects(api_key, team_id)
     if not projects:
@@ -3515,6 +3532,247 @@ def _project_show(args, api_key, team_id):
     none_entry = roll.get("_none")
     if none_entry and none_entry.get("total"):
         print(f"  - {'— No milestone':30s}  target: {'-':12s}  {_fmt_rollup(none_entry)}")
+
+
+# ---------------------------------------------------------------------------
+# projects overview — one call for a menu: projects → milestones → open issues
+# ---------------------------------------------------------------------------
+
+# Project priority as a word. Linear stores 0..4; a menu wants a label it can
+# colour, not an int it has to map.
+PROJECT_PRIORITY_WORD = {0: "none", 1: "urgent", 2: "high", 3: "medium", 4: "low"}
+
+_OVERVIEW_ISSUE_PAGE = 250
+_OVERVIEW_ISSUE_QUERY = f"""query($ids: [ID!], $cursor: String) {{
+    issues(first: {_OVERVIEW_ISSUE_PAGE}, after: $cursor,
+           filter: {{ project: {{ id: {{ in: $ids }} }} }}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+            identifier title url priority
+            state {{ name type }}
+            assignee {{ name }}
+            cycle {{ number }}
+            projectMilestone {{ id }}
+            project {{ id }}
+        }}
+    }}
+}}"""
+
+_OVERVIEW_MILESTONE_QUERY = """query($ids: [ID!], $cursor: String) {
+    projectMilestones(first: 100, after: $cursor,
+                      filter: { project: { id: { in: $ids } } }) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id name targetDate sortOrder project { id } }
+    }
+}"""
+
+_CURRENT_CYCLE_QUERY = """query($id: String!) {
+    team(id: $id) { activeCycle { id number name startsAt endsAt } }
+}"""
+
+
+def overview_issue_row(n: dict) -> dict:
+    """The seven fields a menu row needs, flattened: names instead of nested
+    objects, and the cycle as its number so a caller can compare it against the
+    top-level `cycle.number` to pick out "this cycle"."""
+    return {
+        "identifier": n.get("identifier"),
+        "title": n.get("title"),
+        "state": (n.get("state") or {}).get("name"),
+        "cycle": (n.get("cycle") or {}).get("number"),
+        "assignee": (n.get("assignee") or {}).get("name"),
+        "priority": n.get("priority") or 0,
+        "url": n.get("url"),
+    }
+
+
+def overview_issue_sort_key(row: dict) -> tuple:
+    """Cycle number ascending (no cycle last), then priority (Urgent=1 first,
+    no-priority=0 last), then identifier so ties are deterministic."""
+    cyc = row.get("cycle")
+    return (cyc is None, cyc or 0, row.get("priority") or 5, row.get("identifier") or "")
+
+
+def overview_bucket(issues: list[dict]) -> dict:
+    """Counts for one milestone (or a project's no-milestone bucket) plus its
+    open rows. `open` is every state type that is neither completed nor
+    canceled — backlog, unstarted, started, and triage (unfinished work too) —
+    so open + done + canceled == total always holds."""
+    counts = {"total": 0, "open": 0, "done": 0, "canceled": 0}
+    open_rows: list[dict] = []
+    for n in issues:
+        counts["total"] += 1
+        state_type = (n.get("state") or {}).get("type")
+        if state_type == "completed":
+            counts["done"] += 1
+        elif state_type == "canceled":
+            counts["canceled"] += 1
+        else:
+            counts["open"] += 1
+            open_rows.append(overview_issue_row(n))
+    open_rows.sort(key=overview_issue_sort_key)
+    return {"issues": counts, "open": open_rows}
+
+
+def build_overview(cycle: dict | None, projects: list[dict], milestones: list[dict],
+                   issues: list[dict], partial_reason: str | None = None,
+                   generated_at: datetime | None = None) -> dict:
+    """Assemble the overview document from already-fetched nodes. Pure — no API
+    calls — so the shape and the ordering rules are testable without a
+    workspace. Projects sort by priority (urgent first, none last) then name;
+    milestones by sortOrder; open issues by cycle then priority."""
+    ms_by_project: dict[str, list] = {}
+    for m in milestones:
+        ms_by_project.setdefault((m.get("project") or {}).get("id"), []).append(m)
+    issues_by_ms: dict[str, list] = {}
+    orphans_by_project: dict[str, list] = {}
+    for n in issues:
+        mid = (n.get("projectMilestone") or {}).get("id")
+        if mid:
+            issues_by_ms.setdefault(mid, []).append(n)
+        else:
+            orphans_by_project.setdefault((n.get("project") or {}).get("id"), []).append(n)
+
+    out_projects = []
+    for p in sorted(projects, key=lambda p: (p.get("priority") or 5,
+                                             (p.get("name") or "").lower())):
+        ms_nodes = sorted(ms_by_project.get(p["id"], []),
+                          key=lambda m: m.get("sortOrder") or 0)
+        out_projects.append({
+            "id": p["id"],
+            "name": p.get("name"),
+            "priority": PROJECT_PRIORITY_WORD.get(p.get("priority") or 0, "none"),
+            "state": p.get("state"),
+            "targetDate": p.get("targetDate"),
+            "milestones": [
+                {"id": m["id"], "name": m.get("name"), "targetDate": m.get("targetDate"),
+                 **overview_bucket(issues_by_ms.get(m["id"], []))}
+                for m in ms_nodes
+            ],
+            "noMilestone": overview_bucket(orphans_by_project.get(p["id"], [])),
+        })
+
+    stamp = generated_at or datetime.now(timezone.utc)
+    return {
+        "generatedAt": stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "cycle": ({"id": cycle.get("id"), "number": cycle.get("number"),
+                   "name": cycle.get("name"), "startsAt": cycle.get("startsAt"),
+                   "endsAt": cycle.get("endsAt")} if cycle else None),
+        "projects": out_projects,
+        "partial": partial_reason is not None,
+        "partialReason": partial_reason,
+    }
+
+
+def _pick_overview_projects(projects: list[dict], wanted: list[str]) -> list[dict]:
+    """Restrict the team's project list to the --project values, in the order
+    given, deduplicated. A UUID must be on this team's list and a name must
+    resolve strictly — a typo aborts rather than quietly returning less."""
+    picked: list[dict] = []
+    for value in wanted:
+        if len(value) == 36 and value.count("-") == 4:
+            match = next((p for p in projects if p["id"] == value), None)
+            if not match:
+                print(f"Error: no project with id '{value}' on this team.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            try:
+                match = _select_named_node(projects, value, "project",
+                                           strict=True, suggest=True)
+            except LookupError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        if match not in picked:
+            picked.append(match)
+    return picked
+
+
+def _project_overview(args, api_key, team_id):
+    """`projects overview`: the team's current cycle plus every project's
+    milestones with issue counts and open rows, in one document. Four queries
+    (projects, active cycle, milestones, issues), each fully paginated; an API
+    error on any of them exits non-zero rather than emitting a half document."""
+    projects = paginate_connection(api_key, _TEAM_PROJECTS_QUERY, ["team", "projects"],
+                                   {"teamId": team_id})
+    if projects is None:
+        sys.exit(1)
+    wanted = getattr(args, "project", None) or []
+    if wanted:
+        projects = _pick_overview_projects(projects, wanted)
+
+    data = gql(api_key, _CURRENT_CYCLE_QUERY, {"id": team_id})
+    if check_errors(data):
+        sys.exit(1)
+    cycle = ((data.get("data") or {}).get("team") or {}).get("activeCycle")
+
+    ids = [p["id"] for p in projects]
+    milestones: list[dict] = []
+    issues: list[dict] = []
+    partial_reasons: list[str] = []
+    if ids:
+        capped: dict = {}
+        milestones = paginate_connection(api_key, _OVERVIEW_MILESTONE_QUERY,
+                                         ["projectMilestones"], {"ids": ids},
+                                         partial_out=capped)
+        if milestones is None:
+            sys.exit(1)
+        if capped:
+            partial_reasons.append(
+                f"milestones stopped at {capped['rows']} (pagination safety rail); "
+                f"later milestones and their issues are missing")
+        capped = {}
+        issues = paginate_connection(api_key, _OVERVIEW_ISSUE_QUERY, ["issues"],
+                                     {"ids": ids}, page_size=_OVERVIEW_ISSUE_PAGE,
+                                     partial_out=capped)
+        if issues is None:
+            sys.exit(1)
+        if capped:
+            partial_reasons.append(
+                f"issues stopped at {capped['rows']} (pagination safety rail); "
+                f"counts and open lists are understated")
+
+    doc = build_overview(cycle, projects, milestones, issues,
+                         partial_reason="; ".join(partial_reasons) or None)
+    if args.json:
+        print(json.dumps(doc, indent=2))
+        return
+    print_overview(doc)
+
+
+def print_overview(doc: dict) -> None:
+    """Compact tree of the overview document: cycle header, then each project
+    with its milestones (open/total) and open rows annotated with their cycle."""
+    cyc = doc.get("cycle")
+    if cyc:
+        window = f"  {(cyc.get('startsAt') or '')[:10]} → {(cyc.get('endsAt') or '')[:10]}"
+        print(f"Current cycle: {cycle_label(cyc)}{window}")
+    else:
+        print("Current cycle: none")
+    if doc.get("partial"):
+        print(f"Partial: {doc.get('partialReason')}")
+
+    def rows(bucket: dict) -> None:
+        for r in bucket["open"]:
+            pri = PRIORITY_MAP.get(r["priority"] or 0, "-")
+            who = r["assignee"] or "unassigned"
+            cyc_str = f"  ·Cycle {r['cycle']}" if r["cycle"] is not None else ""
+            print(f"      {r['identifier']:<9} {pri:<7} {r['state']:<12} {who:<16} "
+                  f"{r['title']}{cyc_str}")
+
+    for p in doc["projects"]:
+        target = p["targetDate"] or "-"
+        print(f"\n{p['name']}  [{p['priority']} · {p['state'] or '-'} · target {target}]")
+        for m in p["milestones"]:
+            c = m["issues"]
+            print(f"    {m['name']}  ({c['open']} open / {c['total']} total)"
+                  f"  target {m['targetDate'] or '-'}")
+            rows(m)
+        c = p["noMilestone"]["issues"]
+        if c["total"]:
+            print(f"    — No milestone  ({c['open']} open / {c['total']} total)")
+            rows(p["noMilestone"])
+    if not doc["projects"]:
+        print("No projects.")
 
 
 def _project_create(args, api_key, team_id):
@@ -4754,6 +5012,31 @@ def cmd_queue(args, cfg, api_key, team_id):
 # Main
 # ---------------------------------------------------------------------------
 
+# Every verb each group's subparser knows. A bare name that is not one of these
+# gets the implicit `show` inserted by rewrite_group_argv; a verb added to the
+# parser but not here would be rewritten to `show <verb>` and be unreachable.
+_PROJECTS_VERBS = frozenset({"show", "overview", "create", "update", "archive", "delete"})
+_INITIATIVES_VERBS = frozenset({"show", "create", "update", "link", "unlink", "archive"})
+
+
+def rewrite_group_argv(argv: list[str]) -> list[str]:
+    """Back-compat + ergonomics: `projects <name>` / `initiatives <name>` (a bare
+    name, not a verb) is shorthand for `<group> show <name>`. Insert the implicit
+    `show` so the detail view keeps working alongside the other subcommands."""
+    argv = list(argv)
+    if len(argv) < 2:
+        return argv
+    verbs = {"projects": _PROJECTS_VERBS, "initiatives": _INITIATIVES_VERBS}.get(argv[0])
+    if not verbs:
+        return argv
+    for i in range(1, len(argv)):
+        if not argv[i].startswith("-"):
+            if argv[i] not in verbs:
+                argv = argv[:i] + ["show"] + argv[i:]
+            break
+    return argv
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="linear",
@@ -4907,6 +5190,13 @@ def main():
     # can place --json before the injected `show`); when present, still sets json.
     ps_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                          help="JSON output")
+    ps_overview = proj_sub.add_parser(
+        "overview",
+        help="One document for menus: current cycle + projects → milestones → open issues")
+    ps_overview.add_argument("--project", action="append", default=None, metavar="NAME|ID",
+                             help="Restrict to a project (repeatable; exact name or id)")
+    ps_overview.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                             help="JSON output")
     ps_create = proj_sub.add_parser("create", help="Create a project")
     ps_create.add_argument("--name", required=True, help="Project name")
     ps_create.add_argument("--description", default=None, help="Project description")
@@ -5064,26 +5354,7 @@ def main():
     q_drain.add_argument("--once", action="store_true",
                          help="Apply at most one due intent, then stop")
 
-    # Back-compat + ergonomics: `projects <name>` / `initiatives <name>` (a bare
-    # name, not a verb) is shorthand for `<group> show <name>`. Insert the
-    # implicit `show` so the detail view keeps working alongside create/update/
-    # archive/link/unlink subcommands.
-    argv = sys.argv[1:]
-    if len(argv) >= 2 and argv[0] == "projects":
-        _proj_verbs = {"show", "create", "update", "archive", "delete"}
-        for _i in range(1, len(argv)):
-            if not argv[_i].startswith("-"):
-                if argv[_i] not in _proj_verbs:
-                    argv = argv[:_i] + ["show"] + argv[_i:]
-                break
-    if len(argv) >= 2 and argv[0] == "initiatives":
-        _ini_verbs = {"show", "create", "update", "link", "unlink", "archive"}
-        for _i in range(1, len(argv)):
-            if not argv[_i].startswith("-"):
-                if argv[_i] not in _ini_verbs:
-                    argv = argv[:_i] + ["show"] + argv[_i:]
-                break
-    args = parser.parse_args(argv)
+    args = parser.parse_args(rewrite_group_argv(sys.argv[1:]))
 
     if not args.command:
         parser.print_help()

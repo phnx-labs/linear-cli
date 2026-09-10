@@ -110,6 +110,8 @@ linear create "Unowned" --assign none --force  # refused without --force: every 
 
 linear projects                       # list projects + progress + issue count
 linear projects "Phoenix"             # detail view: milestones with per-milestone % done
+linear projects overview --json       # one document: current cycle + projects → milestones → open issues
+linear projects overview --project "Phoenix"  # restrict (repeatable); compact tree without --json
 linear projects create --name "Phoenix" --lead you@co.com --target 2026-09-30
 linear projects update "Phoenix" --description "..."  # description / lead / dates / state
 linear projects update "Phoenix" --priority low       # urgent | high | medium | low | none
@@ -156,6 +158,7 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
 - **Durable closes.** If a `--done` call hits a Linear rate limit or transient error, the close intent is persisted to `~/.linear-cli/queue/` and retried with exponential backoff (or server `Retry-After`). `linear queue list` / `linear queue drain` inspect and apply pending closes; concurrent drains on one machine are serialized with a file lock. The next `linear update --done` also drains automatically so the board stays honest. **Never tight-loop bulk closes** — use the queue and `linear queue drain` (or `--once`) instead of a bare `for id in …; do linear update $id --done; done` without sleep.
 - **JSON everywhere.** `--json` on every read command. Pipe to `jq` or hand to a subagent.
+- **One call for a menu.** `linear projects overview --json` returns the current cycle plus every project → milestone → open issue in a single document, so a menubar or dashboard renders from one command with no follow-up queries. Shape in [Overview JSON](#overview-json).
 
 <p align="center">
   <em>Works with</em>
@@ -168,6 +171,55 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
   &nbsp;&nbsp;&nbsp;&nbsp;
   <img src="assets/harnesses/cursor.svg"    alt="Cursor"              height="32" />
 </p>
+
+## Overview JSON
+
+`linear projects overview --json` is built for menus and dashboards: one call,
+one document, nothing to join afterwards.
+
+```json
+{
+  "generatedAt": "2026-09-10T09:33:05.127Z",
+  "cycle": {"id": "5e73…", "number": 28, "name": "first design partner live",
+            "startsAt": "2026-09-08T07:00:00.000Z", "endsAt": "2026-09-15T07:00:00.000Z"},
+  "projects": [
+    {
+      "id": "8eb8…", "name": "AGI", "priority": "high", "state": "started", "targetDate": null,
+      "milestones": [
+        {"id": "ba96…", "name": "Fleet reliability", "targetDate": "2026-08-12",
+         "issues": {"total": 14, "open": 3, "done": 11, "canceled": 0},
+         "open": [
+           {"identifier": "PHNX-3999", "title": "…", "state": "Doing", "cycle": 28,
+            "assignee": "Muqsit", "priority": 2, "url": "https://linear.app/…"}
+         ]}
+      ],
+      "noMilestone": {"issues": {"total": 1367, "open": 24, "done": 1039, "canceled": 304},
+                      "open": []}
+    }
+  ],
+  "partial": false,
+  "partialReason": null
+}
+```
+
+- `cycle` is the team's current cycle (`startsAt <= now < endsAt`), or `null`
+  between cycles. An issue row's `cycle` is the cycle **number**, so "this
+  cycle" is `row.cycle == doc.cycle.number`; `null` means not scheduled.
+- `issues` counts every issue in the bucket. `open` = state type `backlog`,
+  `unstarted`, `started` (and `triage`); `done` = `completed`; `canceled` =
+  `canceled`; `open + done + canceled == total`. Only open issues are listed —
+  done and canceled are counts only. `noMilestone` is the same `{issues, open}`
+  pair for the project's issues that sit in no milestone.
+- Ordering: projects by priority (`urgent` → `low`, then `none`) then name;
+  milestones by Linear's sortOrder; open rows by cycle number ascending (no
+  cycle last), then priority (urgent first), then identifier.
+- `priority` on a project is a word (`urgent|high|medium|low|none`); on an
+  issue it is Linear's integer (1 = urgent … 4 = low, 0 = none).
+- Everything is paginated to the end. If a safety rail stops a walk (25k
+  issues), `partial` is `true` and `partialReason` says where — the document
+  never silently undercounts. An auth or network error exits non-zero.
+- `--project <name|id>` restricts the document; repeat it for several. Names
+  resolve strictly — a typo aborts with suggestions.
 
 ## Agent skill
 

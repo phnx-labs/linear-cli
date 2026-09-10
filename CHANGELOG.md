@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-10
+
+### Added
+
+- **`linear projects overview [--project <name|id> ...] [--json]`** — one
+  document for a menu or dashboard: the team's current cycle, then every
+  non-archived project → its milestones (with `{total, open, done, canceled}`
+  issue counts) → the open issues in each, plus a per-project `noMilestone`
+  bucket for open work not matched to a deliverable. One call; the caller
+  needs no follow-up queries. Issue rows are flat (`identifier, title, state,
+  cycle, assignee, priority, url`) with `cycle` as the cycle **number**, so
+  "this cycle" is `row.cycle == doc.cycle.number`. Open rows sort by cycle
+  then priority; projects by priority then name; milestones by sortOrder.
+  Every list is fully paginated; if a safety rail stops a walk early the
+  document says so (`"partial": true` + `partialReason`) instead of
+  undercounting. An API error exits non-zero rather than emitting half a
+  document. `--project` is repeatable and strict — a mistyped name aborts with
+  suggestions. Without `--json` the same data prints as a compact tree.
+  (PHNX-4036)
+
+### Docs
+
+- README documents the overview JSON shape; `skill.md` lists the command.
+
 ## [0.21.1] - 2026-09-05
 
 ### Fixed
