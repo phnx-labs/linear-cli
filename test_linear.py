@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -1647,32 +1648,13 @@ class InitiativeToProjectFindTest(unittest.TestCase):
 
 
 class ProjectsArgvShimTest(unittest.TestCase):
-    """Bare `projects NAME` / `initiatives NAME` injects the show verb."""
+    """Bare `projects NAME` / `initiatives NAME` injects the show verb; a real
+    verb passes through. Drives main's actual rewrite (rewrite_group_argv)."""
 
-    def test_update_is_a_recognized_projects_verb(self):
-        # Regression: if 'update' is missing from _proj_verbs, `projects update X`
+    def test_verbs_pass_through_and_bare_names_get_show(self):
+        rewrite = linear_cli.rewrite_group_argv
+        # Regression: if 'update' is missing from the verb set, `projects update X`
         # is rewritten to `projects show update X` and the write path is unreachable.
-        import argparse
-        # Exercise via main's argv rewrite by inspecting the source constant set
-        # the same way main does — re-run the rewrite logic inline.
-        def rewrite(argv0):
-            argv = list(argv0)
-            if len(argv) >= 2 and argv[0] == "projects":
-                verbs = {"show", "create", "update", "archive", "delete"}
-                for i in range(1, len(argv)):
-                    if not argv[i].startswith("-"):
-                        if argv[i] not in verbs:
-                            argv = argv[:i] + ["show"] + argv[i:]
-                        break
-            if len(argv) >= 2 and argv[0] == "initiatives":
-                verbs = {"show", "create", "update", "link", "unlink", "archive"}
-                for i in range(1, len(argv)):
-                    if not argv[i].startswith("-"):
-                        if argv[i] not in verbs:
-                            argv = argv[:i] + ["show"] + argv[i:]
-                        break
-            return argv
-
         self.assertEqual(
             rewrite(["projects", "update", "Linear CLI", "--description", "x"]),
             ["projects", "update", "Linear CLI", "--description", "x"],
@@ -1689,6 +1671,24 @@ class ProjectsArgvShimTest(unittest.TestCase):
             rewrite(["initiatives", "Rush = the default Agent OS"]),
             ["initiatives", "show", "Rush = the default Agent OS"],
         )
+
+    def test_overview_is_a_projects_verb_even_after_the_group_json_flag(self):
+        rewrite = linear_cli.rewrite_group_argv
+        self.assertEqual(
+            rewrite(["projects", "overview", "--project", "AGI", "--json"]),
+            ["projects", "overview", "--project", "AGI", "--json"],
+        )
+        # `projects --json overview`: the flag is skipped, the verb still passes.
+        self.assertEqual(
+            rewrite(["projects", "--json", "overview"]),
+            ["projects", "--json", "overview"],
+        )
+
+    def test_other_groups_and_short_argv_are_untouched(self):
+        rewrite = linear_cli.rewrite_group_argv
+        self.assertEqual(rewrite(["tasks", "ANT-1"]), ["tasks", "ANT-1"])
+        self.assertEqual(rewrite(["projects"]), ["projects"])
+        self.assertEqual(rewrite([]), [])
 
 
 class CloseQueueTest(unittest.TestCase):
@@ -2402,6 +2402,311 @@ class ProjectPriorityTest(unittest.TestCase):
     def test_invalid_priority_aborts_without_writing(self):
         with self.assertRaises(SystemExit):
             self._run("sorta-urgent")
+
+
+# ---------------------------------------------------------------------------
+# projects overview — one document for menus
+# ---------------------------------------------------------------------------
+
+def _ov_issue(ident, project=None, milestone=None, state_type="started",
+              state_name=None, cycle=28, priority=2, assignee="Muqsit"):
+    """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
+    names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
+             "completed": "Done", "canceled": "Canceled", "triage": "Triage"}
+    return {
+        "identifier": ident, "title": f"title {ident}",
+        "url": f"https://linear.app/x/issue/{ident}",
+        "priority": priority,
+        "state": {"name": state_name or names[state_type], "type": state_type},
+        "assignee": {"name": assignee} if assignee else None,
+        "cycle": {"number": cycle} if cycle is not None else None,
+        "projectMilestone": {"id": milestone} if milestone else None,
+        "project": {"id": project or _OV_AGI},
+    }
+
+
+_OV_AGI = "8eb8f5b1-3870-4590-ba67-36f3811d1435"
+_OV_PROJECTS = [
+    {"id": _OV_AGI, "name": "AGI", "priority": 2, "state": "started", "targetDate": "2026-10-01"},
+    {"id": "p-zed", "name": "zed", "priority": 1, "state": "planned", "targetDate": None},
+    {"id": "p-alpha", "name": "Alpha", "priority": 0, "state": "backlog", "targetDate": None},
+    {"id": "p-bravo", "name": "bravo", "priority": 2, "state": "started", "targetDate": None},
+]
+_OV_MILESTONES = [
+    {"id": "m-late", "name": "v2", "targetDate": None, "sortOrder": 10, "project": {"id": _OV_AGI}},
+    {"id": "m-early", "name": "v1", "targetDate": "2026-09-20", "sortOrder": -5, "project": {"id": _OV_AGI}},
+    {"id": "m-zed", "name": "z1", "targetDate": None, "sortOrder": 0, "project": {"id": "p-zed"}},
+]
+_OV_CYCLE = {"id": "c-28", "number": 28, "name": "cycle name",
+             "startsAt": "2026-09-08T07:00:00.000Z", "endsAt": "2026-09-15T07:00:00.000Z"}
+
+
+class OverviewBuildTest(unittest.TestCase):
+    """build_overview is the pure shape + ordering step of `projects overview`.
+    The document is consumed by a menu, so its key set is a contract: nothing
+    listed is omitted, nothing unlisted is added."""
+
+    def _doc(self, issues=(), cycle=_OV_CYCLE, partial_reason=None):
+        return linear_cli.build_overview(
+            cycle, _OV_PROJECTS, _OV_MILESTONES, list(issues),
+            partial_reason=partial_reason,
+            generated_at=datetime(2026, 9, 10, 9, 30, 5, 127000, tzinfo=timezone.utc),
+        )
+
+    def test_key_sets_are_exactly_the_contract(self):
+        doc = self._doc([_ov_issue("PHNX-1", milestone="m-early")])
+        self.assertEqual(set(doc), {"generatedAt", "cycle", "projects", "partial", "partialReason"})
+        self.assertEqual(set(doc["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
+        agi = doc["projects"][1]
+        self.assertEqual(set(agi), {"id", "name", "priority", "state", "targetDate",
+                                    "milestones", "noMilestone"})
+        ms = agi["milestones"][0]
+        self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
+        self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
+        self.assertEqual(set(ms["open"][0]),
+                         {"identifier", "title", "state", "cycle", "assignee", "priority", "url"})
+        self.assertEqual(set(agi["noMilestone"]), {"issues", "open"})
+        self.assertEqual(doc["generatedAt"], "2026-09-10T09:30:05.127Z")
+        self.assertIs(doc["partial"], False)
+        self.assertIsNone(doc["partialReason"])
+
+    def test_projects_sort_by_priority_then_name_with_none_last(self):
+        doc = self._doc()
+        self.assertEqual([p["name"] for p in doc["projects"]], ["zed", "AGI", "bravo", "Alpha"])
+        self.assertEqual([p["priority"] for p in doc["projects"]],
+                         ["urgent", "high", "high", "none"])
+        self.assertEqual(doc["projects"][1]["state"], "started")
+        self.assertEqual(doc["projects"][1]["targetDate"], "2026-10-01")
+
+    def test_milestones_sort_by_sort_order_within_their_project(self):
+        doc = self._doc()
+        agi, zed = doc["projects"][1], doc["projects"][0]
+        self.assertEqual([m["name"] for m in agi["milestones"]], ["v1", "v2"])
+        self.assertEqual([m["name"] for m in zed["milestones"]], ["z1"])
+        self.assertEqual(doc["projects"][3]["milestones"], [])
+
+    def test_counts_add_up_and_open_rows_match_the_open_count(self):
+        issues = [
+            _ov_issue("PHNX-1", milestone="m-early", state_type="started"),
+            _ov_issue("PHNX-2", milestone="m-early", state_type="completed"),
+            _ov_issue("PHNX-3", milestone="m-early", state_type="canceled"),
+            _ov_issue("PHNX-4", milestone="m-early", state_type="backlog"),
+            _ov_issue("PHNX-5", milestone="m-early", state_type="unstarted"),
+            # Triage is unfinished work: counted open so the buckets sum to total.
+            _ov_issue("PHNX-6", milestone="m-early", state_type="triage"),
+        ]
+        ms = self._doc(issues)["projects"][1]["milestones"][0]
+        self.assertEqual(ms["issues"], {"total": 6, "open": 4, "done": 1, "canceled": 1})
+        self.assertEqual(len(ms["open"]), ms["issues"]["open"])
+        self.assertEqual(sorted(r["identifier"] for r in ms["open"]),
+                         ["PHNX-1", "PHNX-4", "PHNX-5", "PHNX-6"])
+
+    def test_open_rows_sort_by_cycle_then_priority_then_identifier(self):
+        issues = [
+            _ov_issue("PHNX-9", cycle=None, priority=1),         # no cycle: last
+            _ov_issue("PHNX-8", cycle=28, priority=0),           # no priority: after low
+            _ov_issue("PHNX-7", cycle=28, priority=4),
+            _ov_issue("PHNX-6", cycle=28, priority=1),
+            _ov_issue("PHNX-5", cycle=27, priority=3),           # earlier cycle first
+            _ov_issue("PHNX-4", cycle=28, priority=1),
+        ]
+        rows = self._doc(issues)["projects"][1]["noMilestone"]["open"]
+        self.assertEqual([r["identifier"] for r in rows],
+                         ["PHNX-5", "PHNX-4", "PHNX-6", "PHNX-7", "PHNX-8", "PHNX-9"])
+
+    def test_issue_row_is_flat_with_cycle_number_and_nulls(self):
+        row = self._doc([_ov_issue("PHNX-1", cycle=None, assignee=None, priority=0)]
+                        )["projects"][1]["noMilestone"]["open"][0]
+        self.assertEqual(row, {
+            "identifier": "PHNX-1", "title": "title PHNX-1", "state": "Doing",
+            "cycle": None, "assignee": None, "priority": 0,
+            "url": "https://linear.app/x/issue/PHNX-1",
+        })
+
+    def test_no_milestone_bucket_is_per_project(self):
+        issues = [_ov_issue("PHNX-1"),
+                  _ov_issue("PHNX-2", project="p-zed", state_type="completed")]
+        doc = self._doc(issues)
+        self.assertEqual(doc["projects"][1]["noMilestone"]["issues"],
+                         {"total": 1, "open": 1, "done": 0, "canceled": 0})
+        self.assertEqual(doc["projects"][0]["noMilestone"]["issues"],
+                         {"total": 1, "open": 0, "done": 1, "canceled": 0})
+        self.assertEqual(doc["projects"][2]["noMilestone"],
+                         {"issues": {"total": 0, "open": 0, "done": 0, "canceled": 0}, "open": []})
+
+    def test_no_current_cycle_is_null_and_partial_carries_its_reason(self):
+        doc = self._doc(cycle=None, partial_reason="issues stopped at 25000")
+        self.assertIsNone(doc["cycle"])
+        self.assertIs(doc["partial"], True)
+        self.assertEqual(doc["partialReason"], "issues stopped at 25000")
+
+
+class OverviewFetchTest(unittest.TestCase):
+    """_project_overview end to end over a fake gql keyed on query text. The
+    project restriction, the fail-loud paths, pagination, and the safety rail
+    are the shipping code; only the network edge is substituted."""
+
+    def _run(self, issue_pages, project=None, json_out=True, cycle_reply=None):
+        sent = {"queries": [], "ids": None}
+        pages = iter(issue_pages)
+
+        def fake_gql(_key, query, variables=None):
+            sent["queries"].append(query)
+            if "team(id: $teamId)" in query:
+                return {"data": {"team": {"projects": {
+                    "pageInfo": {"hasNextPage": False}, "nodes": list(_OV_PROJECTS)}}}}
+            if "activeCycle" in query:
+                return cycle_reply or {"data": {"team": {"activeCycle": dict(_OV_CYCLE)}}}
+            if "projectMilestones(" in query:
+                sent["ids"] = variables["ids"]
+                nodes = [m for m in _OV_MILESTONES if m["project"]["id"] in variables["ids"]]
+                return {"data": {"projectMilestones": {
+                    "pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
+            if "issues(" in query:
+                return next(pages)
+            raise AssertionError(f"unexpected query: {query[:60]}")
+
+        args = types.SimpleNamespace(project=project, json=json_out)
+        out, err = io.StringIO(), io.StringIO()
+        original = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                linear_cli._project_overview(args, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original
+        return sent, out.getvalue(), err.getvalue()
+
+    @staticmethod
+    def _page(nodes, more=False):
+        return {"data": {"issues": {
+            "pageInfo": {"hasNextPage": more, "endCursor": "c" if more else None},
+            "nodes": nodes}}}
+
+    def test_project_restriction_by_name_and_uuid_dedups_and_scopes_the_queries(self):
+        sent, out, _ = self._run(
+            [self._page([_ov_issue("PHNX-1", milestone="m-early")])],
+            project=["agi", _OV_AGI, "AGI"])
+        doc = json.loads(out)
+        self.assertEqual([p["name"] for p in doc["projects"]], ["AGI"])
+        # The milestone and issue queries are scoped to exactly the picked ids.
+        self.assertEqual(sent["ids"], [_OV_AGI])
+        self.assertEqual(doc["projects"][0]["milestones"][0]["issues"]["open"], 1)
+
+    def test_unknown_project_exits_nonzero_before_any_issue_query(self):
+        for bad in ("Nope", "00000000-0000-0000-0000-000000000000"):
+            with self.subTest(project=bad):
+                with self.assertRaises(SystemExit) as cm:
+                    self._run([], project=[bad])
+                self.assertEqual(cm.exception.code, 1)
+
+    def test_api_error_exits_nonzero_instead_of_a_half_document(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(out):
+            self._run([], cycle_reply={"errors": [{"message": "auth failed"}]})
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_issue_pagination_is_followed_across_pages(self):
+        _, out, _ = self._run([
+            self._page([_ov_issue("PHNX-1", milestone="m-early", state_type="completed")], more=True),
+            self._page([_ov_issue("PHNX-2", milestone="m-early")]),
+        ], project=["AGI"])
+        ms = json.loads(out)["projects"][0]["milestones"][0]
+        self.assertEqual(ms["issues"], {"total": 2, "open": 1, "done": 1, "canceled": 0})
+
+    def test_safety_rail_marks_the_document_partial(self):
+        saved = linear_cli._MAX_PAGES
+        linear_cli._MAX_PAGES = 1
+        try:
+            _, out, err = self._run([self._page([_ov_issue("PHNX-1")], more=True)],
+                                    project=["AGI"])
+        finally:
+            linear_cli._MAX_PAGES = saved
+        doc = json.loads(out)
+        self.assertIs(doc["partial"], True)
+        self.assertIn("issues stopped at 250", doc["partialReason"])
+        self.assertIn("safety rail", err)
+
+    def test_human_view_is_a_compact_tree(self):
+        _, out, _ = self._run([self._page([
+            _ov_issue("PHNX-1", milestone="m-early"),
+            _ov_issue("PHNX-2", milestone="m-early", state_type="completed"),
+            _ov_issue("PHNX-3", cycle=None),
+        ])], project=["AGI"], json_out=False)
+        self.assertIn("Current cycle: cycle name  2026-09-08 → 2026-09-15", out)
+        self.assertIn("AGI  [high · started · target 2026-10-01]", out)
+        self.assertIn("v1  (1 open / 2 total)  target 2026-09-20", out)
+        self.assertIn("PHNX-1", out)
+        self.assertIn("·Cycle 28", out)
+        self.assertNotIn("PHNX-2", out)          # done: counted, not listed
+        self.assertIn("— No milestone  (1 open / 1 total)", out)
+
+
+@unittest.skipUnless(os.environ.get("LINEAR_LIVE_TESTS") == "1",
+                     "set LINEAR_LIVE_TESTS=1 to run against the configured workspace")
+class OverviewLiveTest(unittest.TestCase):
+    """`./linear projects overview --json` against the real workspace the
+    machine is set up for (`linear setup`). Opt-in: CI has no API key, and the
+    AGI project assertion is specific to the phnx-labs workspace."""
+
+    AGI = "8eb8f5b1-3870-4590-ba67-36f3811d1435"
+
+    @staticmethod
+    def _cli(*argv):
+        proc = subprocess.run([sys.executable, os.path.join(_HERE, "linear"), *argv],
+                              capture_output=True, text=True, check=True,
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        return json.loads(proc.stdout)
+
+    def test_shape_sums_current_cycle_and_the_agi_project(self):
+        doc = self._cli("projects", "overview", "--json")
+        self.assertEqual(set(doc), {"generatedAt", "cycle", "projects", "partial", "partialReason"})
+        self.assertIsInstance(doc["projects"], list)
+        self.assertIs(doc["partial"], False)
+
+        # The top-level cycle is the one `linear cycles --json` shows as current.
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        current = [c for c in self._cli("cycles", "--json")
+                   if (c.get("startsAt") or "") <= now < (c.get("endsAt") or "")]
+        if current:
+            self.assertEqual(doc["cycle"]["id"], current[0]["id"])
+            self.assertEqual(doc["cycle"]["number"], current[0]["number"])
+        else:
+            self.assertIsNone(doc["cycle"])
+
+        agi = [p for p in doc["projects"] if p["id"] == self.AGI]
+        self.assertEqual(len(agi), 1, "the AGI project is missing from the overview")
+        self.assertTrue(agi[0]["milestones"], "AGI has milestones; none came back")
+        for p in doc["projects"]:
+            self.assertIn(p["priority"], {"none", "urgent", "high", "medium", "low"})
+            buckets = list(p["milestones"]) + [p["noMilestone"]]
+            for b in buckets:
+                c = b["issues"]
+                self.assertEqual(c["open"] + c["done"] + c["canceled"], c["total"], (p["name"], b.get("name")))
+                self.assertEqual(len(b["open"]), c["open"])
+                for r in b["open"]:
+                    self.assertIsInstance(r["identifier"], str)
+                    self.assertIsInstance(r["priority"], int)
+                    self.assertTrue(r["cycle"] is None or isinstance(r["cycle"], int))
+                    self.assertTrue(r["assignee"] is None or isinstance(r["assignee"], str))
+                    self.assertTrue(r["url"].startswith("https://"))
+
+    def test_project_restriction_matches_the_unrestricted_entry(self):
+        # Restricting by UUID and by exact name both return the same single
+        # project, with the same milestones and counts as the unrestricted run.
+        full = self._cli("projects", "overview", "--json")
+        agi_full = next(p for p in full["projects"] if p["id"] == self.AGI)
+        by_id = self._cli("projects", "overview", "--project", self.AGI, "--json")
+        by_name = self._cli("projects", "overview", "--project", agi_full["name"], "--json")
+        for doc in (by_id, by_name):
+            self.assertEqual([p["id"] for p in doc["projects"]], [self.AGI])
+            agi = doc["projects"][0]
+            self.assertEqual([m["id"] for m in agi["milestones"]],
+                             [m["id"] for m in agi_full["milestones"]])
+            self.assertEqual([m["issues"] for m in agi["milestones"]],
+                             [m["issues"] for m in agi_full["milestones"]])
+            self.assertEqual(agi["noMilestone"]["issues"], agi_full["noMilestone"]["issues"])
 
 
 if __name__ == "__main__":
