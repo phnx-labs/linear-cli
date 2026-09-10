@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-10
+
 ### Changed
 
 - **`linear create` refuses to create an issue with no milestone.** An issue
