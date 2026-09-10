@@ -357,6 +357,7 @@ class CreateImageTest(unittest.TestCase):
                     "description": "Initial description",
                     "image": [img1, img2],
                     "cycle": "active",
+                    "skip_milestone": True,
                 }
                 input_obj, err = linear_cli._build_create_input(
                     "api-key", "team-id", cfg, fields, verbose=False
@@ -400,6 +401,7 @@ class CreateImageTest(unittest.TestCase):
                     "description": "Body",
                     "image": [good, bad],
                     "cycle": "active",
+                    "skip_milestone": True,
                 }
                 input_obj, err = linear_cli._build_create_input(
                     "api-key", "team-id", cfg, fields, verbose=False
@@ -436,6 +438,7 @@ class CreateImageTest(unittest.TestCase):
                     "description": "The actual issue body",
                     "image": [img],
                     "cycle": "active",
+                    "skip_milestone": True,
                 }
                 input_obj, err = linear_cli._build_create_input(
                     "api-key", "team-id", cfg, fields, verbose=False
@@ -473,7 +476,8 @@ class CreateRequiresOwnerTest(unittest.TestCase):
         linear_cli.resolve_assignee_id = self._orig_resolve
 
     def _build(self, **fields):
-        base = {"title": "Fix the login redirect", "cycle": "active"}
+        base = {"title": "Fix the login redirect", "cycle": "active",
+                "skip_milestone": True}
         base.update(fields)
         return linear_cli._build_create_input(
             "api-key", "team-id", dict(self.CFG), base, verbose=True
@@ -500,7 +504,8 @@ class CreateRequiresOwnerTest(unittest.TestCase):
         try:
             input_obj, err = linear_cli._build_create_input(
                 "api-key", "team-id", cfg_without_viewer,
-                {"title": "No owner anywhere", "cycle": "active"}, verbose=True,
+                {"title": "No owner anywhere", "cycle": "active",
+                 "skip_milestone": True}, verbose=True,
             )
         finally:
             linear_cli.gql = orig_gql
@@ -535,7 +540,8 @@ class CreateRequiresOwnerTest(unittest.TestCase):
         # reason would corrupt that record.
         _, err = linear_cli._build_create_input(
             "api-key", "team-id", dict(self.CFG),
-            {"title": "Bulk row", "cycle": "active", "assign": "none"}, verbose=False,
+            {"title": "Bulk row", "cycle": "active", "assign": "none",
+             "skip_milestone": True}, verbose=False,
         )
         self.assertNotIn("\n", err)
         self.assertIn("unassigned issue refused", err)
@@ -549,13 +555,138 @@ class CreateRequiresOwnerTest(unittest.TestCase):
             with self.subTest(assign=hostile):
                 _, err = linear_cli._build_create_input(
                     "api-key", "team-id", dict(self.CFG),
-                    {"title": "Bulk row", "cycle": "active", "assign": hostile},
+                    {"title": "Bulk row", "cycle": "active", "assign": hostile,
+                     "skip_milestone": True},
                     verbose=False,
                 )
                 self.assertNotIn("\t", err)
                 self.assertNotIn("\n", err)
                 self.assertNotIn("\r", err)
                 self.assertIn("matched no human", err)
+
+
+class CreateRequiresMilestoneTest(unittest.TestCase):
+    """An issue with no milestone is nobody's deliverable. `create` refuses
+    to make one unless the caller says --skip-milestone. See the project's
+    "No milestone" bucket on `linear projects overview`."""
+
+    CFG = {
+        "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
+        "viewerId": "viewer-id",
+    }
+
+    CATALOG = [
+        {"id": "m1", "name": "0.1.0 — Interactive cloud run",
+         "targetDate": "2026-09-11", "sortOrder": 1,
+         "project": {"id": "p1", "name": "Rush"}},
+        {"id": "m2", "name": "0.1.1 — Headless mode + unblock",
+         "targetDate": "2026-09-08", "sortOrder": 2,
+         "project": {"id": "p1", "name": "Rush"}},
+    ]
+
+    def setUp(self):
+        self._orig_cycle = linear_cli.get_cycle_id
+        self._orig_catalog = linear_cli.list_milestone_catalog
+        self._orig_resolve = linear_cli.resolve_milestone_id
+        self._orig_project = linear_cli.resolve_project_id
+        linear_cli.get_cycle_id = lambda *_a, **_k: None
+        linear_cli.list_milestone_catalog = lambda *_a, **_k: list(self.CATALOG)
+        linear_cli.resolve_milestone_id = lambda *_a, **_k: "mid-1"
+        linear_cli.resolve_project_id = lambda *_a, **_k: "p1"
+
+    def tearDown(self):
+        linear_cli.get_cycle_id = self._orig_cycle
+        linear_cli.list_milestone_catalog = self._orig_catalog
+        linear_cli.resolve_milestone_id = self._orig_resolve
+        linear_cli.resolve_project_id = self._orig_project
+
+    def _build(self, verbose=True, **fields):
+        base = {"title": "getrush worker open proxy", "cycle": "active"}
+        base.update(fields)
+        return linear_cli._build_create_input(
+            "api-key", "team-id", dict(self.CFG), base, verbose=verbose
+        )
+
+    def test_omit_milestone_is_refused(self):
+        input_obj, err = self._build()
+        self.assertIsNone(input_obj)
+        self.assertIn("Refusing to create an issue without a milestone", err)
+        self.assertIn("bad practice", err)
+        self.assertIn("No milestone", err)
+        self.assertIn("--skip-milestone", err)
+        self.assertIn("0.1.0 — Interactive cloud run", err)
+        self.assertIn("0.1.1 — Headless mode + unblock", err)
+
+    def test_skip_milestone_creates_without_project_milestone(self):
+        input_obj, err = self._build(skip_milestone=True)
+        self.assertIsNone(err)
+        self.assertNotIn("projectMilestoneId", input_obj)
+
+    def test_named_milestone_sets_project_milestone_id(self):
+        input_obj, err = self._build(milestone="0.1.0 — Interactive cloud run")
+        self.assertIsNone(err)
+        self.assertEqual(input_obj["projectMilestoneId"], "mid-1")
+
+    def test_milestone_and_skip_together_is_refused(self):
+        input_obj, err = self._build(milestone="0.1.0", skip_milestone=True)
+        self.assertIsNone(input_obj)
+        self.assertIn("--milestone", err)
+        self.assertIn("--skip-milestone", err)
+        self.assertIn("pass one, not both", err.lower())
+
+    def test_bulk_error_stays_on_one_line(self):
+        _, err = self._build(verbose=False)
+        self.assertNotIn("\n", err)
+        self.assertNotIn("\t", err)
+        self.assertNotIn("\r", err)
+        self.assertIn("issue without a milestone refused", err)
+        self.assertIn("--skip-milestone", err)
+        self.assertIn("bad practice", err)
+
+    def test_bulk_error_survives_tabs_and_newlines_in_names(self):
+        # Catalog names and --milestone values are user/Linear data: a tab
+        # would add a phantom column to the TSV record and a newline would
+        # split it into two rows. repr-escape them like the owner guard.
+        for hostile in ("evil\tvalue", "evil\nvalue", "evil\r\nvalue"):
+            with self.subTest(catalog=hostile):
+                linear_cli.list_milestone_catalog = lambda *_a, **_k: [
+                    {"id": "m1", "name": hostile, "targetDate": None,
+                     "sortOrder": 0, "project": {"id": "p1", "name": hostile}},
+                ]
+                _, err = self._build(verbose=False)
+                self.assertNotIn("\t", err)
+                self.assertNotIn("\n", err)
+                self.assertNotIn("\r", err)
+                self.assertIn("issue without a milestone refused", err)
+            with self.subTest(both_flags=hostile):
+                _, err = self._build(verbose=False, milestone=hostile,
+                                     skip_milestone=True)
+                self.assertNotIn("\t", err)
+                self.assertNotIn("\n", err)
+                self.assertNotIn("\r", err)
+                self.assertIn("cannot be combined", err)
+
+    def test_empty_catalog_still_refuses(self):
+        linear_cli.list_milestone_catalog = lambda *_a, **_k: []
+        input_obj, err = self._build()
+        self.assertIsNone(input_obj)
+        self.assertIn("bad practice", err)
+        self.assertIn("linear milestones create", err)
+        self.assertIn("--skip-milestone", err)
+
+    def test_project_scopes_the_catalog(self):
+        seen = {}
+
+        def fake_catalog(_k, _t, project_id=None):
+            seen["id"] = project_id
+            return list(self.CATALOG)
+
+        linear_cli.list_milestone_catalog = fake_catalog
+        input_obj, err = self._build(project="Rush")
+        self.assertIsNone(input_obj)
+        self.assertEqual(seen["id"], "p1")
+        self.assertIn("Milestones in Rush", err)
+        self.assertIn("linear milestones list Rush", err)
 
 
 class VersionMatchesChangelogTest(unittest.TestCase):

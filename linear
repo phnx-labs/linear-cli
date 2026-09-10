@@ -1370,6 +1370,39 @@ def resolve_milestone_id(api_key: str, team_id: str, name: str,
     return match["id"]
 
 
+# Cap the create-guard's printed catalog so a team with dozens of milestones
+# still yields a readable refusal. The error then points at
+# `linear milestones list` / `linear projects` for the rest.
+_MILESTONE_CATALOG_CAP = 20
+
+_MILESTONE_CATALOG_QUERY = """query($ids: [ID!], $cursor: String) {
+    projectMilestones(first: 100, after: $cursor,
+                      filter: { project: { id: { in: $ids } } }) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id name targetDate sortOrder project { id name } }
+    }
+}"""
+
+
+def list_milestone_catalog(api_key: str, team_id: str,
+                           project_id: str | None = None) -> list[dict]:
+    """Milestones the create-guard can print so an agent can pick one.
+
+    When `project_id` is set, only that project's; otherwise every
+    non-archived project on the team. Mock this in tests so they never
+    hit the network.
+    """
+    if project_id:
+        ids = [project_id]
+    else:
+        ids = [p["id"] for p in list_team_projects(api_key, team_id)]
+    if not ids:
+        return []
+    nodes = paginate_connection(api_key, _MILESTONE_CATALOG_QUERY,
+                                ["projectMilestones"], {"ids": ids})
+    return nodes or []
+
+
 def list_team_cycles(api_key: str, team_id: str) -> list[dict]:
     """Return all cycles for a team, fully paginated (no 50-cycle truncation)."""
     query = """query($teamId: ID!, $cursor: String) {
@@ -3066,11 +3099,131 @@ def unassigned_error(title: str, reason: str, multiline: bool = True) -> str:
     )
 
 
+def conflicting_milestone_flags_error(milestone: str, multiline: bool = True) -> str:
+    """--milestone and --skip-milestone together is a hard error.
+
+    The milestone value is user data (and a bulk-row field), so it is
+    repr-escaped the same way unassigned_error echoes --assign.
+    """
+    if not multiline:
+        return (f"--milestone {milestone!r} and --skip-milestone cannot be combined; "
+                f"pass one, not both")
+    return (
+        f"Refusing to create: --milestone and --skip-milestone cannot be combined.\n"
+        f"  You passed --milestone {milestone!r} and --skip-milestone.\n"
+        f"  Pass one, not both."
+    )
+
+
+def _catalog_heading(catalog: list[dict], project_name: str | None) -> str | None:
+    """A project name to put on 'Milestones in …' / `linear milestones list`.
+
+    Prefer the resolved catalog's project name; fall back to the caller's
+    --project string when the catalog is empty.
+    """
+    if not project_name:
+        return None
+    if catalog:
+        n = (catalog[0].get("project") or {}).get("name")
+        if n:
+            return n
+    return project_name
+
+
+def _milestone_target_suffix(m: dict) -> str:
+    tgt = (m.get("targetDate") or "")[:10]
+    return f"     target {tgt}" if tgt else ""
+
+
+def _grouped_catalog(catalog: list[dict]) -> list[tuple[str, list[dict]]]:
+    grouped: dict[str, list[dict]] = {}
+    for m in catalog:
+        pname = (m.get("project") or {}).get("name") or "unknown"
+        grouped.setdefault(pname, []).append(m)
+    out = []
+    for pname in sorted(grouped, key=str.lower):
+        ms = sorted(grouped[pname],
+                    key=lambda x: (x.get("sortOrder") or 0, x.get("name") or ""))
+        out.append((pname, ms))
+    return out
+
+
+def missing_milestone_error(title: str, catalog: list[dict],
+                            project_name: str | None = None,
+                            multiline: bool = True) -> str:
+    """The message shown when a create would leave an issue with no milestone.
+
+    Multi-line for interactive `linear create` (lists real milestones so an
+    agent can pick one); single-line for `--from-file`, whose per-row output
+    is a tab-separated record that a newline would corrupt. Catalog names
+    are repr-escaped in the bulk form so a tab/newline cannot split the
+    record — same as the owner guard's `!r` on --assign.
+    """
+    heading = _catalog_heading(catalog, project_name)
+    if not multiline:
+        msg = (f"issue without a milestone refused. Creating a task with no milestone "
+               f"is bad practice — it lands in the project's \"No milestone\" bucket. "
+               f"Set \"milestone\" on this row, or pass --skip-milestone.")
+        if catalog:
+            names = [repr(m.get("name") or "") for m in catalog[:_MILESTONE_CATALOG_CAP]]
+            msg += " Available: " + ", ".join(names) + "."
+            if len(catalog) > _MILESTONE_CATALOG_CAP:
+                if heading:
+                    msg += f" Full list: linear milestones list {heading!r}."
+                else:
+                    msg += " Full list: linear projects."
+        else:
+            msg += " No milestones found — create one with `linear milestones create`."
+        return msg
+
+    lines = [
+        f"Refusing to create an issue without a milestone: {title!r}",
+        "  Creating a task with no milestone is bad practice — it lands in the project's",
+        '  "No milestone" bucket and nobody can tell which deliverable it belongs to.',
+        '  Attach it:  --milestone "<name>"   (resolved within --project if set)',
+        "",
+    ]
+    if not catalog:
+        lines.append("  No milestones found. Create one with `linear milestones create`.")
+    else:
+        if heading:
+            groups = [(heading, sorted(
+                catalog,
+                key=lambda x: (x.get("sortOrder") or 0, x.get("name") or ""),
+            ))]
+        else:
+            groups = _grouped_catalog(catalog)
+        shown = 0
+        truncated = False
+        for pname, ms in groups:
+            if shown >= _MILESTONE_CATALOG_CAP:
+                truncated = True
+                break
+            lines.append(f"  Milestones in {pname}:")
+            for m in ms:
+                if shown >= _MILESTONE_CATALOG_CAP:
+                    truncated = True
+                    break
+                lines.append(f"    {(m.get('name') or '')}{_milestone_target_suffix(m)}")
+                shown += 1
+            if truncated:
+                break
+        if truncated:
+            lines.append("    …")
+        lines.append("")
+        if heading:
+            lines.append(f"  Full list:  linear milestones list {heading}")
+        else:
+            lines.append("  Full list:  linear projects")
+    lines.append("  If it genuinely has no milestone, say so explicitly: --skip-milestone")
+    return "\n".join(lines)
+
+
 def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
                         verbose: bool = True) -> tuple[dict | None, str | None]:
     """Build an IssueCreateInput from a flat fields dict (keys match flag names:
     title, description, description_file, priority, parent, project,
-    milestone, status, cycle, assign, due_date, label, force).
+    milestone, skip_milestone, status, cycle, assign, due_date, label, force).
 
     Returns (input_obj, None) on success or (None, error) on hard failure.
     Smart defaults applied silently. Warnings go to stderr when verbose=True.
@@ -3129,12 +3282,27 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
             return None, str(e)
         input_obj["projectId"] = project_id
 
-    if fields.get("milestone"):
+    skip_milestone = bool(fields.get("skip_milestone"))
+    milestone = fields.get("milestone")
+    if milestone and skip_milestone:
+        return None, conflicting_milestone_flags_error(milestone, multiline=verbose)
+
+    if milestone:
         try:
             mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id, strict=True)
         except LookupError as e:
             return None, str(e)
         input_obj["projectMilestoneId"] = mid
+
+    # An issue with no milestone is nobody's deliverable — it sits in the
+    # project's "No milestone" bucket. Refuse by default; --skip-milestone
+    # is the deliberate escape hatch (mirrors --force for unowned).
+    if "projectMilestoneId" not in input_obj and not skip_milestone:
+        catalog = list_milestone_catalog(api_key, team_id, project_id)
+        heading = fields.get("project") if (project_id or fields.get("project")) else None
+        return None, missing_milestone_error(
+            title, catalog, project_name=heading, multiline=verbose,
+        )
 
     desired_status = fields.get("status")
     if not desired_status:
@@ -3226,7 +3394,8 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
 
 def cmd_create(args, cfg, api_key, team_id):
     if args.from_file:
-        return _bulk_create(args.from_file, cfg, api_key, team_id, force=args.force)
+        return _bulk_create(args.from_file, cfg, api_key, team_id,
+                            force=args.force, skip_milestone=args.skip_milestone)
 
     fields = {
         "title": args.title,
@@ -3236,6 +3405,7 @@ def cmd_create(args, cfg, api_key, team_id):
         "parent": args.parent,
         "project": args.project,
         "milestone": args.milestone,
+        "skip_milestone": args.skip_milestone,
         "status": args.status,
         "cycle": args.cycle,
         "assign": args.assign,
@@ -3260,13 +3430,15 @@ def cmd_create(args, cfg, api_key, team_id):
     print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
 
 
-def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False):
+def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
+                 skip_milestone: bool = False):
     """Bulk create from JSONL. Each line is a JSON object with field names
     matching the single-create flags. Continue-on-error; tab-separated output:
     OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON.
 
     `force` applies the --force owner-check bypass to every row; a row can also
-    carry its own "force": true."""
+    carry its own "force": true. `skip_milestone` is the same for the
+    milestone check; a row can carry "skip_milestone": true."""
     if path == "-":
         stream = sys.stdin
     else:
@@ -3290,6 +3462,8 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False):
 
         if force:
             fields["force"] = True
+        if skip_milestone:
+            fields["skip_milestone"] = True
         title_hint = tsv_field(
             fields.get("title")
             or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
@@ -5158,7 +5332,11 @@ def main():
     p_create.add_argument("--project", default=None,
                           help="Project name or ID")
     p_create.add_argument("--milestone", default=None,
-                          help="Project milestone name (resolved within --project if set)")
+                          help="Project milestone name (resolved within --project if set). "
+                               "Required unless --skip-milestone.")
+    p_create.add_argument("--skip-milestone", action="store_true",
+                          help="Create even with no milestone. Without it, an issue that "
+                               "would land in the project's \"No milestone\" bucket is refused.")
     p_create.add_argument("--force", action="store_true",
                           help="Create even with no assignee. Without it, an issue that "
                                "would land unowned is refused — every ticket needs an owner.")

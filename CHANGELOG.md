@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`linear create` refuses to create an issue with no milestone.** An issue
+  with no milestone is nobody's deliverable — it lands in the project's
+  "No milestone" bucket and nobody can tell which slice of the project it
+  belongs to. `create` now fails closed with a message explaining why it
+  refused, listing the actual milestones (the project's when `--project` is
+  set, otherwise the team's grouped by project), and how to fix it. Pass
+  `--milestone "<name>"` to attach one, or `--skip-milestone` to create
+  without one deliberately — the same shape as the `--force` owner guard.
+  `--milestone` and `--skip-milestone` together is a hard error. The check
+  applies to `--from-file` bulk create per row; `--skip-milestone` waives it
+  for the whole file, or set `"skip_milestone": true` on a single row. Bulk
+  error text stays on one line so the tab-separated record is still
+  parseable — a milestone or project name echoed into that message is
+  `repr`-escaped, so a tab or newline in it can't split the record.
+  (PHNX-4045)
+
 ## [0.22.0] - 2026-09-10
 
 ### Added
