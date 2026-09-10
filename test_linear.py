@@ -686,7 +686,17 @@ class CreateRequiresMilestoneTest(unittest.TestCase):
         self.assertIsNone(input_obj)
         self.assertEqual(seen["id"], "p1")
         self.assertIn("Milestones in Rush", err)
-        self.assertIn("linear milestones list Rush", err)
+        self.assertIn("linear milestones list 'Rush'", err)
+
+    def test_full_list_quotes_project_names_with_spaces(self):
+        linear_cli.list_milestone_catalog = lambda *_a, **_k: [
+            {"id": "m1", "name": "v1.0", "targetDate": None, "sortOrder": 0,
+             "project": {"id": "p1", "name": "Rush App"}},
+        ]
+        input_obj, err = self._build(project="Rush App")
+        self.assertIsNone(input_obj)
+        self.assertIn("linear milestones list 'Rush App'", err)
+        self.assertNotRegex(err, r"linear milestones list Rush App(\n|$)")
 
 
 class VersionMatchesChangelogTest(unittest.TestCase):
