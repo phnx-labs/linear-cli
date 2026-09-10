@@ -100,13 +100,14 @@ linear queue drain                      # apply queued closes with backoff
 linear queue drain --once               # apply one due intent, then stop
 linear queue drain --dry-run            # preview queued closes without applying
 
-linear create "Fix auth bug" --label security --priority high
-linear create --description "Paragraph dump — title is derived from this."
-linear create "Sub-task" --parent ANT-42     # nested; prints a tip nudging a flat issue
+linear create "Fix auth bug" --milestone "v1.0" --label security --priority high
+linear create --description "Paragraph dump — title is derived from this." --milestone "v1.0"
+linear create "Sub-task" --parent ANT-42 --milestone "v1.0"  # nested; prints a tip nudging a flat issue
 linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
-linear create "Ship it" --delegate droid    # create + hand to an agent
+linear create "Ship it" --delegate droid --milestone "v1.0"
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
-linear create "Unowned" --assign none --force  # refused without --force: every issue needs an owner
+linear create "Unowned" --assign none --force --skip-milestone  # refused without --force: every issue needs an owner
+linear create "No deliverable yet" --skip-milestone  # refused without --skip-milestone: every issue needs a milestone
 
 linear projects                       # list projects + progress + issue count
 linear projects "Phoenix"             # detail view: milestones with per-milestone % done
@@ -153,6 +154,7 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Directory-aware scope.** When `agents projects` binds the current directory to a Linear project, `linear tasks` (and `--board`) auto-scope to that project — so an agent launched inside a project folder works that project's queue, not the whole workspace. `--all` shows every project, `--project X` overrides, and `autoScope: false` in `~/.linear-cli/config.json` disables it. Fail-open: with no `agents` CLI or no binding for the cwd, nothing changes. The `--json` output carries `project: {id, name, auto}` (null when unscoped).
 - **Milestones as deliverables.** `--milestone` scopes to one deliverable across all cycles; `--by-milestone` groups a project's issues by milestone (with a *No milestone* bucket for unmatched work), each row annotated with its cycle so you see which iteration a deliverable's work is scheduled in. `linear projects` / `milestones list` roll up per-milestone % done, so a deliverable's progress sits next to its target date. Scoping to `--project`/`--milestone` widens to all cycles by default (the whole deliverable, not just this cycle's slice).
 - **Every issue gets an owner.** `create` refuses to make an unassigned issue and says why. The default already assigns the API key owner, so this only fires when the assignee would be empty — `--assign none`, an `--assign` value matching no human (which used to warn and create it unowned anyway), or an unresolvable API key owner (which used to create it unowned with no warning at all). Fix it with `--assign <email|name>`, or say `--force` when it genuinely has no owner yet. `--delegate` doesn't count: it sets the agent, not the owner, so pair it with `--assign`. Keeps the board's "No assignee" bucket from filling with tickets nobody picks up.
+- **Every issue gets a milestone.** `create` refuses to make an issue with no milestone and says why — it would land in the project's "No milestone" bucket, and nobody can tell which deliverable it belongs to. Pass `--milestone "<name>"` (resolved within `--project` if set); the error prints the actual list so an agent can pick one. `--skip-milestone` is the explicit opt-out, like `--force` for an unowned issue. The two flags together are a hard error. `--from-file` applies the check per row; command-level `--skip-milestone` waives every row, or set `"skip_milestone": true` on a single row. Does not auto-assign a milestone or backfill existing issues.
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
 - **One ownership model.** `delegate` is the only thing that owns an issue. `linear tasks --agent claude` filters to issues delegated to Claude; the default view adds the issues nobody has been delegated (`delegate` is null). `linear tasks --board` groups its columns by delegate. There is no label lane — an unknown `--agent` aborts rather than printing an empty queue.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.

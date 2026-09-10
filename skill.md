@@ -21,7 +21,7 @@ linear queue                           # closes waiting on a rate limit
 linear queue list                      # same as bare queue
 linear queue drain                     # apply queued closes with backoff
 linear queue drain --once              # apply one due intent
-linear create "Title" --label foo --priority high --description "..."
+linear create "Title" --milestone "v1.0" --label foo --priority high --description "..."
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
 linear projects update "Name" --description "..."  # set description / lead / dates / state
@@ -146,14 +146,14 @@ linear milestones delete "Alpha 25" --project "Rush CLI"
 
 ## Creating issues — what's required
 
-Only one thing: a title OR a description. Everything else has a sensible default.
+A title OR a description, plus a milestone. Everything else has a sensible default.
 
 ```
-linear create "Fix auth bug"                          # minimum
-linear create --description "Long paragraph..."       # title derived from first line/sentence
-linear create --description-file plan.md              # multi-paragraph markdown
-echo "..." | linear create --description-file -       # stdin
-linear create "Sub-task" --parent ANT-42             # nested; prints a tip nudging a flat issue
+linear create "Fix auth bug" --milestone "v1.0"       # minimum
+linear create --description "Long paragraph..." --milestone "v1.0"
+linear create --description-file plan.md --milestone "v1.0"
+echo "..." | linear create --description-file - --skip-milestone
+linear create "Sub-task" --parent ANT-42 --milestone "v1.0"
 linear create "Item" --project "Phoenix" --milestone "v1.0"
 linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
 ```
@@ -171,7 +171,7 @@ anything. It refuses whenever the assignee would end up empty:
   no warning at all
 
 ```
-linear create "Fix auth bug" --assign none
+linear create "Fix auth bug" --assign none --skip-milestone
 # Refusing to create an unassigned issue: 'Fix auth bug'
 #   Why: you passed --assign none.
 #   ...
@@ -190,13 +190,45 @@ name the human who owns it too — `--assign bisma --delegate claude`.
 Unowned issues pile up in the board's "No assignee" bucket and nobody picks
 them up, which is why this is a hard refusal rather than a warning.
 
+### Every issue needs a milestone
+
+`create` refuses to make an issue with no milestone. There is no default —
+an omitted `--milestone` is a hard error, not a silent create. The refusal
+prints the actual milestone list (that project's when `--project` is set,
+otherwise the team's grouped by project) so you can pick one.
+
+```
+linear create "Fix auth bug"
+# Refusing to create an issue without a milestone: 'Fix auth bug'
+#   Creating a task with no milestone is bad practice — it lands in the project's
+#   "No milestone" bucket and nobody can tell which deliverable it belongs to.
+#   Attach it:  --milestone "<name>"   (resolved within --project if set)
+#   ...
+#   If it genuinely has no milestone, say so explicitly: --skip-milestone
+```
+
+Pick one:
+
+- `--milestone "<name>"` — attach it to a deliverable (`linear milestones list`
+  / `linear projects` lists them). Resolved within `--project` if set.
+- `--skip-milestone` — create it with no milestone anyway. Deliberate, not a
+  default.
+
+`--milestone` and `--skip-milestone` together is a hard error: pass one, not
+both. `--project` is not required and nothing is auto-assigned.
+
+The milestone check applies per `--from-file` row — set `"milestone"` on the
+row, or `"skip_milestone": true` on a single row, or pass `--skip-milestone`
+to waive it for the whole file.
+
 Bulk output is tab-separated for easy parsing:
 ```
 OK    ANT-42  Fix auth
 ERROR  -      Other       project 'Foo' not found
 ```
 Bad lines don't stop the run. The owner check applies per row — set `"assign"`
-on the row, or pass `--force` to waive it for the whole file.
+on the row, or pass `--force` to waive it for the whole file. The milestone
+check is the same shape with `"milestone"` / `"skip_milestone"` / `--skip-milestone`.
 
 ## Multi-team workspaces
 
