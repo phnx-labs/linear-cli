@@ -2492,11 +2492,19 @@ _ISSUE_COMMENTS_QUERY = """query($id: ID!, $cursor: String) {
 def fetch_issue_comments(api_key: str, issue_id: str) -> list[dict] | None:
     """Every comment on one issue, fully paginated, in a deterministic order
     (createdAt ascending, then id) with stable comment ids. Returns None on an
-    API error so the caller exits non-zero; never silently truncates — the
-    paginator warns loudly to stderr if the safety rail is ever reached."""
+    API error OR a truncated result so the caller exits non-zero — a comment
+    thread that hit the pagination safety rail is NOT a complete detail view, so
+    honor the paginator's partial_out and fail loudly rather than pass off a
+    silently-cut list as whole."""
+    capped: dict = {}
     nodes = paginate_connection(api_key, _ISSUE_COMMENTS_QUERY, ["comments"],
-                                {"id": issue_id})
+                                {"id": issue_id}, partial_out=capped)
     if nodes is None:
+        return None
+    if capped:
+        print(f"Error: comment history truncated at {capped['rows']} "
+              f"(pagination safety rail); refusing to show a partial thread.",
+              file=sys.stderr)
         return None
     # Tie-break on id so equal timestamps still order deterministically.
     nodes.sort(key=lambda c: (c.get("createdAt") or "", c.get("id") or ""))

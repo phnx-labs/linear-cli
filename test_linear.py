@@ -2800,6 +2800,29 @@ class IssueCommentsFetchTest(unittest.TestCase):
             linear_cli.gql = original
         self.assertIsNone(result)
 
+    def test_truncated_thread_fails_loudly(self):
+        # A thread that hits the pagination safety rail is not a complete detail
+        # view — fetch_issue_comments must return None (caller exits nonzero),
+        # not a silently-cut list.
+        original_gql = linear_cli.gql
+        original_max = linear_cli._MAX_PAGES
+        linear_cli._MAX_PAGES = 2
+        # Every page reports hasNextPage=true, so the rail is the only stop.
+        linear_cli.gql = lambda *a, **k: {"data": {"comments": {
+            "pageInfo": {"hasNextPage": True, "endCursor": "c"},
+            "nodes": [{"id": "x", "body": "b", "createdAt": "2026-09-01T00:00:00Z",
+                       "url": "u", "user": {"id": "u", "name": "n", "avatarUrl": None, "app": False}}],
+        }}}
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                result = linear_cli.fetch_issue_comments("k", "iid")
+        finally:
+            linear_cli.gql = original_gql
+            linear_cli._MAX_PAGES = original_max
+        self.assertIsNone(result)
+        self.assertIn("truncated", err.getvalue())
+
 
 class OverviewFetchTest(unittest.TestCase):
     """_project_overview end to end over a fake gql keyed on query text. The
