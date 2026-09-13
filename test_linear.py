@@ -2550,7 +2550,8 @@ class ProjectPriorityTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _ov_issue(ident, project=None, milestone=None, state_type="started",
-              state_name=None, cycle=28, priority=2, assignee="Muqsit"):
+              state_name=None, cycle=28, priority=2, assignee="Muqsit",
+              updated_at="2026-09-12T00:00:00.000Z", delegate=None):
     """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
     names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
              "completed": "Done", "canceled": "Canceled", "triage": "Triage"}
@@ -2558,8 +2559,13 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
         "identifier": ident, "title": f"title {ident}",
         "url": f"https://linear.app/x/issue/{ident}",
         "priority": priority,
+        "updatedAt": updated_at,
         "state": {"name": state_name or names[state_type], "type": state_type},
-        "assignee": {"name": assignee} if assignee else None,
+        "assignee": ({"id": f"u-{assignee.lower()}", "name": assignee,
+                      "avatarUrl": None, "app": False} if assignee else None),
+        "delegate": ({"id": f"a-{delegate.lower()}", "name": delegate,
+                      "avatarUrl": f"https://avatars/{delegate.lower()}", "app": True}
+                     if delegate else None),
         "cycle": {"number": cycle} if cycle is not None else None,
         "projectMilestone": {"id": milestone} if milestone else None,
         "project": {"id": project or _OV_AGI},
@@ -2568,10 +2574,10 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
 
 _OV_AGI = "8eb8f5b1-3870-4590-ba67-36f3811d1435"
 _OV_PROJECTS = [
-    {"id": _OV_AGI, "name": "AGI", "priority": 2, "state": "started", "targetDate": "2026-10-01"},
-    {"id": "p-zed", "name": "zed", "priority": 1, "state": "planned", "targetDate": None},
-    {"id": "p-alpha", "name": "Alpha", "priority": 0, "state": "backlog", "targetDate": None},
-    {"id": "p-bravo", "name": "bravo", "priority": 2, "state": "started", "targetDate": None},
+    {"id": _OV_AGI, "name": "AGI", "priority": 2, "state": "started", "targetDate": "2026-10-01", "updatedAt": "2026-09-11T00:00:00.000Z"},
+    {"id": "p-zed", "name": "zed", "priority": 1, "state": "planned", "targetDate": None, "updatedAt": "2026-09-10T00:00:00.000Z"},
+    {"id": "p-alpha", "name": "Alpha", "priority": 0, "state": "backlog", "targetDate": None, "updatedAt": None},
+    {"id": "p-bravo", "name": "bravo", "priority": 2, "state": "started", "targetDate": None, "updatedAt": None},
 ]
 _OV_MILESTONES = [
     {"id": "m-late", "name": "v2", "targetDate": None, "sortOrder": 10, "project": {"id": _OV_AGI}},
@@ -2600,12 +2606,13 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(set(doc["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
         agi = doc["projects"][1]
         self.assertEqual(set(agi), {"id", "name", "priority", "state", "targetDate",
-                                    "milestones", "noMilestone"})
+                                    "updatedAt", "milestones", "noMilestone"})
         ms = agi["milestones"][0]
         self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
         self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
         self.assertEqual(set(ms["open"][0]),
-                         {"identifier", "title", "state", "cycle", "assignee", "priority", "url"})
+                         {"identifier", "title", "state", "cycle", "assignee", "assigneeId",
+                          "delegate", "updatedAt", "priority", "url"})
         self.assertEqual(set(agi["noMilestone"]), {"issues", "open"})
         self.assertEqual(doc["generatedAt"], "2026-09-10T09:30:05.127Z")
         self.assertIs(doc["partial"], False)
@@ -2660,9 +2667,27 @@ class OverviewBuildTest(unittest.TestCase):
                         )["projects"][1]["noMilestone"]["open"][0]
         self.assertEqual(row, {
             "identifier": "PHNX-1", "title": "title PHNX-1", "state": "Doing",
-            "cycle": None, "assignee": None, "priority": 0,
+            "cycle": None, "assignee": None, "assigneeId": None, "delegate": None,
+            "updatedAt": "2026-09-12T00:00:00.000Z", "priority": 0,
             "url": "https://linear.app/x/issue/PHNX-1",
         })
+
+    def test_issue_row_carries_assignee_id_and_delegate_identity(self):
+        # assignee stays the human's NAME string; assigneeId + the delegate
+        # identity object ride beside it for the menu's avatar rendering.
+        row = self._doc([_ov_issue("PHNX-2", assignee="Muqsit", delegate="Claude")]
+                        )["projects"][1]["noMilestone"]["open"][0]
+        self.assertEqual(row["assignee"], "Muqsit")
+        self.assertEqual(row["assigneeId"], "u-muqsit")
+        self.assertEqual(row["delegate"], {
+            "id": "a-claude", "name": "Claude",
+            "avatarUrl": "https://avatars/claude", "app": True,
+        })
+
+    def test_projects_carry_updated_at(self):
+        doc = self._doc()
+        self.assertEqual(doc["projects"][1]["updatedAt"], "2026-09-11T00:00:00.000Z")
+        self.assertIsNone(doc["projects"][3]["updatedAt"])
 
     def test_no_milestone_bucket_is_per_project(self):
         issues = [_ov_issue("PHNX-1"),
@@ -2680,6 +2705,100 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertIsNone(doc["cycle"])
         self.assertIs(doc["partial"], True)
         self.assertEqual(doc["partialReason"], "issues stopped at 25000")
+
+
+def _update_args(**over):
+    """A fully-populated `update` args namespace with every field off, so a test
+    can flip exactly the one it exercises without AttributeError."""
+    base = dict(
+        comment=None, proof=[], done=False, pickup=False, todo=False, status=None,
+        priority=None, assign=None, delegate=None, parent=None, title=None,
+        description=None, description_file=None, due_date=None, cycle=None,
+        blocks=None, blocked_by=None, relates=None, label=None, unlabel=None,
+        identifier="RUSH-1",
+    )
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+class CommentFailureTest(unittest.TestCase):
+    """The one-field `update --comment` action must exit non-zero when Linear
+    rejects the comment — it used to print 'Comment failed' but return
+    did_something=True (exit 0), hiding the failure from a scripted caller."""
+
+    def _apply(self, success):
+        issue = {"id": "iid", "identifier": "RUSH-1"}
+        original = linear_cli.gql
+        linear_cli.gql = lambda *a, **k: {"data": {"commentCreate": {"success": success}}}
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                did = linear_cli._apply_update(_update_args(comment="hi"), {}, "k", "t",
+                                               issue, single=True)
+        finally:
+            linear_cli.gql = original
+        return did, out.getvalue(), err.getvalue()
+
+    def test_failed_comment_returns_false(self):
+        did, _out, err = self._apply(False)
+        self.assertIs(did, False)
+        self.assertIn("Comment failed", err)
+
+    def test_successful_comment_returns_true(self):
+        did, out, _err = self._apply(True)
+        self.assertIs(did, True)
+        self.assertIn("Comment added to RUSH-1", out)
+
+
+class IssueCommentsFetchTest(unittest.TestCase):
+    """fetch_issue_comments fully paginates, carries stable ids, and orders
+    deterministically (createdAt asc, then id) — the inline query it replaced
+    returned only the first page and no comment id."""
+
+    def _fake_gql(self, pages):
+        it = iter(pages)
+
+        def fake_gql(_key, _query, _vars=None):
+            try:
+                page = next(it)
+            except StopIteration:
+                self.fail("gql called more times than there are pages")
+            return {"data": {"comments": page}}
+        return fake_gql
+
+    def test_paginates_and_orders_with_ids(self):
+        pages = [
+            {"pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+             "nodes": [
+                 {"id": "c-b", "body": "second", "createdAt": "2026-09-02T00:00:00Z",
+                  "url": "u2", "user": {"id": "u1", "name": "Muqsit", "avatarUrl": None, "app": False}},
+             ]},
+            {"pageInfo": {"hasNextPage": False, "endCursor": None},
+             "nodes": [
+                 {"id": "c-a", "body": "first", "createdAt": "2026-09-01T00:00:00Z",
+                  "url": "u1", "user": {"id": "a1", "name": "Claude", "avatarUrl": "x", "app": True}},
+             ]},
+        ]
+        original = linear_cli.gql
+        linear_cli.gql = self._fake_gql(pages)
+        try:
+            comments = linear_cli.fetch_issue_comments("k", "iid")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual([c["id"] for c in comments], ["c-a", "c-b"])  # createdAt asc
+        self.assertEqual(comments[0]["user"]["app"], True)
+        self.assertEqual(comments[1]["url"], "u2")
+
+    def test_api_error_returns_none(self):
+        original = linear_cli.gql
+        linear_cli.gql = lambda *a, **k: {"errors": [{"message": "boom"}]}
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                result = linear_cli.fetch_issue_comments("k", "iid")
+        finally:
+            linear_cli.gql = original
+        self.assertIsNone(result)
 
 
 class OverviewFetchTest(unittest.TestCase):
