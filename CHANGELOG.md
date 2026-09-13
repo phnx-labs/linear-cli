@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-13
+
 ### Changed
 
 - **`linear create` refuses to create an issue with no milestone.** An issue
@@ -24,6 +26,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parseable — a milestone or project name echoed into that message is
   `repr`-escaped, so a tab or newline in it can't split the record.
   (PHNX-4045)
+
+### Added
+
+- **`projects overview --json` carries identity + timestamps for AGI Menu.**
+  Each project row now includes `updatedAt`, and each open issue row adds
+  `updatedAt`, `assigneeId` (beside the unchanged `assignee` name string), and
+  a `delegate` identity object `{id, name, avatarUrl, app}` — enough for the
+  menu to draw an assignee/delegate avatar without a second lookup. (PHNX-3999)
+- **`tasks <ID> --json` returns full identities and every comment.** `assignee`
+  and `delegate` are now identity objects `{id, name, avatarUrl, app}`, and the
+  issue's comments are fetched separately and **fully paginated** with stable
+  comment `id`s, `url`, a `user` identity, and a deterministic order (createdAt
+  ascending, then id) — the inline query it replaced returned only Linear's
+  first page and carried no comment id. (PHNX-3999)
+- **`users --json` carries `avatarUrl`** alongside `id`, `name`, `email`,
+  `displayName`, and `app`. (PHNX-3999)
+
+### Fixed
+
+- **`update <ID> --comment` exits non-zero when the comment is rejected.** A
+  failed `commentCreate` printed "Comment failed" but still reported the update
+  as done (exit 0), hiding the failure from scripts and the bulk roll-up. The
+  message now goes to stderr and the action fails. (PHNX-3999)
+- **`tasks <ID>` and `projects overview` exit non-zero on an API error.** A
+  GraphQL error while fetching an issue detail or paginating comments now exits
+  1 instead of returning silently with no output, so a caller can tell
+  "errored" from "found nothing". (PHNX-3999)
 
 ## [0.22.0] - 2026-09-10
 

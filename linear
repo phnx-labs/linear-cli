@@ -66,7 +66,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -870,7 +870,7 @@ def list_workspace_users(api_key: str) -> list[dict]:
     query = """query($cursor: String) {
         users(filter: { active: { eq: true } }, first: 100, after: $cursor) {
             pageInfo { hasNextPage endCursor }
-            nodes { id name email displayName app }
+            nodes { id name email displayName app avatarUrl }
         }
     }"""
     return paginate_connection(api_key, query, ["users"]) or []
@@ -2473,6 +2473,44 @@ def show_board(args, api_key, team_id, cfg):
         print()
 
 
+_ISSUE_COMMENTS_QUERY = """query($id: ID!, $cursor: String) {
+    comments(
+        filter: { issue: { id: { eq: $id } } }
+        orderBy: createdAt
+        first: 100
+        after: $cursor
+    ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+            id body createdAt url
+            user { id name avatarUrl app }
+        }
+    }
+}"""
+
+
+def fetch_issue_comments(api_key: str, issue_id: str) -> list[dict] | None:
+    """Every comment on one issue, fully paginated, in a deterministic order
+    (createdAt ascending, then id) with stable comment ids. Returns None on an
+    API error OR a truncated result so the caller exits non-zero — a comment
+    thread that hit the pagination safety rail is NOT a complete detail view, so
+    honor the paginator's partial_out and fail loudly rather than pass off a
+    silently-cut list as whole."""
+    capped: dict = {}
+    nodes = paginate_connection(api_key, _ISSUE_COMMENTS_QUERY, ["comments"],
+                                {"id": issue_id}, partial_out=capped)
+    if nodes is None:
+        return None
+    if capped:
+        print(f"Error: comment history truncated at {capped['rows']} "
+              f"(pagination safety rail); refusing to show a partial thread.",
+              file=sys.stderr)
+        return None
+    # Tie-break on id so equal timestamps still order deterministically.
+    nodes.sort(key=lambda c: (c.get("createdAt") or "", c.get("id") or ""))
+    return nodes
+
+
 def show_issue_detail(args, api_key, team_id):
     identifier = args.identifier
     number = identifier.split("-")[-1]
@@ -2492,8 +2530,8 @@ def show_issue_detail(args, api_key, team_id):
                 state {{ name }}
                 priority dueDate
                 labels {{ nodes {{ name }} }}
-                assignee {{ name }}
-                delegate {{ name }}
+                assignee {{ id name avatarUrl app }}
+                delegate {{ id name avatarUrl app }}
                 project {{ name }}
                 projectMilestone {{ name }}
                 cycle {{ number name }}
@@ -2501,20 +2539,29 @@ def show_issue_detail(args, api_key, team_id):
                 createdAt updatedAt
                 relations {{ nodes {{ type relatedIssue {{ identifier title }} }} }}
                 inverseRelations {{ nodes {{ type issue {{ identifier title }} }} }}
-                comments {{ nodes {{ body createdAt user {{ name }} }} }}
             }}
         }}
     }}""")
 
+    # An API error is a hard failure — exit non-zero rather than return 0 with
+    # no output, so a scripted caller can tell "errored" from "found nothing".
     if check_errors(data):
-        return
+        sys.exit(1)
 
     nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
     if not nodes:
         print(f"Issue {identifier} not found.")
-        return
+        sys.exit(1)
 
     n = nodes[0]
+
+    # Comments are fetched separately and FULLY paginated with stable ids and a
+    # deterministic order — the inline `comments {{ nodes }}` above only ever
+    # returned Linear's first page (a silent cutoff) and carried no comment id.
+    comments = fetch_issue_comments(api_key, n["id"])
+    if comments is None:
+        sys.exit(1)  # paginate_connection already printed the API error
+    n["comments"] = {"nodes": comments}
 
     if args.json:
         print(json.dumps(n, indent=2))
@@ -3048,9 +3095,14 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
 
         if data["data"]["commentCreate"]["success"]:
             print(f"Comment added to {identifier}.")
+            did_something = True
         else:
-            print("Comment failed.")
-        did_something = True
+            # A rejected commentCreate is a real failure: the one-field action
+            # must exit non-zero so a caller (and the bulk roll-up) can tell it
+            # apart from a posted comment. Previously this printed "Comment
+            # failed" but still set did_something=True and returned 0.
+            print("Comment failed.", file=sys.stderr)
+            return False
 
     if not did_something and single:
         print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --delegate, --title, --description, --due-date, or --comment.")
@@ -3724,9 +3776,10 @@ _OVERVIEW_ISSUE_QUERY = f"""query($ids: [ID!], $cursor: String) {{
            filter: {{ project: {{ id: {{ in: $ids }} }} }}) {{
         pageInfo {{ hasNextPage endCursor }}
         nodes {{
-            identifier title url priority
+            identifier title url priority updatedAt
             state {{ name type }}
-            assignee {{ name }}
+            assignee {{ id name avatarUrl app }}
+            delegate {{ id name avatarUrl app }}
             cycle {{ number }}
             projectMilestone {{ id }}
             project {{ id }}
@@ -3747,16 +3800,37 @@ _CURRENT_CYCLE_QUERY = """query($id: String!) {
 }"""
 
 
+def _identity(node: dict | None) -> dict | None:
+    """A user identity object {id,name,avatarUrl,app} for a menu row, or None
+    when the field is unset. `app` distinguishes an agent (delegate) from a human."""
+    if not node:
+        return None
+    return {
+        "id": node.get("id"),
+        "name": node.get("name"),
+        "avatarUrl": node.get("avatarUrl"),
+        "app": bool(node.get("app")),
+    }
+
+
 def overview_issue_row(n: dict) -> dict:
-    """The seven fields a menu row needs, flattened: names instead of nested
-    objects, and the cycle as its number so a caller can compare it against the
-    top-level `cycle.number` to pick out "this cycle"."""
+    """The fields a menu row needs, flattened: names instead of nested objects,
+    and the cycle as its number so a caller can compare it against the top-level
+    `cycle.number` to pick out "this cycle".
+
+    `assignee` stays the human's NAME string (unchanged contract); `assigneeId`
+    and `updatedAt` are added beside it, and `delegate` carries the full agent
+    identity {id,name,avatarUrl,app} the menu draws an avatar from."""
+    assignee = n.get("assignee") or {}
     return {
         "identifier": n.get("identifier"),
         "title": n.get("title"),
         "state": (n.get("state") or {}).get("name"),
         "cycle": (n.get("cycle") or {}).get("number"),
-        "assignee": (n.get("assignee") or {}).get("name"),
+        "assignee": assignee.get("name"),
+        "assigneeId": assignee.get("id"),
+        "delegate": _identity(n.get("delegate")),
+        "updatedAt": n.get("updatedAt"),
         "priority": n.get("priority") or 0,
         "url": n.get("url"),
     }
@@ -3820,6 +3894,7 @@ def build_overview(cycle: dict | None, projects: list[dict], milestones: list[di
             "priority": PROJECT_PRIORITY_WORD.get(p.get("priority") or 0, "none"),
             "state": p.get("state"),
             "targetDate": p.get("targetDate"),
+            "updatedAt": p.get("updatedAt"),
             "milestones": [
                 {"id": m["id"], "name": m.get("name"), "targetDate": m.get("targetDate"),
                  **overview_bucket(issues_by_ms.get(m["id"], []))}

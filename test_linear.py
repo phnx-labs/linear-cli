@@ -2550,7 +2550,8 @@ class ProjectPriorityTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _ov_issue(ident, project=None, milestone=None, state_type="started",
-              state_name=None, cycle=28, priority=2, assignee="Muqsit"):
+              state_name=None, cycle=28, priority=2, assignee="Muqsit",
+              updated_at="2026-09-12T00:00:00.000Z", delegate=None):
     """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
     names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
              "completed": "Done", "canceled": "Canceled", "triage": "Triage"}
@@ -2558,8 +2559,13 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
         "identifier": ident, "title": f"title {ident}",
         "url": f"https://linear.app/x/issue/{ident}",
         "priority": priority,
+        "updatedAt": updated_at,
         "state": {"name": state_name or names[state_type], "type": state_type},
-        "assignee": {"name": assignee} if assignee else None,
+        "assignee": ({"id": f"u-{assignee.lower()}", "name": assignee,
+                      "avatarUrl": None, "app": False} if assignee else None),
+        "delegate": ({"id": f"a-{delegate.lower()}", "name": delegate,
+                      "avatarUrl": f"https://avatars/{delegate.lower()}", "app": True}
+                     if delegate else None),
         "cycle": {"number": cycle} if cycle is not None else None,
         "projectMilestone": {"id": milestone} if milestone else None,
         "project": {"id": project or _OV_AGI},
@@ -2568,10 +2574,10 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
 
 _OV_AGI = "8eb8f5b1-3870-4590-ba67-36f3811d1435"
 _OV_PROJECTS = [
-    {"id": _OV_AGI, "name": "AGI", "priority": 2, "state": "started", "targetDate": "2026-10-01"},
-    {"id": "p-zed", "name": "zed", "priority": 1, "state": "planned", "targetDate": None},
-    {"id": "p-alpha", "name": "Alpha", "priority": 0, "state": "backlog", "targetDate": None},
-    {"id": "p-bravo", "name": "bravo", "priority": 2, "state": "started", "targetDate": None},
+    {"id": _OV_AGI, "name": "AGI", "priority": 2, "state": "started", "targetDate": "2026-10-01", "updatedAt": "2026-09-11T00:00:00.000Z"},
+    {"id": "p-zed", "name": "zed", "priority": 1, "state": "planned", "targetDate": None, "updatedAt": "2026-09-10T00:00:00.000Z"},
+    {"id": "p-alpha", "name": "Alpha", "priority": 0, "state": "backlog", "targetDate": None, "updatedAt": None},
+    {"id": "p-bravo", "name": "bravo", "priority": 2, "state": "started", "targetDate": None, "updatedAt": None},
 ]
 _OV_MILESTONES = [
     {"id": "m-late", "name": "v2", "targetDate": None, "sortOrder": 10, "project": {"id": _OV_AGI}},
@@ -2600,12 +2606,13 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(set(doc["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
         agi = doc["projects"][1]
         self.assertEqual(set(agi), {"id", "name", "priority", "state", "targetDate",
-                                    "milestones", "noMilestone"})
+                                    "updatedAt", "milestones", "noMilestone"})
         ms = agi["milestones"][0]
         self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
         self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
         self.assertEqual(set(ms["open"][0]),
-                         {"identifier", "title", "state", "cycle", "assignee", "priority", "url"})
+                         {"identifier", "title", "state", "cycle", "assignee", "assigneeId",
+                          "delegate", "updatedAt", "priority", "url"})
         self.assertEqual(set(agi["noMilestone"]), {"issues", "open"})
         self.assertEqual(doc["generatedAt"], "2026-09-10T09:30:05.127Z")
         self.assertIs(doc["partial"], False)
@@ -2660,9 +2667,27 @@ class OverviewBuildTest(unittest.TestCase):
                         )["projects"][1]["noMilestone"]["open"][0]
         self.assertEqual(row, {
             "identifier": "PHNX-1", "title": "title PHNX-1", "state": "Doing",
-            "cycle": None, "assignee": None, "priority": 0,
+            "cycle": None, "assignee": None, "assigneeId": None, "delegate": None,
+            "updatedAt": "2026-09-12T00:00:00.000Z", "priority": 0,
             "url": "https://linear.app/x/issue/PHNX-1",
         })
+
+    def test_issue_row_carries_assignee_id_and_delegate_identity(self):
+        # assignee stays the human's NAME string; assigneeId + the delegate
+        # identity object ride beside it for the menu's avatar rendering.
+        row = self._doc([_ov_issue("PHNX-2", assignee="Muqsit", delegate="Claude")]
+                        )["projects"][1]["noMilestone"]["open"][0]
+        self.assertEqual(row["assignee"], "Muqsit")
+        self.assertEqual(row["assigneeId"], "u-muqsit")
+        self.assertEqual(row["delegate"], {
+            "id": "a-claude", "name": "Claude",
+            "avatarUrl": "https://avatars/claude", "app": True,
+        })
+
+    def test_projects_carry_updated_at(self):
+        doc = self._doc()
+        self.assertEqual(doc["projects"][1]["updatedAt"], "2026-09-11T00:00:00.000Z")
+        self.assertIsNone(doc["projects"][3]["updatedAt"])
 
     def test_no_milestone_bucket_is_per_project(self):
         issues = [_ov_issue("PHNX-1"),
