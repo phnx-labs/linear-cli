@@ -3719,9 +3719,14 @@ class UnknownLabelMessageTests(unittest.TestCase):
     def test_names_the_team_labels_and_the_full_list_command(self):
         msg = linear_cli._unknown_label_message("prix-api-audit", self.NAMES)
         self.assertTrue(msg.startswith("label 'prix-api-audit' not found, skipping."))
-        self.assertIn("Labels are owner-managed: pick one of the team's 6 (Bug, engineering, Feature, growth, Improvement, security)", msg)
+        self.assertIn("Labels are owner-managed: pick one of the team's 6 labels (Bug, engineering, Feature, growth, Improvement, security)", msg)
         self.assertIn("full list: linear labels.", msg)
         self.assertNotIn("Did you mean", msg)
+
+    def test_empty_team_says_so_instead_of_a_zero_count(self):
+        msg = linear_cli._unknown_label_message("foo", [])
+        self.assertIn("The team has no labels yet", msg)
+        self.assertNotIn("team's 0", msg)
 
     def test_near_miss_gets_a_did_you_mean(self):
         msg = linear_cli._unknown_label_message("bugs", self.NAMES)
@@ -3730,7 +3735,7 @@ class UnknownLabelMessageTests(unittest.TestCase):
     def test_long_lists_are_elided(self):
         names = [f"label-{i}" for i in range(20)]
         msg = linear_cli._unknown_label_message("zzz", names)
-        self.assertIn("team's 20 (label-0, label-1, label-10, ", msg)
+        self.assertIn("team's 20 labels (label-0, label-1, label-10, ", msg)
         self.assertIn("label-19, …)", msg)
         self.assertNotIn("label-2,", msg)
 

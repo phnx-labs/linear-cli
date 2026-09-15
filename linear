@@ -1099,10 +1099,13 @@ def _unknown_label_message(label: str, names: list[str]) -> str:
     taxonomy, so the fix is picking an existing one, never creating it — the
     message says so at the moment an agent would otherwise reach for
     `linear labels create`."""
+    if not names:
+        return (f"label '{label}' not found, skipping. The team has no labels yet; "
+                "labels are owner-managed, so ask the owner rather than creating one.")
     names = sorted(names, key=str.lower)  # stable, scannable; the API order is creation order
     shown = ", ".join(names[:12]) + (", …" if len(names) > 12 else "")
     return (f"label '{label}' not found, skipping.{_suggest(label, names)} "
-            f"Labels are owner-managed: pick one of the team's {len(names)} "
+            f"Labels are owner-managed: pick one of the team's {len(names)} labels "
             f"({shown}); full list: linear labels.")
 
 
