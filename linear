@@ -2241,9 +2241,12 @@ def rrf(rankings: dict[str, list[str]], k: int = RRF_K
 # `--similar` ranks over the whole team, done and canceled included. Paginating
 # that board costs ~11 s for ~4k issues, so it lives in cache.sqlite and a run
 # only pulls the issues whose `updatedAt` moved since the last sync. Archived
-# issues never appear in an incremental pull (the connection excludes them), so
-# a full refresh runs once a week to drop them. `rm ~/.linear-cli/cache.sqlite`
-# is the reset.
+# issues and issues moved to another team never appear in an incremental pull
+# (the connection excludes them), so a full refresh runs once a week to drop
+# them. The watermark is inclusive (`gte`) and rows are upserted by id, so two
+# issues stamped in the same instant, one of them not yet visible to the read,
+# cost a re-fetch of that instant rather than a missed issue.
+# `rm ~/.linear-cli/cache.sqlite` is the reset.
 BOARD_FULL_REFRESH = timedelta(days=7)
 
 
@@ -2274,13 +2277,20 @@ def cached_team_issues(api_key: str, team_id: str, *,
                 full = True
         filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
         if not full and last_updated_at:
-            filters.append(f'updatedAt: {{ gt: "{last_updated_at}" }}')
+            filters.append(f'updatedAt: {{ gte: "{last_updated_at}" }}')
         fetched = paginate_issues(api_key, ", ".join(filters))
         if fetched is None:
             cached = _board_rows(conn, team_id)
             if not cached:
                 return None
             print(f"board cache: refresh failed, using the board as of {last_updated_at}",
+                  file=sys.stderr)
+        elif full and len(fetched) >= _PAGE_SIZE * _MAX_PAGES:
+            # paginate_issues stopped at its safety rail and returned a partial
+            # board; replacing the cache with it would drop everything past the
+            # rail for good. Keep what we have and try again next run.
+            cached = _board_rows(conn, team_id)
+            print("board cache: full refresh hit the pagination rail; keeping the cached board",
                   file=sys.stderr)
         else:
             if full:
@@ -2551,7 +2561,8 @@ def _cache_db() -> sqlite3.Connection:
     """
     CACHE_DB_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
     if not CACHE_DB_PATH.exists() and _LEGACY_EMBEDDINGS_DB_PATH.exists():
-        os.replace(_LEGACY_EMBEDDINGS_DB_PATH, CACHE_DB_PATH)
+        with contextlib.suppress(FileNotFoundError):  # a parallel first run already moved it
+            os.replace(_LEGACY_EMBEDDINGS_DB_PATH, CACHE_DB_PATH)
     CACHE_DB_PATH.touch(mode=CONFIG_FILE_MODE, exist_ok=True)
     conn = sqlite3.connect(CACHE_DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS vectors (
