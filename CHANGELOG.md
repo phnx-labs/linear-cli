@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `linear tasks --similar` is the explicit check; `create` repeats it.
   (PHNX-4105)
 
+- **Optional embeddings ranker for `tasks --similar`, off until configured.**
+  `linear setup --embeddings ollama|gemini|none [--embeddings-model NAME]` turns
+  a third signal on: cosine similarity over text embeddings, fused with the
+  other two. Defaults are `qwen3-embedding:0.6b` on a local Ollama
+  (`${OLLAMA_HOST:-http://localhost:11434}/api/embed`) and
+  `gemini-embedding-001` at 768 dimensions; the Gemini key is read from
+  `GEMINI_API_KEY` and never written to `config.json`. Vectors are cached in
+  `~/.linear-cli/embeddings.sqlite` (0600, like the config) keyed by issue and
+  model, so a run only embeds issues that are new or whose `updatedAt` moved —
+  a warm board costs one request for the query text. Dimensions are recorded
+  from the response, never assumed. Every failure is advisory: an unreachable
+  or refusing backend prints one `embeddings: <backend> unreachable, skipped`
+  line (with the HTTP status when there was one) and `--similar` still answers
+  from semantic + lexical, with `embeddings` left out of `rankers`. Marked `E`
+  in the output row. (PHNX-4105)
+
 ## [0.23.0] - 2026-09-13
 
 ### Changed

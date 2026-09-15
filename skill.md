@@ -42,6 +42,13 @@ truncated first page. Always search before creating, to avoid duplicates:
 `linear tasks --similar "<your title>"` ranks related tickets across every
 cycle, done ones included, so you enrich an existing ticket instead of filing a twin.
 
+**Optional: embeddings.** `linear setup --embeddings ollama` (local, default
+`qwen3-embedding:0.6b` from `$OLLAMA_HOST`) or `linear setup --embeddings gemini`
+(`GEMINI_API_KEY` from the environment, never stored) adds a third ranker —
+cosine similarity over embeddings, cached in `~/.linear-cli/embeddings.sqlite`,
+marked `E`. `--embeddings none` turns it off. Nothing breaks without it: an
+unreachable backend prints one `skipped` line and the other rankers still answer.
+
 ```
 linear tasks --status todo         # backlog | todo | progress | done | open
 linear tasks --label security      # by any label
@@ -54,6 +61,7 @@ linear tasks --assignee me         # by assignee: me | none | someone@x.com
 linear tasks --project "Rush App"  # scope to one project (name or UUID; strict)
 linear tasks --query "auth"        # search title + description
 linear tasks --similar "<title>"   # related tickets ranked (semantic + lexical); run before creating
+linear setup --embeddings ollama   # optional: add a local-embeddings ranker (E marks) to --similar
 linear tasks --json                # machine-readable
 linear tasks --agent claude        # issues delegated to one agent (see: linear agents)
 linear tasks --all                 # every issue, whoever it is delegated to
