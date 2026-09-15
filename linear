@@ -2295,6 +2295,24 @@ def similar_tasks(args, cfg, api_key, team_id):
         print(format_similar_row(row))
 
 
+def advise_similar(api_key, team_id, cfg, title, description=None):
+    """Print close existing tickets before a single `create`. Advisory only —
+    never blocks, never prompts. Skipped by the caller for `--from-file`
+    (searchIssues is rate-limited to 30/min)."""
+    try:
+        text = title + ("\n" + description if description else "")
+        rows = rank_similar(api_key, team_id, cfg, text, limit=3)["rows"]
+    except Exception as e:  # advisory: never block the create
+        print(f"similar-check skipped: {e}", file=sys.stderr)
+        return []
+    hits = [r for r in rows if (r["ranks"].get("semantic") or 99) <= 3 or r["score"] >= 0.02]
+    if hits:
+        print("Similar existing tickets (consider enriching one instead of creating):", file=sys.stderr)
+        for r in hits:
+            print(f"  {r['identifier']:<10} {r['state']:<9} {r['title'][:70]}", file=sys.stderr)
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # tasks - list, view, board
 # ---------------------------------------------------------------------------
@@ -3672,6 +3690,8 @@ def cmd_create(args, cfg, api_key, team_id):
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
+    advise_similar(api_key, team_id, cfg, input_obj.get("title") or "",
+                   input_obj.get("description"))
     issue, err = _send_issue_create(api_key, input_obj)
     if err:
         print(f"Error: {err}", file=sys.stderr)

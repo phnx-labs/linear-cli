@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a module-level `EXTRA_RANKERS` hook lets an optional embeddings ranker plug in.
   Exit 0 with `No similar tickets.` when nothing matches; exit 1 when no
   ranker could run at all, so an API outage never reads as a no-match. (PHNX-4105)
+- **`linear create` prints similar existing tickets before it mutates.** Advisory
+  only: matches whose semantic rank is 1–3 or whose fused score is ≥ 0.02 (two
+  rankers agreeing in their top ~10) go to stderr, then the create proceeds
+  unchanged. A ranker exception prints one `similar-check skipped:` line and
+  never blocks. Skipped for `--from-file` bulk create (`searchIssues` is 30/min).
+  `linear tasks --similar` is the explicit check; `create` repeats it.
+  (PHNX-4105)
 
 ## [0.23.0] - 2026-09-13
 
