@@ -2242,9 +2242,9 @@ def rank_similar(api_key: str, team_id: str, cfg: dict, text: str, *,
             if ids is not None:
                 rankings[name] = [i for i in ids if i in by_id]
 
-    known = list(dict.fromkeys(SIMILAR_RANKERS + tuple(EXTRA_RANKERS) + tuple(rankings)))
+    known = list(dict.fromkeys(SIMILAR_RANKERS + tuple(EXTRA_RANKERS)))
     rows = []
-    for ident, score, ranks in rrf(rankings)[:limit]:
+    for ident, score, ranks in rrf(rankings)[:max(1, limit)]:
         node = by_id.get(ident) or {}
         rows.append({
             "identifier": ident,
@@ -2266,10 +2266,11 @@ def format_similar_row(row: dict) -> str:
 
 def similar_tasks(args, cfg, api_key, team_id):
     """`tasks --similar TEXT`: the check-before-create step. Honors --project
-    (strict, like list_tasks); everything else about scope is deliberately wide
-    — a duplicate in another cycle or already closed is exactly what this is
-    for. Exit 0 even with no hits, because the answer "nothing similar" is the
-    green light to create."""
+    (strict, like list_tasks); the other list filters are ignored on purpose:
+    a duplicate in another cycle, status, or queue is exactly what this is for.
+    Exit 0 even with no hits, because the answer "nothing similar" is the green
+    light to create. Exit 1 when no ranker could run at all, so an outage never
+    reads as that same green light."""
     pid = None
     if getattr(args, "project", None):
         try:
@@ -2278,7 +2279,12 @@ def similar_tasks(args, cfg, api_key, team_id):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     result = rank_similar(api_key, team_id, cfg, args.similar, project_id=pid,
-                          limit=getattr(args, "limit", None) or 10)
+                          limit=getattr(args, "limit", 10))
+    if not result["rankers"]:
+        print("Error: no ranker could run (Linear API unreachable or rejected "
+              "the request; see above). This is not a no-match answer.",
+              file=sys.stderr)
+        sys.exit(1)
     if args.json:
         print(json.dumps(result, indent=2))
         return
@@ -5527,9 +5533,10 @@ def main():
                          help="Rank the team's tickets by relevance to TEXT (a title or "
                               "paragraph) — Linear semantic search + local lexical match, "
                               "fused. Whole team, every cycle, done included. Honors "
-                              "--project. Use before creating a ticket.")
+                              "--project only; other list filters are ignored. "
+                              "Use before creating a ticket.")
     p_tasks.add_argument("--limit", type=int, default=10,
-                         help="Rows to show with --similar (default 10)")
+                         help="Rows to show with --similar (default 10, minimum 1)")
     p_tasks.add_argument("--json", action="store_true", help="JSON output")
 
     # update (all mutations on one or many issues)
