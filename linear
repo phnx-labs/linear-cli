@@ -37,6 +37,7 @@ import errno
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -2100,6 +2101,195 @@ def cmd_setup(args, cfg):
 
 
 # ---------------------------------------------------------------------------
+# similar tickets — `tasks --similar`
+# ---------------------------------------------------------------------------
+
+# Low-signal words dropped before comparing titles: grammar words, the generic
+# action verbs that describe the work rather than the thing, and the project
+# nouns that appear across most of the board. Mirrors the fleet's dedup guard so
+# the two agree on what a "significant" token is.
+SIMILAR_STOP = {
+    "the", "a", "an", "to", "for", "of", "in", "on", "and", "or", "with",
+    "without", "is", "are", "be", "by", "at", "from", "into", "via", "per",
+    "so", "it", "this", "that", "then", "than", "not", "no", "as", "vs",
+    "fix", "bug", "add", "update", "remove", "refactor", "investigate",
+    "prix", "cloud", "rush", "agent", "agents",
+}
+
+# Ranker names in display order; the marks column is one letter each.
+SIMILAR_RANKERS = ("semantic", "lexical", "embeddings")
+_RANKER_MARK = {"semantic": "S", "lexical": "L", "embeddings": "E"}
+SIMILAR_SEMANTIC_FIRST = 25
+RRF_K = 60
+
+# Extension point for optional rankers (embeddings). Each entry is
+#   name -> fn(api_key, team_id, cfg, text, candidates) -> list[str] | None
+# returning issue identifiers best-first, or None when the ranker is not
+# available on this box (no backend configured, service unreachable). A None is
+# skipped silently and the name is left out of the result's "rankers" list.
+EXTRA_RANKERS: dict = {}
+
+
+def sig_tokens(text: str | None) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return {w for w in words if w not in SIMILAR_STOP and len(w) > 1}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    return len(a & b) / len(a | b) if (a or b) else 0.0
+
+
+def _overlap(a: set[str], b: set[str]) -> float:
+    return len(a & b) / min(len(a), len(b)) if (a and b) else 0.0
+
+
+def lexical_rank(text: str, issues: list[dict]) -> list[tuple[str, float]]:
+    """Local, dependency-free ranker. Jaccard over significant title tokens
+    catches a near-equal title; half an overlap coefficient over the description
+    catches the same subject described under a different headline. Issues that
+    share nothing are dropped."""
+    query = sig_tokens(text)
+    scored = []
+    for node in issues:
+        score = (_jaccard(query, sig_tokens(node.get("title")))
+                 + 0.5 * _overlap(query, sig_tokens(node.get("description"))))
+        if score > 0:
+            scored.append((node["identifier"], score))
+    scored.sort(key=lambda t: (-t[1], t[0]))
+    return scored
+
+
+def semantic_rank(api_key: str, team_id: str, text: str, *,
+                  project_id: str | None = None,
+                  first: int = SIMILAR_SEMANTIC_FIRST) -> list[dict] | None:
+    """Linear's own vector search, one `searchIssues` call (rate limit: 30/min).
+    Returns issue nodes best-first, or None on an API error (already printed)."""
+    query = f"""query($term: String!, $first: Int, $teamId: String, $filter: IssueFilter) {{
+        searchIssues(term: $term, first: $first, teamId: $teamId, filter: $filter,
+                     includeArchived: false) {{
+            nodes {{ {ISSUE_FIELDS} }}
+        }}
+    }}"""
+    variables = {"term": text, "first": first, "teamId": team_id,
+                 "filter": {"project": {"id": {"eq": project_id}}} if project_id else None}
+    data = gql(api_key, query, variables)
+    if check_errors(data):
+        return None
+    return ((data.get("data") or {}).get("searchIssues") or {}).get("nodes") or []
+
+
+def rrf(rankings: dict[str, list[str]], k: int = RRF_K
+        ) -> list[tuple[str, float, dict[str, int | None]]]:
+    """Reciprocal rank fusion: each ranker contributes 1/(k + rank) per hit. Rows
+    come back (identifier, fused score, {ranker: rank | None}) best-first, ties
+    broken by identifier so output is stable."""
+    scores: dict[str, float] = {}
+    ranks: dict[str, dict[str, int | None]] = {}
+    for name, ids in rankings.items():
+        for pos, ident in enumerate(ids, start=1):
+            scores[ident] = scores.get(ident, 0.0) + 1.0 / (k + pos)
+            ranks.setdefault(ident, {})[name] = pos
+    for ident in ranks:
+        for name in rankings:
+            ranks[ident].setdefault(name, None)
+    return sorted(((i, s, ranks[i]) for i, s in scores.items()),
+                  key=lambda t: (-t[1], t[0]))
+
+
+def rank_similar(api_key: str, team_id: str, cfg: dict, text: str, *,
+                 project_id: str | None = None, limit: int = 10,
+                 rankers: list[str] | None = None) -> dict:
+    """Rank the team's tickets by relevance to `text`.
+
+    Runs every available ranker (semantic, lexical, and whatever EXTRA_RANKERS
+    registered), fuses them with RRF and returns
+      {"rows": [{identifier, title, state, url, score, ranks: {name: rank|None}}],
+       "rankers": [names that actually ran]}.
+    A ranker that cannot run is skipped and left out of "rankers" — the caller
+    never fails because one signal is missing. The candidate set is the whole
+    team across every cycle including done and canceled issues: "this was
+    already done" is a valid answer, and the state column says so.
+    """
+    wanted = list(rankers) if rankers is not None else list(
+        dict.fromkeys(SIMILAR_RANKERS + tuple(EXTRA_RANKERS)))
+    by_id: dict[str, dict] = {}
+    rankings: dict[str, list[str]] = {}
+
+    if "semantic" in wanted:
+        nodes = semantic_rank(api_key, team_id, text, project_id=project_id)
+        if nodes is not None:
+            for n in nodes:
+                by_id.setdefault(n["identifier"], n)
+            rankings["semantic"] = [n["identifier"] for n in nodes]
+
+    candidates: list[dict] | None = None
+    needs_candidates = [r for r in wanted if r != "semantic"]
+    if needs_candidates:
+        filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
+        if project_id:
+            filters.append(f'project: {{ id: {{ eq: "{project_id}" }} }}')
+        candidates = paginate_issues(api_key, ", ".join(filters))
+    if candidates is not None:
+        for n in candidates:
+            by_id.setdefault(n["identifier"], n)
+        if "lexical" in wanted:
+            rankings["lexical"] = [i for i, _ in lexical_rank(text, candidates)]
+        for name in needs_candidates:
+            fn = EXTRA_RANKERS.get(name)
+            if fn is None:
+                continue
+            ids = fn(api_key, team_id, cfg, text, candidates)
+            if ids is not None:
+                rankings[name] = [i for i in ids if i in by_id]
+
+    known = list(dict.fromkeys(SIMILAR_RANKERS + tuple(EXTRA_RANKERS) + tuple(rankings)))
+    rows = []
+    for ident, score, ranks in rrf(rankings)[:limit]:
+        node = by_id.get(ident) or {}
+        rows.append({
+            "identifier": ident,
+            "title": node.get("title") or "",
+            "state": ((node.get("state") or {}).get("name")) or "",
+            "url": node.get("url") or "",
+            "score": round(score, 6),
+            "ranks": {name: ranks.get(name) for name in known},
+        })
+    return {"rows": rows, "rankers": list(rankings)}
+
+
+def format_similar_row(row: dict) -> str:
+    marks = " ".join(_RANKER_MARK[name] if row["ranks"].get(name) else " "
+                     for name in SIMILAR_RANKERS)
+    return (f"  {row['score']:.4f}  {marks}  {row['identifier']:<9}  "
+            f"{row['state']:<8} {row['title']}")
+
+
+def similar_tasks(args, cfg, api_key, team_id):
+    """`tasks --similar TEXT`: the check-before-create step. Honors --project
+    (strict, like list_tasks); everything else about scope is deliberately wide
+    — a duplicate in another cycle or already closed is exactly what this is
+    for. Exit 0 even with no hits, because the answer "nothing similar" is the
+    green light to create."""
+    pid = None
+    if getattr(args, "project", None):
+        try:
+            pid = resolve_project_id(api_key, team_id, args.project, strict=True)
+        except LookupError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    result = rank_similar(api_key, team_id, cfg, args.similar, project_id=pid,
+                          limit=getattr(args, "limit", None) or 10)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+    if not result["rows"]:
+        print("No similar tickets.")
+        return
+    for row in result["rows"]:
+        print(format_similar_row(row))
+
+
+# ---------------------------------------------------------------------------
 # tasks - list, view, board
 # ---------------------------------------------------------------------------
 
@@ -2146,6 +2336,9 @@ def list_tasks(args, cfg, api_key, team_id):
     # unscoped view, never brick the single most-common command. So the explicit
     # path resolves strictly (crash on no-match) and the auto path validates
     # fail-open (drift -> None -> unscoped + a one-line stderr note).
+    if getattr(args, "similar", None):
+        return similar_tasks(args, cfg, api_key, team_id)
+
     explicit_project = getattr(args, "project", None)
     pid = None
     auto_project_name = None
@@ -5330,6 +5523,13 @@ def main():
     p_tasks.add_argument("--assignee",
                          help="Filter by assignee: email, 'me', or 'none' (unassigned)")
     p_tasks.add_argument("--query", help="Search title + description (case-insensitive)")
+    p_tasks.add_argument("--similar", metavar="TEXT",
+                         help="Rank the team's tickets by relevance to TEXT (a title or "
+                              "paragraph) — Linear semantic search + local lexical match, "
+                              "fused. Whole team, every cycle, done included. Honors "
+                              "--project. Use before creating a ticket.")
+    p_tasks.add_argument("--limit", type=int, default=10,
+                         help="Rows to show with --similar (default 10)")
     p_tasks.add_argument("--json", action="store_true", help="JSON output")
 
     # update (all mutations on one or many issues)

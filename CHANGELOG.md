@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tasks --similar TEXT` ranks the team's tickets by relevance to a title or
+  paragraph.** The check-before-create step: `--query` is a substring match and
+  "token renewal" finds nothing about OAuth token refresh, so `--similar` fuses
+  two rankers with reciprocal rank fusion (k = 60) — Linear's own semantic
+  `searchIssues` (one call, top 25) and a local, dependency-free lexical score
+  (Jaccard over significant title tokens + half an overlap coefficient over the
+  description). The candidate set is the whole team across every cycle, done and
+  canceled included, because "already done" is a valid answer; the state column
+  says so. Honors `--project`; `--limit N` (default 10); `--json` returns
+  `{"rows": [{identifier, title, state, url, score, ranks}], "rankers": [...]}`.
+  A ranker that cannot run is skipped and left out of `rankers`, never an error;
+  a module-level `EXTRA_RANKERS` hook lets an optional embeddings ranker plug in.
+  Exit 0 with `No similar tickets.` when nothing matches. (PHNX-4105)
+
 ## [0.23.0] - 2026-09-13
 
 ### Changed

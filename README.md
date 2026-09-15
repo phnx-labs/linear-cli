@@ -70,6 +70,7 @@ linear tasks                         # your queue in the active cycle
 linear tasks --board                 # whole team board
 linear tasks ANT-42                   # detail view
 linear tasks --query "auth refresh"  # search title + description
+linear tasks --similar "OAuth token renewal"  # related tickets, ranked (check before you create)
 linear tasks --cycle all             # whole team: every cycle + backlog
 linear tasks --cycle none            # the backlog (issues in no cycle)
 linear tasks --cycle "Q2W11"         # a specific cycle by name, number, or id
@@ -145,6 +146,18 @@ linear --team ENG tasks               # one-shot override (multi-team workspace)
 > you create a duplicate.
 
 Full help: `linear <command> --help`.
+
+## Search
+
+`--query` is a server-side substring match on title and description. `--similar`
+is the check-before-create step: it ranks the whole team's tickets (every cycle,
+done and canceled included) by relevance to a title or paragraph, fusing Linear's
+own semantic search with a local token-overlap ranker.
+
+```bash
+linear tasks --similar "mid-run OAuth token renewal"          # top 10, marks: S semantic, L lexical
+linear tasks --similar "worktree cleanup" --limit 3 --json    # {"rows": [...], "rankers": [...]}
+```
 
 ## For humans and agents
 
