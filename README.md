@@ -181,7 +181,7 @@ linear setup --embeddings none      # off again
 Ollama is read from `$OLLAMA_HOST` (default `http://localhost:11434`);
 `--embeddings-model NAME` picks another model (`embeddinggemma`, `all-minilm`,
 …). The Gemini key comes from the environment only and is never written to
-`config.json`. Vectors are cached in `~/.linear-cli/embeddings.sqlite` keyed by
+`config.json`. Vectors are cached in `~/.linear-cli/cache.sqlite` keyed by
 issue and model, so only new or edited issues are re-embedded. A hit is marked
 `E`; if the backend is unreachable the ranker prints one `embeddings: …
 skipped` line and `--similar` answers from the other two.

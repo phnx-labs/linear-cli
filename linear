@@ -26,7 +26,7 @@ Commands:
                         (`queue drain` applies pending closes)
 
 Config: ~/.linear-cli/config.json
-Embedding cache (optional ranker): ~/.linear-cli/embeddings.sqlite
+Cache (team board for --similar, optional embedding vectors): ~/.linear-cli/cache.sqlite
 """
 
 from __future__ import annotations
@@ -2237,6 +2237,72 @@ def rrf(rankings: dict[str, list[str]], k: int = RRF_K
                   key=lambda t: (-t[1], t[0]))
 
 
+# ---- board cache ------------------------------------------------------------
+# `--similar` ranks over the whole team, done and canceled included. Paginating
+# that board costs ~11 s for ~4k issues, so it lives in cache.sqlite and a run
+# only pulls the issues whose `updatedAt` moved since the last sync. Archived
+# issues never appear in an incremental pull (the connection excludes them), so
+# a full refresh runs once a week to drop them. `rm ~/.linear-cli/cache.sqlite`
+# is the reset.
+BOARD_FULL_REFRESH = timedelta(days=7)
+
+
+def _board_rows(conn: sqlite3.Connection, team_id: str) -> list[dict]:
+    return [json.loads(node) for (node,) in conn.execute(
+        "SELECT node FROM issues WHERE team_id = ? ORDER BY issue_id", (team_id,))]
+
+
+def cached_team_issues(api_key: str, team_id: str, *,
+                       project_id: str | None = None) -> list[dict] | None:
+    """The team's issues from the cache, refreshed incrementally first.
+
+    Returns None only when nothing is cached and the API call failed (the
+    caller already printed the error). A failed refresh over a warm cache
+    answers from the cache and says so on stderr.
+    """
+    conn = _cache_db()
+    try:
+        row = conn.execute("SELECT last_updated_at, full_at FROM sync WHERE team_id = ?",
+                           (team_id,)).fetchone()
+        last_updated_at, full_at = row or (None, None)
+        now = datetime.now(timezone.utc)
+        full = True
+        if full_at:
+            try:
+                full = now - datetime.fromisoformat(full_at) > BOARD_FULL_REFRESH
+            except ValueError:
+                full = True
+        filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
+        if not full and last_updated_at:
+            filters.append(f'updatedAt: {{ gt: "{last_updated_at}" }}')
+        fetched = paginate_issues(api_key, ", ".join(filters))
+        if fetched is None:
+            cached = _board_rows(conn, team_id)
+            if not cached:
+                return None
+            print(f"board cache: refresh failed, using the board as of {last_updated_at}",
+                  file=sys.stderr)
+        else:
+            if full:
+                conn.execute("DELETE FROM issues WHERE team_id = ?", (team_id,))
+            conn.executemany(
+                "INSERT OR REPLACE INTO issues(issue_id, team_id, updated_at, node) "
+                "VALUES (?, ?, ?, ?)",
+                [(n.get("id") or n["identifier"], team_id, n.get("updatedAt") or "", json.dumps(n))
+                 for n in fetched if n.get("id") or n.get("identifier")])
+            newest = max([n.get("updatedAt") or "" for n in fetched] + [last_updated_at or ""])
+            conn.execute(
+                "INSERT OR REPLACE INTO sync(team_id, last_updated_at, full_at) VALUES (?, ?, ?)",
+                (team_id, newest or None, now.isoformat() if full else full_at))
+            conn.commit()
+            cached = _board_rows(conn, team_id)
+    finally:
+        conn.close()
+    if project_id:
+        cached = [n for n in cached if (n.get("project") or {}).get("id") == project_id]
+    return cached
+
+
 def rank_similar(api_key: str, team_id: str, cfg: dict, text: str, *,
                  project_id: str | None = None, limit: int = 10,
                  rankers: list[str] | None = None) -> dict:
@@ -2266,10 +2332,7 @@ def rank_similar(api_key: str, team_id: str, cfg: dict, text: str, *,
     candidates: list[dict] | None = None
     needs_candidates = [r for r in wanted if r != "semantic"]
     if needs_candidates:
-        filters = [f'team: {{ id: {{ eq: "{team_id}" }} }}']
-        if project_id:
-            filters.append(f'project: {{ id: {{ eq: "{project_id}" }} }}')
-        candidates = paginate_issues(api_key, ", ".join(filters))
+        candidates = cached_team_issues(api_key, team_id, project_id=project_id)
     if candidates is not None:
         for n in candidates:
             by_id.setdefault(n["identifier"], n)
@@ -2362,7 +2425,9 @@ def advise_similar(api_key, team_id, cfg, title, description=None):
 # failure here is advisory: the ranker drops out with one stderr line and
 # `--similar` still answers from semantic + lexical.
 
-EMBEDDINGS_DB_PATH = Path.home() / ".linear-cli" / "embeddings.sqlite"
+CACHE_DB_PATH = Path.home() / ".linear-cli" / "cache.sqlite"
+# 0.24.0 shipped the vector cache under this name; it is renamed in place on first open.
+_LEGACY_EMBEDDINGS_DB_PATH = Path.home() / ".linear-cli" / "embeddings.sqlite"
 EMBEDDINGS_BACKENDS = ("ollama", "gemini")
 # Defaults are the smallest models at the top of the quality curve (rationale and
 # the alternatives worth passing to --embeddings-model are in PHNX-4105).
@@ -2477,22 +2542,31 @@ def embedding_text(issue: dict) -> str:
             f"{(issue.get('description') or '')[:EMBED_TEXT_CHARS]}")
 
 
-def _embeddings_db() -> sqlite3.Connection:
-    """Open (creating it) the vector cache next to config.json.
+def _cache_db() -> sqlite3.Connection:
+    """Open (creating it) the cache next to config.json: the team board that
+    `--similar` ranks over, and the embedding vectors of the optional ranker.
 
-    Ticket titles and descriptions are cached in here, so it gets the same
-    private modes as the config that holds the API key.
+    Ticket titles and descriptions live in here, so it gets the same private
+    modes as the config that holds the API key.
     """
-    EMBEDDINGS_DB_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
-    EMBEDDINGS_DB_PATH.touch(mode=CONFIG_FILE_MODE, exist_ok=True)
-    conn = sqlite3.connect(EMBEDDINGS_DB_PATH)
+    CACHE_DB_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+    if not CACHE_DB_PATH.exists() and _LEGACY_EMBEDDINGS_DB_PATH.exists():
+        os.replace(_LEGACY_EMBEDDINGS_DB_PATH, CACHE_DB_PATH)
+    CACHE_DB_PATH.touch(mode=CONFIG_FILE_MODE, exist_ok=True)
+    conn = sqlite3.connect(CACHE_DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS vectors (
                         issue_id TEXT, model TEXT, updated_at TEXT,
                         dims INTEGER, vec BLOB,
                         PRIMARY KEY(issue_id, model))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS issues (
+                        issue_id TEXT PRIMARY KEY, team_id TEXT,
+                        updated_at TEXT, node TEXT)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS issues_team ON issues(team_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sync (
+                        team_id TEXT PRIMARY KEY, last_updated_at TEXT, full_at TEXT)""")
     conn.commit()
     with contextlib.suppress(OSError):
-        EMBEDDINGS_DB_PATH.chmod(CONFIG_FILE_MODE)
+        CACHE_DB_PATH.chmod(CONFIG_FILE_MODE)
     return conn
 
 
@@ -2518,7 +2592,7 @@ def _embeddings_for(cfg: dict, issues: list[dict]) -> dict[str, list[float]]:
     if settings is None:
         raise EmbeddingUnavailable("no backend configured")
     _, model = settings
-    conn = _embeddings_db()
+    conn = _cache_db()
     try:
         keyed = [i for i in issues if i.get("id")]
         cached = _cached_vectors(conn, model, [i["id"] for i in keyed])
