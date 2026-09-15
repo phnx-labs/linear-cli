@@ -2877,3 +2877,220 @@ class OverviewLiveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _sim_issue(ident, title, state="Todo", description=""):
+    node = _issue(ident, state=state)
+    node["title"] = title
+    node["description"] = description
+    return node
+
+
+class SimilarTests(unittest.TestCase):
+    """`tasks --similar`: tokenizer, lexical ranking, RRF math, and the command
+    end to end over a canned searchIssues page + issues page."""
+
+    def test_sig_tokens_drops_stop_words_and_single_chars(self):
+        self.assertEqual(
+            linear_cli.sig_tokens("Fix the OAuth token refresh for Rush Cloud agents (v2)"),
+            {"oauth", "token", "refresh", "v2"},
+        )
+        self.assertEqual(linear_cli.sig_tokens(None), set())
+
+    def test_lexical_rank_orders_by_title_jaccard_then_description(self):
+        issues = [
+            {"identifier": "X-1", "title": "OAuth token refresh mid-run", "description": ""},
+            {"identifier": "X-2", "title": "Billing export", "description": "renew the token"},
+            {"identifier": "X-3", "title": "Unrelated thing", "description": None},
+            {"identifier": "X-4", "title": "token renewal", "description": ""},
+        ]
+        ranked = linear_cli.lexical_rank("token renewal", issues)
+        self.assertEqual([i for i, _ in ranked], ["X-4", "X-2", "X-1"])
+        scores = dict(ranked)
+        self.assertEqual(scores["X-4"], 1.0)            # identical title
+        self.assertAlmostEqual(scores["X-2"], 0.25)     # 0.5 * (1 shared / min(2, 2))
+        self.assertAlmostEqual(scores["X-1"], 1 / 6)    # 1 shared / 6 in union
+        self.assertNotIn("X-3", scores)                 # zero-score rows dropped
+
+    def test_rrf_sums_reciprocal_ranks_and_keeps_per_ranker_rank(self):
+        fused = linear_cli.rrf({"semantic": ["A", "B"], "lexical": ["B", "C"]}, k=60)
+        self.assertEqual([f[0] for f in fused], ["B", "A", "C"])
+        ident, score, ranks = fused[0]
+        self.assertAlmostEqual(score, 1 / 62 + 1 / 61)
+        self.assertEqual(ranks, {"semantic": 2, "lexical": 1})
+        self.assertEqual(fused[1][2], {"semantic": 1, "lexical": None})
+        self.assertEqual(fused[2][2], {"semantic": None, "lexical": 2})
+
+    def test_rrf_ties_break_on_identifier(self):
+        fused = linear_cli.rrf({"semantic": ["Z-1"], "lexical": ["A-1"]})
+        self.assertEqual([f[0] for f in fused], ["A-1", "Z-1"])
+
+    # -- end to end ----------------------------------------------------------
+
+    SEMANTIC = [
+        _sim_issue("PHNX-2315", "Mid-run OAuth token refresh for long agent runs", state="Doing"),
+        _sim_issue("PHNX-2096", "Signal: OAuth/token-refresh is the hard part", state="Done"),
+    ]
+    BOARD = [
+        _sim_issue("PHNX-2315", "Mid-run OAuth token refresh for long agent runs", state="Doing"),
+        _sim_issue("PHNX-9", "token renewal daemon", state="Todo"),
+        _sim_issue("PHNX-10", "Billing export CSV", state="Backlog"),
+    ]
+
+    def _fake_gql(self, calls):
+        def fake_gql(_key, query, variables=None):
+            calls.append((query, variables))
+            if "searchIssues" in query:
+                return {"data": {"searchIssues": {"nodes": list(self.SEMANTIC)}}}
+            if "issues(" in query:
+                return {"data": {"issues": {"pageInfo": {"hasNextPage": False,
+                                                          "endCursor": None},
+                                            "nodes": list(self.BOARD)}}}
+            raise AssertionError(f"unexpected query: {query[:80]}")
+        return fake_gql
+
+    def _run(self, calls, **overrides):
+        args = _list_args(similar="token renewal", limit=10, json=False)
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        buf = io.StringIO()
+        original = linear_cli.gql
+        linear_cli.gql = self._fake_gql(calls)
+        try:
+            with contextlib.redirect_stdout(buf):
+                linear_cli.list_tasks(args, {}, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original
+        return buf.getvalue()
+
+    def test_similar_text_output_marks_and_order(self):
+        calls = []
+        out = self._run(calls)
+        lines = out.splitlines()
+        # PHNX-2315 hit both rankers (semantic #1 + lexical), so it fuses first.
+        self.assertRegex(lines[0], r"^  0\.\d{4}  S L    PHNX-2315  Doing    Mid-run OAuth")
+        # PHNX-9 is lexical-only ("token renewal daemon"), PHNX-2096 semantic-only.
+        self.assertTrue(any(l.startswith("  0.") and "  L    PHNX-9  " in l for l in lines), out)
+        self.assertTrue(any("  S      PHNX-2096" in l for l in lines), out)
+        # Billing export shares no token — it never appears.
+        self.assertNotIn("PHNX-10", out)
+        # Exactly one searchIssues call (30/min rate limit) + one issues page.
+        semantic_calls = [c for c in calls if "searchIssues" in c[0]]
+        self.assertEqual(len(semantic_calls), 1)
+        self.assertEqual(semantic_calls[0][1]["term"], "token renewal")
+        self.assertEqual(semantic_calls[0][1]["teamId"], "team-id")
+        self.assertIsNone(semantic_calls[0][1]["filter"])
+        self.assertEqual(semantic_calls[0][1]["first"], linear_cli.SIMILAR_SEMANTIC_FIRST)
+        # The lexical candidate set spans every cycle and includes done issues.
+        issues_call = next(c for c in calls if "issues(" in c[0])
+        filter_str = issues_call[0].split("filter: {", 1)[1].split("}) {", 1)[0]
+        self.assertNotIn("cycle", filter_str)
+        self.assertNotIn("state", filter_str)
+
+    def test_similar_json_shape(self):
+        calls = []
+        out = json.loads(self._run(calls, json=True))
+        self.assertEqual(out["rankers"], ["semantic", "lexical"])
+        self.assertEqual(out["rows"][0]["identifier"], "PHNX-2315")
+        self.assertEqual(set(out["rows"][0]),
+                         {"identifier", "title", "state", "url", "score", "ranks"})
+        # Lexical puts the near-verbatim "token renewal daemon" first, so 2315 is #2 there.
+        self.assertEqual(out["rows"][0]["ranks"],
+                         {"semantic": 1, "lexical": 2, "embeddings": None})
+        self.assertEqual(out["rows"][0]["state"], "Doing")
+        self.assertTrue(out["rows"][0]["url"].startswith("https://"))
+        # A semantic-only hit that is not in the local page still carries its own fields.
+        row = next(r for r in out["rows"] if r["identifier"] == "PHNX-2096")
+        self.assertEqual(row["title"], "Signal: OAuth/token-refresh is the hard part")
+        self.assertEqual(row["ranks"], {"semantic": 2, "lexical": None, "embeddings": None})
+
+    def test_similar_limit_and_project_filter(self):
+        calls = []
+        original = linear_cli.resolve_project_id
+        linear_cli.resolve_project_id = lambda a, t, v, strict=False: "proj-uuid"
+        try:
+            out = json.loads(self._run(calls, json=True, limit=1, project="Prix"))
+        finally:
+            linear_cli.resolve_project_id = original
+        self.assertEqual(len(out["rows"]), 1)
+        semantic_call = next(c for c in calls if "searchIssues" in c[0])
+        self.assertEqual(semantic_call[1]["filter"], {"project": {"id": {"eq": "proj-uuid"}}})
+        issues_call = next(c for c in calls if "issues(" in c[0])
+        self.assertIn('project: { id: { eq: "proj-uuid" } }', issues_call[0])
+
+    def test_similar_no_hits_prints_message_and_exits_zero(self):
+        buf = io.StringIO()
+        original = linear_cli.gql
+        linear_cli.gql = lambda _k, query, variables=None: (
+            {"data": {"searchIssues": {"nodes": []}}} if "searchIssues" in query
+            else {"data": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                      "nodes": []}}})
+        try:
+            with contextlib.redirect_stdout(buf):
+                linear_cli.list_tasks(_list_args(similar="zzz", limit=10, json=False),
+                                      {}, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(buf.getvalue(), "No similar tickets.\n")
+
+    def test_unavailable_ranker_is_skipped_not_an_error(self):
+        # Semantic errors out (rate limit); lexical still answers and the
+        # rankers list names only what ran.
+        def fake_gql(_k, query, variables=None):
+            if "searchIssues" in query:
+                return {"errors": [{"message": "rate limited",
+                                    "extensions": {"code": "RATELIMITED"}}]}
+            return {"data": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                        "nodes": list(self.BOARD)}}}
+        original = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                out = linear_cli.rank_similar("api-key", "team-id", {}, "token renewal")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(out["rankers"], ["lexical"])
+        self.assertEqual([r["identifier"] for r in out["rows"]], ["PHNX-9", "PHNX-2315"])
+
+    def test_extra_ranker_hook_is_consulted_and_none_means_absent(self):
+        seen = {}
+
+        def embeddings(api_key, team_id, cfg, text, candidates):
+            seen["candidates"] = [c["identifier"] for c in candidates]
+            return ["PHNX-10", "PHNX-9"]
+
+        linear_cli.EXTRA_RANKERS["embeddings"] = embeddings
+        original = linear_cli.gql
+        linear_cli.gql = self._fake_gql([])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = linear_cli.rank_similar("api-key", "team-id", {}, "token renewal")
+            linear_cli.EXTRA_RANKERS["embeddings"] = lambda *a: None
+            with contextlib.redirect_stdout(io.StringIO()):
+                absent = linear_cli.rank_similar("api-key", "team-id", {}, "token renewal")
+        finally:
+            linear_cli.gql = original
+            linear_cli.EXTRA_RANKERS.pop("embeddings", None)
+        self.assertEqual(out["rankers"], ["semantic", "lexical", "embeddings"])
+        self.assertEqual(seen["candidates"], ["PHNX-2315", "PHNX-9", "PHNX-10"])
+        row = next(r for r in out["rows"] if r["identifier"] == "PHNX-10")
+        self.assertEqual(row["ranks"], {"semantic": None, "lexical": None, "embeddings": 1})
+        self.assertEqual(absent["rankers"], ["semantic", "lexical"])
+
+
+class SimilarRealApiTests(unittest.TestCase):
+    """Runs against the configured workspace. Gated on LINEAR_REAL_API=1 because
+    it spends one searchIssues call (30/min) and needs ~/.linear-cli/config.json."""
+
+    def test_token_renewal_finds_a_token_refresh_ticket(self):
+        if os.environ.get("LINEAR_REAL_API") != "1":
+            self.skipTest("set LINEAR_REAL_API=1 to run against the real workspace")
+        cfg = linear_cli.load_config()
+        api_key = linear_cli.get_api_key(cfg)
+        team_id = linear_cli.get_team_id(cfg)
+        out = linear_cli.rank_similar(api_key, team_id, cfg, "token renewal")
+        self.assertIn("semantic", out["rankers"])
+        self.assertIn("lexical", out["rankers"])
+        titles = [r["title"].lower() for r in out["rows"]]
+        self.assertTrue(any("refresh" in t for t in titles), titles)

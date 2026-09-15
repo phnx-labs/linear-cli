@@ -38,7 +38,9 @@ linear states                         # the team's workflow states (valid --stat
 ## Filters
 
 Lists are fully paginated — `linear tasks` returns the *whole* cycle/team, not a
-truncated first page. Always search before creating, to avoid duplicates.
+truncated first page. Always search before creating, to avoid duplicates:
+`linear tasks --similar "<your title>"` ranks related tickets across every
+cycle, done ones included, so you enrich an existing ticket instead of filing a twin.
 
 ```
 linear tasks --status todo         # backlog | todo | progress | done | open
@@ -51,6 +53,7 @@ linear tasks --since 2026-06-01    # only issues created on/after a date
 linear tasks --assignee me         # by assignee: me | none | someone@x.com
 linear tasks --project "Rush App"  # scope to one project (name or UUID; strict)
 linear tasks --query "auth"        # search title + description
+linear tasks --similar "<title>"   # related tickets ranked (semantic + lexical); run before creating
 linear tasks --json                # machine-readable
 linear tasks --agent claude        # issues delegated to one agent (see: linear agents)
 linear tasks --all                 # every issue, whoever it is delegated to
