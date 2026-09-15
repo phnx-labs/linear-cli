@@ -6,9 +6,9 @@ set -eu
 REPO="phnx-labs/linear-cli"
 # Pin a release tag (not floating main). Override with LINEAR_CLI_VERSION /
 # LINEAR_CLI_SHA256 only when you deliberately install a different revision.
-VERSION="${LINEAR_CLI_VERSION:-v0.24.1}"
+VERSION="${LINEAR_CLI_VERSION:-v0.24.2}"
 # SHA-256 of the `linear` file at VERSION. Recomputed whenever VERSION bumps.
-EXPECTED_SHA256="${LINEAR_CLI_SHA256:-8e100398c7cb8f3bb8ee7170aa5c3ad4b3da0313ca48a6aeff9811c843a2cdbe}"
+EXPECTED_SHA256="${LINEAR_CLI_SHA256:-3a9a7aeb9f8148485ef9f2477020a9c69a6eda7c28f5f2e54a445a80fcd82b35}"
 URL="https://raw.githubusercontent.com/${REPO}/${VERSION}/linear"
 
 pick_install_dir() {
