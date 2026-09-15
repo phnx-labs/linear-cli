@@ -3109,5 +3109,178 @@ class SimilarRealApiTests(unittest.TestCase):
         self.assertTrue(any("refresh" in t for t in titles), titles)
 
 
+class CreateAdvisoryTests(unittest.TestCase):
+    """`create` prints similar tickets then proceeds. Advisory only — never
+    blocks. Skipped for `--from-file` (searchIssues is 30/min)."""
+
+    TITLE = "Mid-run OAuth token refresh for long agent runs"
+    ROWS = [
+        {
+            "identifier": "PHNX-2315",
+            "state": "Doing",
+            "title": "Mid-run OAuth token refresh for long Rush Cloud agent runs",
+            "score": 0.0325,
+            "ranks": {"semantic": 1, "lexical": 2, "embeddings": None},
+        },
+        {
+            "identifier": "PHNX-2096",
+            "state": "Backlog",
+            "title": "Signal: OAuth/token-refresh is the validated hard-part migration",
+            "score": 0.016129,
+            "ranks": {"semantic": 2, "lexical": None, "embeddings": None},
+        },
+    ]
+
+    def setUp(self):
+        self._orig_build = linear_cli._build_create_input
+        self._orig_gql = linear_cli.gql
+        self._orig_rank = linear_cli.rank_similar
+        linear_cli._build_create_input = lambda *a, **k: (
+            {"teamId": "team-id", "title": self.TITLE}, None)
+
+    def tearDown(self):
+        linear_cli._build_create_input = self._orig_build
+        linear_cli.gql = self._orig_gql
+        linear_cli.rank_similar = self._orig_rank
+
+    def _args(self, **kw):
+        ns = types.SimpleNamespace(
+            from_file=None, title=self.TITLE, description=None,
+            description_file=None, priority=None, parent=None, project=None,
+            milestone="v1", skip_milestone=True, status=None, cycle="active",
+            assign=None, delegate=None, due_date=None, label=None, image=None,
+            force=False,
+        )
+        for k, v in kw.items():
+            setattr(ns, k, v)
+        return ns
+
+    def _created_gql(self):
+        def fake_gql(_k, query, variables=None):
+            if "issueCreate" in query:
+                return {"data": {"issueCreate": {
+                    "success": True,
+                    "issue": {"identifier": "PHNX-9999", "title": self.TITLE,
+                              "state": {"name": "Todo"}, "cycle": None,
+                              "assignee": {"name": "Muqsit"}, "delegate": None},
+                }}}
+            raise AssertionError(f"unexpected query: {query[:80]}")
+        return fake_gql
+
+    def test_advisory_prints_rows_and_create_proceeds(self):
+        seen = {}
+
+        def fake_rank(api_key, team_id, cfg, text, *, limit=10, **_k):
+            seen["text"] = text
+            seen["limit"] = limit
+            seen["team"] = team_id
+            return {"rows": list(self.ROWS), "rankers": ["semantic", "lexical"]}
+
+        linear_cli.rank_similar = fake_rank
+        linear_cli.gql = self._created_gql()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            linear_cli.cmd_create(self._args(), {}, "api-key", "team-id")
+        self.assertEqual(seen["limit"], 3)
+        self.assertEqual(seen["text"], self.TITLE)
+        self.assertEqual(seen["team"], "team-id")
+        err_text = err.getvalue()
+        self.assertIn(
+            "Similar existing tickets (consider enriching one instead of creating):",
+            err_text,
+        )
+        self.assertIn(
+            "  PHNX-2315  Doing     Mid-run OAuth token refresh for long Rush Cloud agent runs",
+            err_text,
+        )
+        self.assertIn(
+            "  PHNX-2096  Backlog   Signal: OAuth/token-refresh is the validated hard-part migration",
+            err_text,
+        )
+        self.assertIn("Created PHNX-9999:", out.getvalue())
+
+    def test_ranker_exception_is_swallowed_and_create_proceeds(self):
+        def boom(*_a, **_k):
+            raise RuntimeError("searchIssues rate limited")
+
+        linear_cli.rank_similar = boom
+        linear_cli.gql = self._created_gql()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            linear_cli.cmd_create(self._args(), {}, "api-key", "team-id")
+        self.assertIn("similar-check skipped: searchIssues rate limited",
+                      err.getvalue())
+        self.assertNotIn("Similar existing tickets", err.getvalue())
+        self.assertIn("Created PHNX-9999:", out.getvalue())
+
+    def test_bulk_path_never_calls_rank_similar(self):
+        def boom(*_a, **_k):
+            raise AssertionError("rank_similar must not run for --from-file")
+
+        linear_cli.rank_similar = boom
+        called = []
+        orig_bulk = linear_cli._bulk_create
+        linear_cli._bulk_create = lambda *a, **k: called.append(("bulk", a, k))
+        try:
+            linear_cli.cmd_create(
+                self._args(from_file="plan.jsonl"), {}, "api-key", "team-id")
+        finally:
+            linear_cli._bulk_create = orig_bulk
+        self.assertEqual(len(called), 1)
+
+    def test_create_prints_advisory_from_rank_similar_fake_gql(self):
+        """Create ranks through the real rank_similar over the same canned
+        searchIssues page SimilarTests uses, then still sends issueCreate."""
+        semantic = [
+            _sim_issue("PHNX-2315",
+                       "Mid-run OAuth token refresh for long Rush Cloud agent runs",
+                       state="Doing"),
+            _sim_issue("PHNX-2096",
+                       "Signal: OAuth/token-refresh is the validated hard-part migration",
+                       state="Backlog"),
+        ]
+        board = [
+            _sim_issue("PHNX-2315",
+                       "Mid-run OAuth token refresh for long Rush Cloud agent runs",
+                       state="Doing"),
+            _sim_issue("PHNX-9", "token renewal daemon", state="Todo"),
+            _sim_issue("PHNX-10", "Billing export CSV", state="Backlog"),
+        ]
+        created = []
+
+        def fake_gql(_k, query, variables=None):
+            if "searchIssues" in query:
+                return {"data": {"searchIssues": {"nodes": list(semantic)}}}
+            if "issues(" in query:
+                return {"data": {"issues": {"pageInfo": {"hasNextPage": False,
+                                                          "endCursor": None},
+                                            "nodes": list(board)}}}
+            if "issueCreate" in query:
+                created.append(variables)
+                return {"data": {"issueCreate": {
+                    "success": True,
+                    "issue": {"identifier": "PHNX-9999", "title": self.TITLE,
+                              "state": {"name": "Todo"}, "cycle": None,
+                              "assignee": {"name": "Muqsit"}, "delegate": None},
+                }}}
+            raise AssertionError(f"unexpected query: {query[:80]}")
+
+        linear_cli.gql = fake_gql
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            linear_cli.cmd_create(self._args(), {}, "api-key", "team-id")
+        err_text = err.getvalue()
+        self.assertIn(
+            "Similar existing tickets (consider enriching one instead of creating):",
+            err_text,
+        )
+        self.assertIn("PHNX-2315", err_text)
+        self.assertIn("Doing", err_text)
+        self.assertIn("PHNX-2096", err_text)
+        self.assertIn("Backlog", err_text)
+        self.assertIn("Created PHNX-9999:", out.getvalue())
+        self.assertEqual(len(created), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

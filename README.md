@@ -159,6 +159,14 @@ linear tasks --similar "mid-run OAuth token renewal"          # top 10, marks: S
 linear tasks --similar "worktree cleanup" --limit 3 --json    # {"rows": [...], "rankers": [...]}
 ```
 
+### Before you create
+
+`linear tasks --similar "<title or paragraph>"` is the check: run it, and if a
+close ticket already exists, enrich that one instead of filing a twin. `linear
+create` repeats the same ranking automatically (top 3, printed to stderr) and
+then creates anyway — advisory, never a deny. `--from-file` bulk create skips
+the lookup because `searchIssues` is rate-limited to 30/min.
+
 ## For humans and agents
 
 The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.

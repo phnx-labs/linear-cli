@@ -147,6 +147,15 @@ linear milestones move "Alpha 25" --to "Rush CLI" --from "Rush App"
 linear milestones delete "Alpha 25" --project "Rush CLI"
 ```
 
+## Before you create
+
+`linear tasks --similar "<your title>"` is the check. Run it, and if something
+close already exists, enrich that ticket instead of filing a twin. `linear
+create` repeats the same ranking automatically: it prints the closest existing
+tickets to stderr and continues. Advisory only — it never blocks, prompts, or
+adds a flag. `--from-file` bulk create skips the lookup (`searchIssues` is
+30/min).
+
 ## Creating issues — what's required
 
 A title OR a description, plus a milestone. Everything else has a sensible default.
