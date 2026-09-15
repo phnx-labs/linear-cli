@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"rows": [{identifier, title, state, url, score, ranks}], "rankers": [...]}`.
   A ranker that cannot run is skipped and left out of `rankers`, never an error;
   a module-level `EXTRA_RANKERS` hook lets an optional embeddings ranker plug in.
-  Exit 0 with `No similar tickets.` when nothing matches. (PHNX-4105)
+  Exit 0 with `No similar tickets.` when nothing matches; exit 1 when no
+  ranker could run at all, so an API outage never reads as a no-match. (PHNX-4105)
 
 ## [0.23.0] - 2026-09-13
 

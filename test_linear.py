@@ -2875,10 +2875,6 @@ class OverviewLiveTest(unittest.TestCase):
             self.assertEqual(agi["noMilestone"]["issues"], agi_full["noMilestone"]["issues"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _sim_issue(ident, title, state="Todo", description=""):
     node = _issue(ident, state=state)
     node["title"] = title
@@ -3033,6 +3029,23 @@ class SimilarTests(unittest.TestCase):
             linear_cli.gql = original
         self.assertEqual(buf.getvalue(), "No similar tickets.\n")
 
+    def test_every_ranker_down_is_an_error_not_an_empty_answer(self):
+        # A bad key or an outage must not print the "nothing similar" green light.
+        original = linear_cli.gql
+        linear_cli.gql = lambda _k, _q, variables=None: {
+            "errors": [{"message": "401 unauthorized"}]}
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as cm:
+                    linear_cli.list_tasks(_list_args(similar="zzz", limit=10, json=False),
+                                          {}, "api-key", "team-id")
+        finally:
+            linear_cli.gql = original
+        self.assertEqual(cm.exception.code, 1)
+        self.assertNotIn("No similar tickets", out.getvalue())
+        self.assertIn("no ranker could run", err.getvalue())
+
     def test_unavailable_ranker_is_skipped_not_an_error(self):
         # Semantic errors out (rate limit); lexical still answers and the
         # rankers list names only what ran.
@@ -3094,3 +3107,7 @@ class SimilarRealApiTests(unittest.TestCase):
         self.assertIn("lexical", out["rankers"])
         titles = [r["title"].lower() for r in out["rows"]]
         self.assertTrue(any("refresh" in t for t in titles), titles)
+
+
+if __name__ == "__main__":
+    unittest.main()
