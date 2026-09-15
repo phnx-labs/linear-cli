@@ -45,7 +45,7 @@ cycle, done ones included, so you enrich an existing ticket instead of filing a 
 **Optional: embeddings.** `linear setup --embeddings ollama` (local, default
 `qwen3-embedding:0.6b` from `$OLLAMA_HOST`) or `linear setup --embeddings gemini`
 (`GEMINI_API_KEY` from the environment, never stored) adds a third ranker —
-cosine similarity over embeddings, cached in `~/.linear-cli/embeddings.sqlite`,
+cosine similarity over embeddings, cached in `~/.linear-cli/cache.sqlite`,
 marked `E`. `--embeddings none` turns it off. Nothing breaks without it: an
 unreachable backend prints one `skipped` line and the other rankers still answer.
 

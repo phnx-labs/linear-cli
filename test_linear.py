@@ -1028,6 +1028,20 @@ class _ListTasksHarness:
         return False
 
 
+class _IsolatedCache:
+    """Redirect CACHE_DB_PATH to a temp dir so tests never read or write the
+    real ~/.linear-cli/cache.sqlite (rank_similar now fills it)."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cache_dir = Path(tmp.name) / ".linear-cli"
+        saved = linear_cli.CACHE_DB_PATH
+        linear_cli.CACHE_DB_PATH = self.cache_dir / "cache.sqlite"
+        self.addCleanup(lambda: setattr(linear_cli, "CACHE_DB_PATH", saved))
+
+
 def _list_args(**overrides):
     args = types.SimpleNamespace(
         cycle=None, project=None, milestone=None, since=None, all=False,
@@ -2885,7 +2899,7 @@ def _sim_issue(ident, title, state="Todo", description=""):
     return node
 
 
-class SimilarTests(unittest.TestCase):
+class SimilarTests(_IsolatedCache, unittest.TestCase):
     """`tasks --similar`: tokenizer, lexical ranking, RRF math, and the command
     end to end over a canned searchIssues page + issues page."""
 
@@ -3014,8 +3028,12 @@ class SimilarTests(unittest.TestCase):
         self.assertEqual(len(out["rows"]), 1)
         semantic_call = next(c for c in calls if "searchIssues" in c[0])
         self.assertEqual(semantic_call[1]["filter"], {"project": {"id": {"eq": "proj-uuid"}}})
+        # The board is cached team-wide and filtered locally, so the issues
+        # query carries only the team filter; rows outside the project never
+        # reach the lexical ranker (the canned board has no project ids).
         issues_call = next(c for c in calls if "issues(" in c[0])
-        self.assertIn('project: { id: { eq: "proj-uuid" } }', issues_call[0])
+        self.assertNotIn("project:", issues_call[0])
+        self.assertIsNone(out["rows"][0]["ranks"]["lexical"])
 
     def test_similar_no_hits_prints_message_and_exits_zero(self):
         buf = io.StringIO()
@@ -3089,13 +3107,14 @@ class SimilarTests(unittest.TestCase):
             linear_cli.gql = original
             linear_cli.EXTRA_RANKERS.pop("embeddings", None)
         self.assertEqual(out["rankers"], ["semantic", "lexical", "embeddings"])
-        self.assertEqual(seen["candidates"], ["PHNX-2315", "PHNX-9", "PHNX-10"])
+        # candidates come back from the cache in issue-id order, not board order
+        self.assertEqual(sorted(seen["candidates"]), ["PHNX-10", "PHNX-2315", "PHNX-9"])
         row = next(r for r in out["rows"] if r["identifier"] == "PHNX-10")
         self.assertEqual(row["ranks"], {"semantic": None, "lexical": None, "embeddings": 1})
         self.assertEqual(absent["rankers"], ["semantic", "lexical"])
 
 
-class SimilarRealApiTests(unittest.TestCase):
+class SimilarRealApiTests(_IsolatedCache, unittest.TestCase):
     """Runs against the configured workspace. Gated on LINEAR_REAL_API=1 because
     it spends one searchIssues call (30/min) and needs ~/.linear-cli/config.json."""
 
@@ -3112,7 +3131,7 @@ class SimilarRealApiTests(unittest.TestCase):
         self.assertTrue(any("refresh" in t for t in titles), titles)
 
 
-class CreateAdvisoryTests(unittest.TestCase):
+class CreateAdvisoryTests(_IsolatedCache, unittest.TestCase):
     """`create` prints similar tickets then proceeds. Advisory only — never
     blocks. Skipped for `--from-file` (searchIssues is 30/min)."""
 
@@ -3135,6 +3154,7 @@ class CreateAdvisoryTests(unittest.TestCase):
     ]
 
     def setUp(self):
+        super().setUp()
         self._orig_build = linear_cli._build_create_input
         self._orig_gql = linear_cli.gql
         self._orig_rank = linear_cli.rank_similar
@@ -3313,8 +3333,8 @@ class EmbeddingTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmpdir = Path(tmp.name)
-        saved_db = linear_cli.EMBEDDINGS_DB_PATH
-        linear_cli.EMBEDDINGS_DB_PATH = self.tmpdir / ".linear-cli" / "embeddings.sqlite"
+        saved_db = linear_cli.CACHE_DB_PATH
+        linear_cli.CACHE_DB_PATH = self.tmpdir / ".linear-cli" / "cache.sqlite"
         self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved_db))
 
     def _fake_post(self):
@@ -3456,7 +3476,7 @@ class EmbeddingTests(unittest.TestCase):
         issues = [_emb_issue("X-1", "token renewal")]
         linear_cli._embeddings_for(self.OLLAMA, issues)
 
-        conn = sqlite3.connect(linear_cli.EMBEDDINGS_DB_PATH)
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
         try:
             rows = conn.execute("SELECT issue_id, model, updated_at, dims, vec "
                                 "FROM vectors").fetchall()
@@ -3474,7 +3494,7 @@ class EmbeddingTests(unittest.TestCase):
         other = {"embeddings": {"backend": "ollama", "model": "embeddinggemma"}}
         linear_cli._embeddings_for(other, issues)
         self.assertEqual(len(calls), 2)
-        conn = sqlite3.connect(linear_cli.EMBEDDINGS_DB_PATH)
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
         try:
             models = {m for (m,) in conn.execute("SELECT model FROM vectors")}
         finally:
@@ -3484,8 +3504,8 @@ class EmbeddingTests(unittest.TestCase):
     def test_cache_file_is_private(self):
         self._fake_post()
         linear_cli._embeddings_for(self.OLLAMA, [_emb_issue("X-1", "token renewal")])
-        self.assertEqual(linear_cli.EMBEDDINGS_DB_PATH.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(linear_cli.EMBEDDINGS_DB_PATH.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(linear_cli.CACHE_DB_PATH.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(linear_cli.CACHE_DB_PATH.parent.stat().st_mode & 0o777, 0o700)
 
     def test_embedding_text_is_title_plus_truncated_description(self):
         text = linear_cli.embedding_text({"title": "t", "description": "d" * 5000})
@@ -3668,8 +3688,8 @@ class EmbeddingRealTests(unittest.TestCase):
         model = self._live_model()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        saved = linear_cli.EMBEDDINGS_DB_PATH
-        linear_cli.EMBEDDINGS_DB_PATH = Path(tmp.name) / "embeddings.sqlite"
+        saved = linear_cli.CACHE_DB_PATH
+        linear_cli.CACHE_DB_PATH = Path(tmp.name) / "cache.sqlite"
         self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved))
         cfg = {"embeddings": {"backend": "ollama", "model": model}}
         issues = [
@@ -3688,6 +3708,113 @@ class EmbeddingRealTests(unittest.TestCase):
         self.assertEqual([r[0] for r in ranked], [r[0] for r in again])
         for (_, a), (_, b) in zip(ranked, again):
             self.assertAlmostEqual(a, b, places=2)
+
+
+# --- board cache -------------------------------------------------------------
+
+def _board_node(ident, title, updated, project_id="proj-a"):
+    return {"id": f"id-{ident}", "identifier": ident, "title": title,
+            "description": "", "updatedAt": updated, "state": {"name": "Todo", "type": "unstarted"},
+            "project": {"id": project_id, "name": "A"}, "url": f"https://linear.app/x/{ident}"}
+
+
+class BoardCacheTests(_IsolatedCache, unittest.TestCase):
+    """The team board is fetched once, then only issues whose updatedAt moved."""
+
+    def _serve(self, pages, calls):
+        """fake gql: each call pops the next canned issues page."""
+        def fake_gql(_key, query, variables=None):
+            calls.append(query)
+            nodes = pages.pop(0)
+            if nodes is None:
+                return {"errors": [{"message": "boom"}]}
+            return {"data": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                        "nodes": nodes}}}
+        return fake_gql
+
+    def _with_gql(self, fn, body):
+        original = linear_cli.gql
+        linear_cli.gql = fn
+        try:
+            return body()
+        finally:
+            linear_cli.gql = original
+
+    def test_first_run_fetches_everything_then_only_changes(self):
+        calls = []
+        pages = [[_board_node("X-1", "auth refresh", "2026-09-01T00:00:00Z"),
+                  _board_node("X-2", "favicon", "2026-09-02T00:00:00Z")],
+                 [_board_node("X-2", "favicon v2", "2026-09-03T00:00:00Z"),
+                  _board_node("X-3", "new one", "2026-09-04T00:00:00Z")]]
+        fn = self._serve(pages, calls)
+        first = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertEqual([n["identifier"] for n in first], ["X-1", "X-2"])
+        self.assertNotIn("updatedAt: { gt:", calls[0])
+        second = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertIn('updatedAt: { gt: "2026-09-02T00:00:00Z" }', calls[1])
+        by_id = {n["identifier"]: n["title"] for n in second}
+        self.assertEqual(by_id, {"X-1": "auth refresh", "X-2": "favicon v2", "X-3": "new one"})
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
+        (last,) = conn.execute("SELECT last_updated_at FROM sync WHERE team_id='team-id'").fetchone()
+        self.assertEqual(last, "2026-09-04T00:00:00Z")
+        self.assertEqual(linear_cli.CACHE_DB_PATH.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_refresh_answers_from_cache_and_says_so(self):
+        calls = []
+        pages = [[_board_node("X-1", "auth refresh", "2026-09-01T00:00:00Z")], None]
+        fn = self._serve(pages, calls)
+        self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            again = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertEqual([n["identifier"] for n in again], ["X-1"])
+        self.assertIn("board cache: refresh failed", err.getvalue())
+
+    def test_cold_cache_and_failed_fetch_is_none(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = self._with_gql(self._serve([None], []),
+                                 lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertIsNone(got)
+
+    def test_project_filter_is_local(self):
+        pages = [[_board_node("X-1", "a", "2026-09-01T00:00:00Z", project_id="proj-a"),
+                  _board_node("X-2", "b", "2026-09-01T00:00:00Z", project_id="proj-b")]]
+        calls = []
+        got = self._with_gql(self._serve(pages, calls),
+                             lambda: linear_cli.cached_team_issues("k", "team-id", project_id="proj-b"))
+        self.assertEqual([n["identifier"] for n in got], ["X-2"])
+        self.assertNotIn("project:", calls[0])
+
+    def test_weekly_full_refresh_drops_vanished_issues(self):
+        calls = []
+        pages = [[_board_node("X-1", "a", "2026-09-01T00:00:00Z"),
+                  _board_node("X-2", "b", "2026-09-01T00:00:00Z")],
+                 [_board_node("X-1", "a", "2026-09-01T00:00:00Z")]]
+        fn = self._serve(pages, calls)
+        self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
+        conn.execute("UPDATE sync SET full_at = ?", ("2026-01-01T00:00:00+00:00",))
+        conn.commit(); conn.close()
+        got = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertNotIn("updatedAt: { gt:", calls[1])
+        self.assertEqual([n["identifier"] for n in got], ["X-1"])
+
+    def test_legacy_embeddings_file_is_renamed_in_place(self):
+        saved = linear_cli._LEGACY_EMBEDDINGS_DB_PATH
+        legacy = self.cache_dir / "embeddings.sqlite"
+        linear_cli._LEGACY_EMBEDDINGS_DB_PATH = legacy
+        self.addCleanup(lambda: setattr(linear_cli, "_LEGACY_EMBEDDINGS_DB_PATH", saved))
+        self.cache_dir.mkdir(parents=True)
+        conn = sqlite3.connect(legacy)
+        conn.execute("CREATE TABLE vectors (issue_id TEXT, model TEXT, updated_at TEXT, dims INTEGER, vec BLOB, PRIMARY KEY(issue_id, model))")
+        conn.execute("INSERT INTO vectors VALUES ('id-1', 'm', 'u', 1, X'00000000')")
+        conn.commit(); conn.close()
+        linear_cli._cache_db().close()
+        self.assertFalse(legacy.exists())
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
+        self.assertEqual(conn.execute("SELECT count(*) FROM vectors").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT count(*) FROM issues").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

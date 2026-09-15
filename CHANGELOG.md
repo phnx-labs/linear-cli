@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`tasks --similar` caches the team board in `~/.linear-cli/cache.sqlite`.**
+  The first run fetches the whole team once; every later run pulls only the
+  issues whose `updatedAt` moved since the last sync, and a full refresh runs
+  once a week to drop archived issues. `--project` filters the cached board
+  locally. A failed refresh over a warm cache answers from the cache and says so
+  on stderr. Measured on a 3,931-issue team: the board fetch went from ~11 s
+  per run to one page. The embedding vectors of the optional ranker move into
+  the same file; an existing `embeddings.sqlite` is renamed in place on first
+  open. `rm ~/.linear-cli/cache.sqlite` resets everything. (PHNX-4105)
+
 ## [0.24.0] - 2026-09-15
 
 ### Added
