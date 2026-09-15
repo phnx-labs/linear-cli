@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An unknown `--label` now says which labels exist.** `create` and `update`
+  used to print `label 'x' not found, skipping.` and agents answered it with
+  `linear labels create x`. The warning now adds a did-you-mean for a near
+  miss and the team's actual labels ("Labels are owner-managed: pick one of
+  the team's 25 (…); full list: linear labels"), so the fix at that moment is
+  picking one, not minting one. (PHNX-4105)
+
 ## [0.24.1] - 2026-09-15
 
 ### Changed

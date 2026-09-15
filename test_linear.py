@@ -3710,6 +3710,46 @@ class EmbeddingRealTests(unittest.TestCase):
             self.assertAlmostEqual(a, b, places=2)
 
 
+class UnknownLabelMessageTests(unittest.TestCase):
+    """A skipped label names the real labels so the fix is picking one, not
+    creating one."""
+
+    NAMES = ["engineering", "Bug", "Feature", "Improvement", "growth", "security"]
+
+    def test_names_the_team_labels_and_the_full_list_command(self):
+        msg = linear_cli._unknown_label_message("prix-api-audit", self.NAMES)
+        self.assertTrue(msg.startswith("label 'prix-api-audit' not found, skipping."))
+        self.assertIn("Labels are owner-managed: pick one of the team's 6 (Bug, engineering, Feature, growth, Improvement, security)", msg)
+        self.assertIn("full list: linear labels.", msg)
+        self.assertNotIn("Did you mean", msg)
+
+    def test_near_miss_gets_a_did_you_mean(self):
+        msg = linear_cli._unknown_label_message("bugs", self.NAMES)
+        self.assertIn("Did you mean: Bug?", msg)
+
+    def test_long_lists_are_elided(self):
+        names = [f"label-{i}" for i in range(20)]
+        msg = linear_cli._unknown_label_message("zzz", names)
+        self.assertIn("team's 20 (label-0, label-1, label-10, ", msg)
+        self.assertIn("label-19, …)", msg)
+        self.assertNotIn("label-2,", msg)
+
+    def test_create_path_prints_the_hint_and_still_builds_the_input(self):
+        original = linear_cli.list_team_labels
+        linear_cli.list_team_labels = lambda _a, _t: [{"name": n, "id": f"id-{n}"} for n in self.NAMES]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                obj, error = linear_cli._build_create_input(
+                    "k", "team-id", {}, {"title": "x", "skip_milestone": True, "force": True,
+                     "label": ["engineering", "prix-api-audit"]})
+        finally:
+            linear_cli.list_team_labels = original
+        self.assertIsNone(error)
+        self.assertEqual(obj["labelIds"], ["id-engineering"])
+        self.assertIn("label 'prix-api-audit' not found, skipping. Labels are owner-managed", err.getvalue())
+
+
 # --- board cache -------------------------------------------------------------
 
 def _board_node(ident, title, updated, project_id="proj-a"):
