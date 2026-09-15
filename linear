@@ -2302,15 +2302,15 @@ def advise_similar(api_key, team_id, cfg, title, description=None):
     try:
         text = title + ("\n" + description if description else "")
         rows = rank_similar(api_key, team_id, cfg, text, limit=3)["rows"]
-    except Exception as e:  # advisory: never block the create
+        hits = [r for r in rows if (r["ranks"].get("semantic") or 99) <= 3 or r["score"] >= 0.02]
+        if hits:
+            print("Similar existing tickets (consider enriching one instead of creating):", file=sys.stderr)
+            for r in hits:
+                print(f"  {r['identifier']:<10} {r['state']:<9} {r['title'][:70]}", file=sys.stderr)
+        return hits
+    except Exception as e:  # advisory: never block the create, whatever the row shape
         print(f"similar-check skipped: {e}", file=sys.stderr)
         return []
-    hits = [r for r in rows if (r["ranks"].get("semantic") or 99) <= 3 or r["score"] >= 0.02]
-    if hits:
-        print("Similar existing tickets (consider enriching one instead of creating):", file=sys.stderr)
-        for r in hits:
-            print(f"  {r['identifier']:<10} {r['state']:<9} {r['title'][:70]}", file=sys.stderr)
-    return hits
 
 
 # ---------------------------------------------------------------------------
