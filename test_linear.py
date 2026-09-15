@@ -3335,7 +3335,7 @@ class EmbeddingTests(unittest.TestCase):
         self.tmpdir = Path(tmp.name)
         saved_db = linear_cli.CACHE_DB_PATH
         linear_cli.CACHE_DB_PATH = self.tmpdir / ".linear-cli" / "cache.sqlite"
-        self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved_db))
+        self.addCleanup(lambda: setattr(linear_cli, "CACHE_DB_PATH", saved_db))
 
     def _fake_post(self):
         """Stand in for the HTTP edge; records every request the CLI makes."""
@@ -3690,7 +3690,7 @@ class EmbeddingRealTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         saved = linear_cli.CACHE_DB_PATH
         linear_cli.CACHE_DB_PATH = Path(tmp.name) / "cache.sqlite"
-        self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved))
+        self.addCleanup(lambda: setattr(linear_cli, "CACHE_DB_PATH", saved))
         cfg = {"embeddings": {"backend": "ollama", "model": model}}
         issues = [
             _emb_issue("X-1", "Mid-run OAuth token refresh for long agent runs"),
@@ -3749,9 +3749,9 @@ class BoardCacheTests(_IsolatedCache, unittest.TestCase):
         fn = self._serve(pages, calls)
         first = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
         self.assertEqual([n["identifier"] for n in first], ["X-1", "X-2"])
-        self.assertNotIn("updatedAt: { gt:", calls[0])
+        self.assertNotIn("updatedAt: { gte:", calls[0])
         second = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
-        self.assertIn('updatedAt: { gt: "2026-09-02T00:00:00Z" }', calls[1])
+        self.assertIn('updatedAt: { gte: "2026-09-02T00:00:00Z" }', calls[1])
         by_id = {n["identifier"]: n["title"] for n in second}
         self.assertEqual(by_id, {"X-1": "auth refresh", "X-2": "favicon v2", "X-3": "new one"})
         conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
@@ -3797,8 +3797,28 @@ class BoardCacheTests(_IsolatedCache, unittest.TestCase):
         conn.execute("UPDATE sync SET full_at = ?", ("2026-01-01T00:00:00+00:00",))
         conn.commit(); conn.close()
         got = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
-        self.assertNotIn("updatedAt: { gt:", calls[1])
+        self.assertNotIn("updatedAt: { gte:", calls[1])
         self.assertEqual([n["identifier"] for n in got], ["X-1"])
+
+    def test_truncated_full_fetch_keeps_the_cache_and_retries_next_time(self):
+        calls = []
+        first = [_board_node("X-1", "a", "2026-09-01T00:00:00Z"),
+                 _board_node("X-2", "b", "2026-09-01T00:00:00Z")]
+        rail = [_board_node(f"Y-{i}", "t", "2026-09-05T00:00:00Z")
+                for i in range(linear_cli._PAGE_SIZE * linear_cli._MAX_PAGES)]
+        fn = self._serve([first, rail], calls)
+        self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
+        conn.execute("UPDATE sync SET full_at = ?", ("2026-01-01T00:00:00+00:00",))
+        conn.commit(); conn.close()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = self._with_gql(fn, lambda: linear_cli.cached_team_issues("k", "team-id"))
+        self.assertEqual([n["identifier"] for n in got], ["X-1", "X-2"])
+        self.assertIn("board cache: full refresh hit the pagination rail", err.getvalue())
+        conn = sqlite3.connect(linear_cli.CACHE_DB_PATH)
+        (full_at,) = conn.execute("SELECT full_at FROM sync WHERE team_id='team-id'").fetchone()
+        self.assertEqual(full_at, "2026-01-01T00:00:00+00:00")
 
     def test_legacy_embeddings_file_is_renamed_in_place(self):
         saved = linear_cli._LEGACY_EMBEDDINGS_DB_PATH
