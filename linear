@@ -1094,6 +1094,18 @@ def _suggest(value: str, names: list[str]) -> str:
     return f" Did you mean: {', '.join(close)}?" if close else ""
 
 
+def _unknown_label_message(label: str, names: list[str]) -> str:
+    """Why a label was skipped and what to use instead. Labels are the owner's
+    taxonomy, so the fix is picking an existing one, never creating it — the
+    message says so at the moment an agent would otherwise reach for
+    `linear labels create`."""
+    names = sorted(names, key=str.lower)  # stable, scannable; the API order is creation order
+    shown = ", ".join(names[:12]) + (", …" if len(names) > 12 else "")
+    return (f"label '{label}' not found, skipping.{_suggest(label, names)} "
+            f"Labels are owner-managed: pick one of the team's {len(names)} "
+            f"({shown}); full list: linear labels.")
+
+
 def _sort_by_recent(nodes: list[dict]) -> list[dict]:
     return sorted(
         nodes,
@@ -3477,7 +3489,7 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
                         label_ids.append(label_map[lbl])
                         added.append(lbl)
                 else:
-                    print(f"Warning: label '{lbl}' not found, skipping.", file=sys.stderr)
+                    print("Warning: " + _unknown_label_message(lbl, list(label_map)), file=sys.stderr)
 
             removed = []
             for lbl in args.unlabel or []:
@@ -4010,7 +4022,7 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
             if lbl in label_map:
                 label_ids.append(label_map[lbl])
             else:
-                warn(f"label '{lbl}' not found, skipping.")
+                warn(_unknown_label_message(lbl, list(label_map)))
         if label_ids:
             input_obj["labelIds"] = label_ids
 
