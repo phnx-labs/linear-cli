@@ -167,6 +167,25 @@ create` repeats the same ranking automatically (top 3, printed to stderr) and
 then creates anyway — advisory, never a deny. `--from-file` bulk create skips
 the lookup because `searchIssues` is rate-limited to 30/min.
 
+### Optional: embeddings
+
+A third ranker scores candidates by cosine similarity over text embeddings. It
+is off until you configure a backend:
+
+```bash
+linear setup --embeddings ollama    # local, default model qwen3-embedding:0.6b
+linear setup --embeddings gemini    # gemini-embedding-001, key from GEMINI_API_KEY
+linear setup --embeddings none      # off again
+```
+
+Ollama is read from `$OLLAMA_HOST` (default `http://localhost:11434`);
+`--embeddings-model NAME` picks another model (`embeddinggemma`, `all-minilm`,
+…). The Gemini key comes from the environment only and is never written to
+`config.json`. Vectors are cached in `~/.linear-cli/embeddings.sqlite` keyed by
+issue and model, so only new or edited issues are re-embedded. A hit is marked
+`E`; if the backend is unreachable the ranker prints one `embeddings: …
+skipped` line and `--similar` answers from the other two.
+
 ## For humans and agents
 
 The same CLI works whether you're typing or a subagent is. Driving Linear from either shouldn't require shelling out to `@linear/sdk`, hand-rolling GraphQL, or parsing HTML.

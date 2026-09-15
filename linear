@@ -26,18 +26,22 @@ Commands:
                         (`queue drain` applies pending closes)
 
 Config: ~/.linear-cli/config.json
+Embedding cache (optional ranker): ~/.linear-cli/embeddings.sqlite
 """
 
 from __future__ import annotations
 
 import argparse
+import array
 import contextlib
 import difflib
 import errno
 import json
+import math
 import mimetypes
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -1614,7 +1618,10 @@ def parse_due_date(value: str) -> str | None:
         )
     return v
 
+# `id` and `updatedAt` are what the embeddings cache keys on — the vector for an
+# issue is reused until its updatedAt moves.
 ISSUE_FIELDS = """
+    id updatedAt
     identifier title description state { name type }
     priority labels { nodes { name } }
     assignee { name }
@@ -2048,7 +2055,36 @@ def parse_timeless_date(value: str, flag: str) -> str | None:
 # setup
 # ---------------------------------------------------------------------------
 
+def apply_embeddings_choice(cfg: dict, backend: str, model: str | None) -> str:
+    """Set (or clear, for "none") cfg["embeddings"]; returns the line to print.
+
+    Only the backend name and model land in config.json. The Gemini key is read
+    from GEMINI_API_KEY when a ranking runs and is never written here.
+    """
+    if backend == "none":
+        cfg.pop("embeddings", None)
+        return "Embeddings ranker: off"
+    chosen = model or EMBEDDINGS_DEFAULT_MODEL[backend]
+    cfg["embeddings"] = {"backend": backend, "model": chosen}
+    return f"Embeddings ranker: {backend} ({chosen})"
+
+
 def cmd_setup(args, cfg):
+    if args.embeddings_model and not args.embeddings:
+        print("--embeddings-model needs --embeddings ollama|gemini", file=sys.stderr)
+        sys.exit(1)
+
+    # Turning the ranker on is a one-key edit — don't re-run the team and agent
+    # prompts (or spend an API call) on a box that is already configured.
+    if args.embeddings and not args.api_key and cfg.get("teamId"):
+        note = apply_embeddings_choice(cfg, args.embeddings, args.embeddings_model)
+        if not save_config(cfg):
+            print(f"Setup failed: could not persist {CONFIG_PATH}", file=sys.stderr)
+            sys.exit(1)
+        print(note)
+        print(f"Config: {CONFIG_PATH}")
+        return
+
     api_key = args.api_key or input("Linear API key: ").strip()
     if not api_key:
         print("API key required.")
@@ -2086,6 +2122,9 @@ def cmd_setup(args, cfg):
     if agent:
         cfg["agent"] = agent
 
+    embeddings_note = (apply_embeddings_choice(cfg, args.embeddings, args.embeddings_model)
+                       if args.embeddings else None)
+
     cfg.pop("states", None)
     states = get_states(api_key, team["id"], cfg)
 
@@ -2097,6 +2136,8 @@ def cmd_setup(args, cfg):
     print(f"\nConfigured: team={team['name']}, states={len(states)}")
     if agent:
         print(f"Agent identity: {agent}")
+    if embeddings_note:
+        print(embeddings_note)
     print(f"Config: {CONFIG_PATH}")
 
 
@@ -2311,6 +2352,251 @@ def advise_similar(api_key, team_id, cfg, title, description=None):
     except Exception as e:  # advisory: never block the create, whatever the row shape
         print(f"similar-check skipped: {e}", file=sys.stderr)
         return []
+
+
+# ---------------------------------------------------------------------------
+# embeddings ranker — optional third signal for `tasks --similar`
+# ---------------------------------------------------------------------------
+
+# Off unless `linear setup --embeddings ollama|gemini` wrote a backend. Every
+# failure here is advisory: the ranker drops out with one stderr line and
+# `--similar` still answers from semantic + lexical.
+
+EMBEDDINGS_DB_PATH = Path.home() / ".linear-cli" / "embeddings.sqlite"
+EMBEDDINGS_BACKENDS = ("ollama", "gemini")
+# Defaults are the smallest models at the top of the quality curve (rationale and
+# the alternatives worth passing to --embeddings-model are in PHNX-4105).
+EMBEDDINGS_DEFAULT_MODEL = {
+    "ollama": "qwen3-embedding:0.6b",
+    "gemini": "gemini-embedding-001",
+}
+OLLAMA_DEFAULT_HOST = "http://localhost:11434"
+GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+# Matryoshka truncation: gemini-embedding-001 answers at 3072 by default and
+# 768 is its cheapest well-behaved size. Never assume this is *the* dimension —
+# what a vector actually measured is recorded per cached row.
+GEMINI_OUTPUT_DIMS = 768
+EMBED_BATCH = 64
+EMBED_TIMEOUT = 20
+# Descriptions run long; the first 2000 characters carry the subject.
+EMBED_TEXT_CHARS = 2000
+# SQLite's default parameter ceiling is 999 — chunk the id lookup under it.
+_SQL_MAX_PARAMS = 500
+
+
+class EmbeddingUnavailable(RuntimeError):
+    """The configured backend could not be reached, or answered unusably.
+
+    Carries a short human phrase (`ollama unreachable`), not the request URL —
+    the Gemini key rides in the query string and must not reach a log.
+    """
+
+
+def embeddings_settings(cfg: dict) -> tuple[str, str] | None:
+    """(backend, model) when a backend is configured, else None."""
+    conf = cfg.get("embeddings") or {}
+    backend = conf.get("backend")
+    if backend not in EMBEDDINGS_BACKENDS:
+        return None
+    return backend, conf.get("model") or EMBEDDINGS_DEFAULT_MODEL[backend]
+
+
+def _embed_post(url: str, payload: dict, backend: str) -> dict:
+    """POST JSON, parse JSON. Every transport-level problem — refused connection,
+    DNS, timeout, HTTP error, unparseable body — becomes EmbeddingUnavailable."""
+    req = Request(url, data=json.dumps(payload).encode(), method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urlopen(req, timeout=EMBED_TIMEOUT) as resp:
+            return json.loads(resp.read())
+    # URLError/HTTPError and socket timeouts are all OSError subclasses.
+    except (OSError, ValueError) as e:
+        # An answered-but-refusing backend (model not pulled, no embedding
+        # support, bad key) is a different fix than a dead one — name the status.
+        status = getattr(e, "code", None)
+        raise EmbeddingUnavailable(
+            f"{backend} unreachable" + (f" (HTTP {status})" if status else "")) from e
+
+
+def _embed_ollama(model: str, texts: list[str]) -> list[list[float]]:
+    host = (os.environ.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST).strip().rstrip("/")
+    # OLLAMA_HOST is commonly set bare ("127.0.0.1:11434") — urlopen needs a scheme.
+    if "://" not in host:
+        host = f"http://{host}"
+    data = _embed_post(f"{host}/api/embed", {"model": model, "input": texts}, "ollama")
+    return _as_vectors(data.get("embeddings"), len(texts), "ollama")
+
+
+def _embed_gemini(model: str, texts: list[str]) -> list[list[float]]:
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not key:
+        raise EmbeddingUnavailable("gemini needs GEMINI_API_KEY")
+    payload = {"requests": [{"model": f"models/{model}",
+                             "content": {"parts": [{"text": t}]},
+                             "outputDimensionality": GEMINI_OUTPUT_DIMS}
+                            for t in texts]}
+    data = _embed_post(f"{GEMINI_API_ROOT}/{model}:batchEmbedContents?key={key}",
+                       payload, "gemini")
+    raw = [(e or {}).get("values") for e in (data.get("embeddings") or [])]
+    return _as_vectors(raw, len(texts), "gemini")
+
+
+def _as_vectors(raw, expected: int, backend: str) -> list[list[float]]:
+    """Validate a batch response: one non-empty float vector per input text, all
+    the same width. A short or ragged batch would silently misalign vectors with
+    issues, so it is treated as the backend being unusable."""
+    try:
+        vectors = [[float(x) for x in (v or [])] for v in (raw or [])]
+    except (TypeError, ValueError) as e:  # a null inside a vector is still "unusable", not a crash
+        raise EmbeddingUnavailable(f"{backend} returned an unusable batch") from e
+    widths = {len(v) for v in vectors}
+    if len(vectors) != expected or not widths or 0 in widths or len(widths) > 1:
+        raise EmbeddingUnavailable(f"{backend} returned an unusable batch")
+    return vectors
+
+
+def embed_texts(cfg: dict, texts: list[str]) -> list[list[float]]:
+    """Embed `texts` with the configured backend, in batches of EMBED_BATCH.
+
+    Raises EmbeddingUnavailable when there is no backend or it cannot answer.
+    """
+    settings = embeddings_settings(cfg)
+    if settings is None:
+        raise EmbeddingUnavailable("no backend configured")
+    backend, model = settings
+    encode = _embed_ollama if backend == "ollama" else _embed_gemini
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), EMBED_BATCH):
+        vectors.extend(encode(model, texts[start:start + EMBED_BATCH]))
+    return vectors
+
+
+def embedding_text(issue: dict) -> str:
+    """What actually gets embedded: the title, then the head of the description."""
+    return (f"{issue.get('title') or ''}\n"
+            f"{(issue.get('description') or '')[:EMBED_TEXT_CHARS]}")
+
+
+def _embeddings_db() -> sqlite3.Connection:
+    """Open (creating it) the vector cache next to config.json.
+
+    Ticket titles and descriptions are cached in here, so it gets the same
+    private modes as the config that holds the API key.
+    """
+    EMBEDDINGS_DB_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+    EMBEDDINGS_DB_PATH.touch(mode=CONFIG_FILE_MODE, exist_ok=True)
+    conn = sqlite3.connect(EMBEDDINGS_DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS vectors (
+                        issue_id TEXT, model TEXT, updated_at TEXT,
+                        dims INTEGER, vec BLOB,
+                        PRIMARY KEY(issue_id, model))""")
+    conn.commit()
+    with contextlib.suppress(OSError):
+        EMBEDDINGS_DB_PATH.chmod(CONFIG_FILE_MODE)
+    return conn
+
+
+def _cached_vectors(conn: sqlite3.Connection, model: str,
+                    issue_ids: list[str]) -> dict[str, tuple[str, list[float]]]:
+    """{issue_id: (updated_at, vector)} for ids already embedded with `model`."""
+    cached: dict[str, tuple[str, list[float]]] = {}
+    for start in range(0, len(issue_ids), _SQL_MAX_PARAMS):
+        chunk = issue_ids[start:start + _SQL_MAX_PARAMS]
+        holes = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT issue_id, updated_at, vec FROM vectors "
+            f"WHERE model = ? AND issue_id IN ({holes})", [model, *chunk])
+        for issue_id, updated_at, vec in rows:
+            cached[issue_id] = (updated_at or "", array.array("f", vec).tolist())
+    return cached
+
+
+def _embeddings_for(cfg: dict, issues: list[dict]) -> dict[str, list[float]]:
+    """Vectors for `issues` keyed by issue id, embedding only what the cache is
+    missing or holds against an older updatedAt. Raises EmbeddingUnavailable."""
+    settings = embeddings_settings(cfg)
+    if settings is None:
+        raise EmbeddingUnavailable("no backend configured")
+    _, model = settings
+    conn = _embeddings_db()
+    try:
+        keyed = [i for i in issues if i.get("id")]
+        cached = _cached_vectors(conn, model, [i["id"] for i in keyed])
+        vectors: dict[str, list[float]] = {}
+        stale: list[dict] = []
+        for issue in keyed:
+            hit = cached.get(issue["id"])
+            if hit and hit[0] == (issue.get("updatedAt") or ""):
+                vectors[issue["id"]] = hit[1]
+            else:
+                stale.append(issue)
+        if stale:
+            fresh = embed_texts(cfg, [embedding_text(i) for i in stale])
+            rows = []
+            for issue, vec in zip(stale, fresh):
+                vectors[issue["id"]] = vec
+                rows.append((issue["id"], model, issue.get("updatedAt") or "",
+                             len(vec), array.array("f", vec).tobytes()))
+            conn.executemany(
+                "INSERT INTO vectors (issue_id, model, updated_at, dims, vec) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(issue_id, model) DO UPDATE SET "
+                "updated_at = excluded.updated_at, dims = excluded.dims, "
+                "vec = excluded.vec", rows)
+            conn.commit()
+        return vectors
+    finally:
+        conn.close()
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def embedding_rank(text: str, issues: list[dict],
+                   cfg: dict) -> list[tuple[str, float]] | None:
+    """Rank `issues` by cosine similarity to `text`: (identifier, score) best-first.
+
+    Returns None — not an empty list — when the backend is unreachable, so
+    rank_similar leaves "embeddings" out of the rankers it reports instead of
+    claiming a ranker ran and found nothing.
+    """
+    try:
+        vectors = _embeddings_for(cfg, issues)
+        query = embed_texts(cfg, [text])[0]
+    except EmbeddingUnavailable as e:
+        print(f"embeddings: {e}, skipped", file=sys.stderr)
+        return None
+    scored = []
+    for issue in issues:
+        vec = vectors.get(issue.get("id"))
+        # A width mismatch means the cache holds a vector from another model
+        # under the same name; zip would score it against a prefix. Drop it.
+        if not vec or len(vec) != len(query):
+            continue
+        score = cosine(query, vec)
+        if score > 0:
+            scored.append((issue["identifier"], score))
+    scored.sort(key=lambda t: (-t[1], t[0]))
+    return scored
+
+
+def embeddings_ranker(api_key: str, team_id: str, cfg: dict, text: str,
+                      candidates: list[dict]) -> list[str] | None:
+    """EXTRA_RANKERS adapter: identifiers best-first, or None when skipped."""
+    ranked = embedding_rank(text, candidates, cfg)
+    return None if ranked is None else [ident for ident, _ in ranked]
+
+
+def register_embeddings_ranker(cfg: dict) -> None:
+    """Register the ranker only when a backend is configured, so a box without
+    one pays nothing and never sees "embeddings" in the rankers that ran."""
+    if embeddings_settings(cfg):
+        EXTRA_RANKERS["embeddings"] = embeddings_ranker
+    else:
+        EXTRA_RANKERS.pop("embeddings", None)
 
 
 # ---------------------------------------------------------------------------
@@ -5521,6 +5807,14 @@ def main():
     p_setup = sub.add_parser("setup", help="Configure Linear connection and agent identity")
     p_setup.add_argument("--api-key", help="Linear API key")
     p_setup.add_argument("--agent", help="Default agent identity")
+    p_setup.add_argument("--embeddings", choices=["ollama", "gemini", "none"],
+                         help="Optional embeddings ranker for `tasks --similar`: "
+                              "ollama (local, OLLAMA_HOST), gemini (GEMINI_API_KEY "
+                              "from the environment), or none to turn it off")
+    p_setup.add_argument("--embeddings-model", metavar="NAME",
+                         help="Embedding model for --embeddings (default: "
+                              "qwen3-embedding:0.6b for ollama, "
+                              "gemini-embedding-001 for gemini)")
 
     # tasks (list + view + board)
     p_tasks = sub.add_parser("tasks", help="List tasks, view details, or show team board")
@@ -5843,6 +6137,7 @@ def main():
         sys.exit(0)
 
     cfg = load_config()
+    register_embeddings_ranker(cfg)
 
     if args.command == "setup":
         cmd_setup(args, cfg)

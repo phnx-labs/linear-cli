@@ -10,13 +10,16 @@ usual invalidation is easy to miss when an edit doesn't change the file length.
 Re-run with PYTHONDONTWRITEBYTECODE=1 before believing the result.
 """
 
+import array
 import contextlib
 import errno
 import importlib.util
 import io
 import json
+import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -3280,6 +3283,411 @@ class CreateAdvisoryTests(unittest.TestCase):
         self.assertIn("Backlog", err_text)
         self.assertIn("Created PHNX-9999:", out.getvalue())
         self.assertEqual(len(created), 1)
+
+# --- embeddings ranker -------------------------------------------------------
+
+# A tiny bag-of-words embedding so cosine ordering in the tests is predictable
+# without a real model: one axis per word.
+_EMB_VOCAB = ("token", "renewal", "billing")
+
+
+def _toy_vector(text):
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [float(words.count(w)) for w in _EMB_VOCAB]
+
+
+def _emb_issue(ident, title, description="", issue_id=None, updated_at="2026-09-01T00:00:00.000Z"):
+    node = _sim_issue(ident, title, description=description)
+    node["id"] = issue_id or f"uuid-{ident}"
+    node["updatedAt"] = updated_at
+    return node
+
+
+class EmbeddingTests(unittest.TestCase):
+    """The optional third ranker: batching, the sqlite vector cache, cosine
+    ordering, the skip path when no backend answers, and `setup --embeddings`."""
+
+    OLLAMA = {"embeddings": {"backend": "ollama", "model": "qwen3-embedding:0.6b"}}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmpdir = Path(tmp.name)
+        saved_db = linear_cli.EMBEDDINGS_DB_PATH
+        linear_cli.EMBEDDINGS_DB_PATH = self.tmpdir / ".linear-cli" / "embeddings.sqlite"
+        self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved_db))
+
+    def _fake_post(self):
+        """Stand in for the HTTP edge; records every request the CLI makes."""
+        calls = []
+
+        def fake_post(url, payload, backend):
+            calls.append((url, payload, backend))
+            if backend == "ollama":
+                return {"embeddings": [_toy_vector(t) for t in payload["input"]]}
+            return {"embeddings": [{"values": _toy_vector(r["content"]["parts"][0]["text"])}
+                                   for r in payload["requests"]]}
+
+        saved = linear_cli._embed_post
+        linear_cli._embed_post = fake_post
+        self.addCleanup(lambda: setattr(linear_cli, "_embed_post", saved))
+        return calls
+
+    def _set_env(self, name, value):
+        saved = os.environ.get(name)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+        def restore():
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+        self.addCleanup(restore)
+
+    # -- cosine ---------------------------------------------------------------
+
+    def test_cosine_math(self):
+        self.assertAlmostEqual(linear_cli.cosine([1.0, 0.0], [1.0, 0.0]), 1.0)
+        self.assertAlmostEqual(linear_cli.cosine([1.0, 0.0], [0.0, 1.0]), 0.0)
+        self.assertAlmostEqual(linear_cli.cosine([1.0, 0.0], [-1.0, 0.0]), -1.0)
+        self.assertAlmostEqual(linear_cli.cosine([1.0, 1.0], [1.0, 0.0]), 1 / math.sqrt(2))
+        # A zero vector has no direction — 0.0, not a ZeroDivisionError.
+        self.assertEqual(linear_cli.cosine([0.0, 0.0], [1.0, 2.0]), 0.0)
+
+    # -- backends -------------------------------------------------------------
+
+    def test_embed_texts_batches_at_64_and_honors_ollama_host(self):
+        calls = self._fake_post()
+        self._set_env("OLLAMA_HOST", "127.0.0.1:99999")  # bare host:port, no scheme
+        texts = [f"token {i}" for i in range(130)]
+        vectors = linear_cli.embed_texts(self.OLLAMA, texts)
+        self.assertEqual(len(vectors), 130)
+        self.assertEqual([len(c[1]["input"]) for c in calls], [64, 64, 2])
+        self.assertEqual(calls[0][0], "http://127.0.0.1:99999/api/embed")
+        self.assertEqual(calls[0][1]["model"], "qwen3-embedding:0.6b")
+
+    def test_embed_texts_gemini_payload_carries_key_and_dims(self):
+        calls = self._fake_post()
+        self._set_env("GEMINI_API_KEY", "gem-secret")
+        cfg = {"embeddings": {"backend": "gemini"}}
+        vectors = linear_cli.embed_texts(cfg, ["token renewal"])
+        self.assertEqual(vectors, [[1.0, 1.0, 0.0]])
+        url, payload, backend = calls[0]
+        self.assertEqual(backend, "gemini")
+        self.assertIn("models/gemini-embedding-001:batchEmbedContents", url)
+        self.assertTrue(url.endswith("?key=gem-secret"))
+        self.assertEqual(payload["requests"][0]["outputDimensionality"],
+                         linear_cli.GEMINI_OUTPUT_DIMS)
+        # The key rides in the URL and must never be persisted with the model.
+        self.assertNotIn("gem-secret", json.dumps(cfg))
+
+    def test_gemini_without_key_is_unavailable(self):
+        self._fake_post()
+        self._set_env("GEMINI_API_KEY", None)
+        with self.assertRaises(linear_cli.EmbeddingUnavailable) as ctx:
+            linear_cli.embed_texts({"embeddings": {"backend": "gemini"}}, ["x"])
+        self.assertEqual(str(ctx.exception), "gemini needs GEMINI_API_KEY")
+
+    def test_no_backend_configured_is_unavailable(self):
+        with self.assertRaises(linear_cli.EmbeddingUnavailable):
+            linear_cli.embed_texts({}, ["x"])
+        with self.assertRaises(linear_cli.EmbeddingUnavailable):
+            linear_cli.embed_texts({"embeddings": {"backend": "openai"}}, ["x"])
+
+    def test_http_error_names_the_status(self):
+        """A backend that answers and refuses (model not pulled, bad key) reads
+        differently from one that is not running."""
+        import urllib.error
+        saved = linear_cli.urlopen
+        self.addCleanup(lambda: setattr(linear_cli, "urlopen", saved))
+
+        def refuse(req, timeout=None):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:11434/api/embed", 500, "Internal Server Error", {},
+                io.BytesIO(b'{"error":"this model does not support embeddings"}'))
+
+        linear_cli.urlopen = refuse
+        with self.assertRaises(linear_cli.EmbeddingUnavailable) as ctx:
+            linear_cli.embed_texts(self.OLLAMA, ["x"])
+        self.assertEqual(str(ctx.exception), "ollama unreachable (HTTP 500)")
+
+    def test_short_or_ragged_batch_is_unavailable(self):
+        saved = linear_cli._embed_post
+        self.addCleanup(lambda: setattr(linear_cli, "_embed_post", saved))
+        for bad in ({"embeddings": [[1.0, 0.0]]},                    # 1 vector for 2 texts
+                    {"embeddings": [[1.0, 0.0], [1.0]]},             # ragged widths
+                    {"embeddings": [[1.0, 0.0], []]},                # empty vector
+                    {}):                                            # no embeddings at all
+            linear_cli._embed_post = lambda url, payload, backend, r=bad: r
+            with self.assertRaises(linear_cli.EmbeddingUnavailable) as ctx:
+                linear_cli.embed_texts(self.OLLAMA, ["a", "b"])
+            self.assertEqual(str(ctx.exception), "ollama returned an unusable batch")
+
+    # -- cache ----------------------------------------------------------------
+
+    def test_cache_embeds_once_then_reuses_and_reembeds_only_changes(self):
+        calls = self._fake_post()
+        issues = [_emb_issue("X-1", "token renewal"), _emb_issue("X-2", "billing export")]
+
+        first = linear_cli._embeddings_for(self.OLLAMA, issues)
+        self.assertEqual(first["uuid-X-1"], [1.0, 1.0, 0.0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["input"], ["token renewal\n", "billing export\n"])
+
+        # Second run over the same issues: served from sqlite, no request at all.
+        again = linear_cli._embeddings_for(self.OLLAMA, issues)
+        self.assertEqual(again, first)
+        self.assertEqual(len(calls), 1)
+
+        # Only the issue whose updatedAt moved is re-embedded.
+        issues[1]["updatedAt"] = "2026-09-14T12:00:00.000Z"
+        issues[1]["title"] = "billing billing"
+        third = linear_cli._embeddings_for(self.OLLAMA, issues)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][1]["input"], ["billing billing\n"])
+        self.assertEqual(third["uuid-X-2"], [0.0, 0.0, 2.0])
+        self.assertEqual(third["uuid-X-1"], first["uuid-X-1"])
+
+    def test_cache_row_records_dims_and_is_keyed_by_model(self):
+        calls = self._fake_post()
+        issues = [_emb_issue("X-1", "token renewal")]
+        linear_cli._embeddings_for(self.OLLAMA, issues)
+
+        conn = sqlite3.connect(linear_cli.EMBEDDINGS_DB_PATH)
+        try:
+            rows = conn.execute("SELECT issue_id, model, updated_at, dims, vec "
+                                "FROM vectors").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        issue_id, model, updated_at, dims, vec = rows[0]
+        self.assertEqual((issue_id, model), ("uuid-X-1", "qwen3-embedding:0.6b"))
+        self.assertEqual(updated_at, "2026-09-01T00:00:00.000Z")
+        # dims comes from the response, never a constant.
+        self.assertEqual(dims, len(_EMB_VOCAB))
+        self.assertEqual(array.array("f", vec).tolist(), [1.0, 1.0, 0.0])
+
+        # A different model is a different cache key: the vector is re-embedded.
+        other = {"embeddings": {"backend": "ollama", "model": "embeddinggemma"}}
+        linear_cli._embeddings_for(other, issues)
+        self.assertEqual(len(calls), 2)
+        conn = sqlite3.connect(linear_cli.EMBEDDINGS_DB_PATH)
+        try:
+            models = {m for (m,) in conn.execute("SELECT model FROM vectors")}
+        finally:
+            conn.close()
+        self.assertEqual(models, {"qwen3-embedding:0.6b", "embeddinggemma"})
+
+    def test_cache_file_is_private(self):
+        self._fake_post()
+        linear_cli._embeddings_for(self.OLLAMA, [_emb_issue("X-1", "token renewal")])
+        self.assertEqual(linear_cli.EMBEDDINGS_DB_PATH.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(linear_cli.EMBEDDINGS_DB_PATH.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_embedding_text_is_title_plus_truncated_description(self):
+        text = linear_cli.embedding_text({"title": "t", "description": "d" * 5000})
+        self.assertEqual(text, "t\n" + "d" * linear_cli.EMBED_TEXT_CHARS)
+        self.assertEqual(linear_cli.embedding_text({"title": None, "description": None}), "\n")
+
+    # -- ranking --------------------------------------------------------------
+
+    def test_embedding_rank_orders_by_cosine_and_drops_zero_scores(self):
+        self._fake_post()
+        issues = [
+            _emb_issue("X-1", "token"),
+            _emb_issue("X-2", "billing export"),
+            _emb_issue("X-3", "token renewal"),
+            # The description is embedded too, so this one matches on "token".
+            _emb_issue("X-4", "renewal", description="token billing"),
+        ]
+        ranked = linear_cli.embedding_rank("token renewal", issues, self.OLLAMA)
+        self.assertEqual([i for i, _ in ranked], ["X-3", "X-4", "X-1"])
+        scores = dict(ranked)
+        self.assertAlmostEqual(scores["X-3"], 1.0)
+        self.assertAlmostEqual(scores["X-4"], 2 / math.sqrt(6))
+        self.assertAlmostEqual(scores["X-1"], 1 / math.sqrt(2))
+        self.assertNotIn("X-2", scores)  # orthogonal to the query
+
+    def test_ranker_skips_with_one_line_when_backend_unreachable(self):
+        import socket
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        self._set_env("OLLAMA_HOST", f"http://127.0.0.1:{port}")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ranked = linear_cli.embedding_rank("token renewal",
+                                               [_emb_issue("X-1", "token renewal")],
+                                               self.OLLAMA)
+        # None, not [] — rank_similar must leave the ranker out of what ran.
+        self.assertIsNone(ranked)
+        self.assertEqual(err.getvalue(), "embeddings: ollama unreachable, skipped\n")
+
+    def test_register_gates_on_configured_backend(self):
+        self.addCleanup(lambda: linear_cli.EXTRA_RANKERS.pop("embeddings", None))
+        linear_cli.register_embeddings_ranker({})
+        self.assertNotIn("embeddings", linear_cli.EXTRA_RANKERS)
+        linear_cli.register_embeddings_ranker(self.OLLAMA)
+        self.assertIs(linear_cli.EXTRA_RANKERS["embeddings"], linear_cli.embeddings_ranker)
+        linear_cli.register_embeddings_ranker({"embeddings": {"backend": "none"}})
+        self.assertNotIn("embeddings", linear_cli.EXTRA_RANKERS)
+
+    def _rank_similar(self, cfg):
+        """rank_similar over a canned board with the ranker registered."""
+        board = [_emb_issue("PHNX-9", "token renewal daemon"),
+                 _emb_issue("PHNX-10", "Billing export CSV")]
+
+        def fake_gql(_key, query, variables=None):
+            if "searchIssues" in query:
+                return {"data": {"searchIssues": {"nodes": []}}}
+            return {"data": {"issues": {"pageInfo": {"hasNextPage": False,
+                                                     "endCursor": None},
+                                        "nodes": list(board)}}}
+
+        saved = linear_cli.gql
+        linear_cli.gql = fake_gql
+        linear_cli.register_embeddings_ranker(cfg)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                out = linear_cli.rank_similar("api-key", "team-id", cfg, "token renewal")
+        finally:
+            linear_cli.gql = saved
+            linear_cli.EXTRA_RANKERS.pop("embeddings", None)
+        return out, err.getvalue()
+
+    def test_rank_similar_names_embeddings_when_it_ran(self):
+        self._fake_post()
+        out, err = self._rank_similar(self.OLLAMA)
+        self.assertEqual(out["rankers"], ["semantic", "lexical", "embeddings"])
+        self.assertEqual(out["rows"][0]["identifier"], "PHNX-9")
+        self.assertEqual(out["rows"][0]["ranks"]["embeddings"], 1)
+        self.assertEqual(err, "")
+
+    def test_rank_similar_still_answers_when_embeddings_is_skipped(self):
+        self._set_env("OLLAMA_HOST", "http://127.0.0.1:1")  # nothing listens on port 1
+        out, err = self._rank_similar(self.OLLAMA)
+        self.assertEqual(out["rankers"], ["semantic", "lexical"])
+        self.assertEqual([r["identifier"] for r in out["rows"]], ["PHNX-9"])
+        self.assertEqual(err, "embeddings: ollama unreachable, skipped\n")
+
+    def test_no_backend_means_no_ranker_and_no_noise(self):
+        out, err = self._rank_similar({})
+        self.assertEqual(out["rankers"], ["semantic", "lexical"])
+        self.assertEqual(err, "")
+
+    # -- setup ----------------------------------------------------------------
+
+    def _setup_args(self, **overrides):
+        args = types.SimpleNamespace(api_key=None, agent=None, embeddings=None,
+                                     embeddings_model=None)
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        return args
+
+    def _with_temp_config(self):
+        saved = linear_cli.CONFIG_PATH
+        linear_cli.CONFIG_PATH = self.tmpdir / ".linear-cli" / "config.json"
+        self.addCleanup(lambda: setattr(linear_cli, "CONFIG_PATH", saved))
+
+    def _run_setup(self, cfg, **overrides):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            linear_cli.cmd_setup(self._setup_args(**overrides), cfg)
+        return buf.getvalue()
+
+    def test_setup_embeddings_writes_backend_and_default_model(self):
+        self._with_temp_config()
+        cfg = {"apiKey": "lin_secret", "teamId": "team-uuid"}
+        out = self._run_setup(cfg, embeddings="ollama")
+        self.assertIn("Embeddings ranker: ollama (qwen3-embedding:0.6b)", out)
+        written = json.loads(linear_cli.CONFIG_PATH.read_text())
+        self.assertEqual(written["embeddings"],
+                         {"backend": "ollama", "model": "qwen3-embedding:0.6b"})
+        # An already-configured box is not re-interrogated for team or agent.
+        self.assertEqual(written["teamId"], "team-uuid")
+
+    def test_setup_embeddings_model_override_and_gemini_stores_no_key(self):
+        self._with_temp_config()
+        self._set_env("GEMINI_API_KEY", "gem-secret")
+        cfg = {"apiKey": "lin_secret", "teamId": "team-uuid"}
+        self._run_setup(cfg, embeddings="gemini")
+        written = json.loads(linear_cli.CONFIG_PATH.read_text())
+        self.assertEqual(written["embeddings"],
+                         {"backend": "gemini", "model": "gemini-embedding-001"})
+        self.assertNotIn("gem-secret", linear_cli.CONFIG_PATH.read_text())
+        self._run_setup(cfg, embeddings="ollama", embeddings_model="embeddinggemma")
+        self.assertEqual(json.loads(linear_cli.CONFIG_PATH.read_text())["embeddings"],
+                         {"backend": "ollama", "model": "embeddinggemma"})
+
+    def test_setup_embeddings_none_removes_the_key(self):
+        self._with_temp_config()
+        cfg = {"apiKey": "lin_secret", "teamId": "team-uuid",
+               "embeddings": {"backend": "ollama", "model": "qwen3-embedding:0.6b"}}
+        out = self._run_setup(cfg, embeddings="none")
+        self.assertIn("Embeddings ranker: off", out)
+        self.assertNotIn("embeddings", json.loads(linear_cli.CONFIG_PATH.read_text()))
+
+    def test_setup_embeddings_model_without_backend_exits(self):
+        self._with_temp_config()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            linear_cli.cmd_setup(self._setup_args(embeddings_model="embeddinggemma"),
+                                 {"teamId": "team-uuid"})
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("--embeddings-model needs --embeddings", err.getvalue())
+        self.assertFalse(linear_cli.CONFIG_PATH.exists())
+
+
+class EmbeddingRealTests(unittest.TestCase):
+    """Runs the ranker against a real Ollama. Skipped unless one answers
+    /api/tags with the configured model pulled."""
+
+    def _live_model(self):
+        host = (os.environ.get("OLLAMA_HOST") or linear_cli.OLLAMA_DEFAULT_HOST).rstrip("/")
+        if "://" not in host:
+            host = f"http://{host}"
+        model = os.environ.get("LINEAR_EMBED_MODEL") or \
+            linear_cli.EMBEDDINGS_DEFAULT_MODEL["ollama"]
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"{host}/api/tags", timeout=2) as resp:
+                tags = json.loads(resp.read())
+        except (OSError, ValueError) as e:
+            self.skipTest(f"no Ollama at {host} ({e})")
+        names = [m.get("name", "") for m in tags.get("models") or []]
+        if not any(n == model or n.startswith(f"{model.split(':')[0]}:") for n in names):
+            self.skipTest(f"{model} not pulled on {host} (have: {names})")
+        return model
+
+    def test_live_ollama_ranks_the_matching_ticket_first(self):
+        model = self._live_model()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = linear_cli.EMBEDDINGS_DB_PATH
+        linear_cli.EMBEDDINGS_DB_PATH = Path(tmp.name) / "embeddings.sqlite"
+        self.addCleanup(lambda: setattr(linear_cli, "EMBEDDINGS_DB_PATH", saved))
+        cfg = {"embeddings": {"backend": "ollama", "model": model}}
+        issues = [
+            _emb_issue("X-1", "Mid-run OAuth token refresh for long agent runs"),
+            _emb_issue("X-2", "Ship the marketing site favicon"),
+        ]
+        ranked = linear_cli.embedding_rank("credentials expire while a run is in flight",
+                                           issues, cfg)
+        self.assertIsNotNone(ranked, "live Ollama should not skip")
+        self.assertEqual(ranked[0][0], "X-1", ranked)
+        # Second call reuses the cached issue vectors; only the query is re-embedded,
+        # and a real model is not bit-deterministic (qwen3-embedding drifts in the
+        # 5th decimal), so compare order and near-equal scores, not exact floats.
+        again = linear_cli.embedding_rank("credentials expire while a run is in flight",
+                                          issues, cfg)
+        self.assertEqual([r[0] for r in ranked], [r[0] for r in again])
+        for (_, a), (_, b) in zip(ranked, again):
+            self.assertAlmostEqual(a, b, places=2)
 
 
 if __name__ == "__main__":
