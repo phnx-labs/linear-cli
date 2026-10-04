@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`projects overview --json` lists each project's people.** A new
+  `members` array of `{id, name, displayName, email, avatarUrl, role}` gives a
+  menu the faces for a project: its lead, then its explicit members, or, when a
+  project names neither, the humans assigned to its issues (`role` says which).
+  Lead and members are nested in the project query (paged 50 at a time to stay
+  under Linear's complexity limit), so the overview is still four requests.
+  Additive: no existing field changed.
+
 ## [0.24.2] - 2026-09-15
 
 ### Changed

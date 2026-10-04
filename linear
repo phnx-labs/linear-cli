@@ -4375,6 +4375,30 @@ def _project_show(args, api_key, team_id):
 # colour, not an int it has to map.
 PROJECT_PRIORITY_WORD = {0: "none", 1: "urgent", 2: "high", 3: "medium", 4: "low"}
 
+_PERSON_FIELDS = "id name displayName email avatarUrl app"
+
+# The team's project list plus each project's lead and members, nested so the
+# people cost no extra round trips. Linear caps a query at 10,000 complexity
+# points; 100 projects x 50 members measured 14,401, so this walk pages 50
+# projects at a time.
+_OVERVIEW_PROJECT_PAGE = 50
+_OVERVIEW_MEMBER_CAP = 50
+_OVERVIEW_PROJECTS_QUERY = f"""query($teamId: String!, $cursor: String) {{
+    team(id: $teamId) {{
+        projects(first: {_OVERVIEW_PROJECT_PAGE}, after: $cursor) {{
+            pageInfo {{ hasNextPage endCursor }}
+            nodes {{
+                id name state priority targetDate updatedAt
+                lead {{ {_PERSON_FIELDS} }}
+                members(first: {_OVERVIEW_MEMBER_CAP}) {{
+                    pageInfo {{ hasNextPage }}
+                    nodes {{ {_PERSON_FIELDS} }}
+                }}
+            }}
+        }}
+    }}
+}}"""
+
 _OVERVIEW_ISSUE_PAGE = 250
 _OVERVIEW_ISSUE_QUERY = f"""query($ids: [ID!], $cursor: String) {{
     issues(first: {_OVERVIEW_ISSUE_PAGE}, after: $cursor,
@@ -4383,7 +4407,7 @@ _OVERVIEW_ISSUE_QUERY = f"""query($ids: [ID!], $cursor: String) {{
         nodes {{
             identifier title url priority updatedAt
             state {{ name type }}
-            assignee {{ id name avatarUrl app }}
+            assignee {{ {_PERSON_FIELDS} }}
             delegate {{ id name avatarUrl app }}
             cycle {{ number }}
             projectMilestone {{ id }}
@@ -4416,6 +4440,45 @@ def _identity(node: dict | None) -> dict | None:
         "avatarUrl": node.get("avatarUrl"),
         "app": bool(node.get("app")),
     }
+
+
+def overview_members(project: dict, issues: list[dict]) -> list[dict]:
+    """The people on a project, for a menu's avatar stack. Linear grants access
+    by team, not by project, so "who can see it" is the whole team and says
+    nothing. What a project does record is its lead and its explicit members;
+    those come first (lead, then members by name). Most projects set neither,
+    so when both are empty the list falls back to the humans assigned to the
+    project's issues, any state, most issues first. `role` says which rule
+    produced each entry. App users (agents) are left out: they show up as
+    `delegate` on issue rows instead."""
+    def person(node: dict, role: str) -> dict:
+        return {"id": node.get("id"), "name": node.get("name"),
+                "displayName": node.get("displayName"), "email": node.get("email"),
+                "avatarUrl": node.get("avatarUrl"), "role": role}
+
+    out: list[dict] = []
+    seen: set = set()
+    lead = project.get("lead")
+    if lead and not lead.get("app"):
+        out.append(person(lead, "lead"))
+        seen.add(lead.get("id"))
+    members = [m for m in ((project.get("members") or {}).get("nodes") or [])
+               if not m.get("app") and m.get("id") not in seen]
+    for m in sorted(members, key=lambda m: (m.get("name") or "").lower()):
+        out.append(person(m, "member"))
+        seen.add(m.get("id"))
+    if out:
+        return out
+
+    counts: dict[str, int] = {}
+    nodes: dict[str, dict] = {}
+    for n in issues:
+        a = n.get("assignee")
+        if a and a.get("id") and not a.get("app"):
+            counts[a["id"]] = counts.get(a["id"], 0) + 1
+            nodes[a["id"]] = a
+    ranked = sorted(nodes, key=lambda i: (-counts[i], (nodes[i].get("name") or "").lower()))
+    return [person(nodes[i], "assignee") for i in ranked]
 
 
 def overview_issue_row(n: dict) -> dict:
@@ -4481,7 +4544,9 @@ def build_overview(cycle: dict | None, projects: list[dict], milestones: list[di
         ms_by_project.setdefault((m.get("project") or {}).get("id"), []).append(m)
     issues_by_ms: dict[str, list] = {}
     orphans_by_project: dict[str, list] = {}
+    issues_by_project: dict[str, list] = {}
     for n in issues:
+        issues_by_project.setdefault((n.get("project") or {}).get("id"), []).append(n)
         mid = (n.get("projectMilestone") or {}).get("id")
         if mid:
             issues_by_ms.setdefault(mid, []).append(n)
@@ -4500,6 +4565,7 @@ def build_overview(cycle: dict | None, projects: list[dict], milestones: list[di
             "state": p.get("state"),
             "targetDate": p.get("targetDate"),
             "updatedAt": p.get("updatedAt"),
+            "members": overview_members(p, issues_by_project.get(p["id"], [])),
             "milestones": [
                 {"id": m["id"], "name": m.get("name"), "targetDate": m.get("targetDate"),
                  **overview_bucket(issues_by_ms.get(m["id"], []))}
@@ -4546,15 +4612,22 @@ def _pick_overview_projects(projects: list[dict], wanted: list[str]) -> list[dic
 def _project_overview(args, api_key, team_id):
     """`projects overview`: the team's current cycle plus every project's
     milestones with issue counts and open rows, in one document. Four queries
-    (projects, active cycle, milestones, issues), each fully paginated; an API
-    error on any of them exits non-zero rather than emitting a half document."""
-    projects = paginate_connection(api_key, _TEAM_PROJECTS_QUERY, ["team", "projects"],
-                                   {"teamId": team_id})
+    (projects with their people, active cycle, milestones, issues), each fully
+    paginated; an API error on any of them exits non-zero rather than emitting
+    a half document."""
+    projects = paginate_connection(api_key, _OVERVIEW_PROJECTS_QUERY, ["team", "projects"],
+                                   {"teamId": team_id}, page_size=_OVERVIEW_PROJECT_PAGE)
     if projects is None:
         sys.exit(1)
     wanted = getattr(args, "project", None) or []
     if wanted:
         projects = _pick_overview_projects(projects, wanted)
+    partial_reasons: list[str] = [
+        f"{p.get('name')} has more than {_OVERVIEW_MEMBER_CAP} members; members lists the first "
+        f"{_OVERVIEW_MEMBER_CAP}"
+        for p in projects
+        if ((p.get("members") or {}).get("pageInfo") or {}).get("hasNextPage")
+    ]
 
     data = gql(api_key, _CURRENT_CYCLE_QUERY, {"id": team_id})
     if check_errors(data):
@@ -4564,7 +4637,6 @@ def _project_overview(args, api_key, team_id):
     ids = [p["id"] for p in projects]
     milestones: list[dict] = []
     issues: list[dict] = []
-    partial_reasons: list[str] = []
     if ids:
         capped: dict = {}
         milestones = paginate_connection(api_key, _OVERVIEW_MILESTONE_QUERY,

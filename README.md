@@ -227,6 +227,10 @@ one document, nothing to join afterwards.
   "projects": [
     {
       "id": "8eb8…", "name": "AGI", "priority": "high", "state": "started", "targetDate": null,
+      "members": [
+        {"id": "5594…", "name": "Muqsit", "displayName": "muqsitnawaz",
+         "email": "muqsit@example.com", "avatarUrl": "https://public.linear.app/…", "role": "lead"}
+      ],
       "milestones": [
         {"id": "ba96…", "name": "Fleet reliability", "targetDate": "2026-08-12",
          "issues": {"total": 14, "open": 3, "done": 11, "canceled": 0},
@@ -255,6 +259,14 @@ one document, nothing to join afterwards.
 - Ordering: projects by priority (`urgent` → `low`, then `none`) then name;
   milestones by Linear's sortOrder; open rows by cycle number ascending (no
   cycle last), then priority (urgent first), then identifier.
+- `members` is the project's people for an avatar stack: the lead
+  (`role: "lead"`), then explicit project members by name (`"member"`). Linear
+  grants access per team, so this is who the project names, not who can open
+  it. When a project sets neither, it falls back to the humans assigned to its
+  issues in any state, most issues first (`"assignee"`). Agents are left out
+  (they appear as an issue row's `delegate`). `email` and `avatarUrl` can be
+  `null`. The people ride the project query, so the document still costs four
+  requests; past 50 members on one project the list is cut and `partial` says so.
 - `priority` on a project is a word (`urgent|high|medium|low|none`); on an
   issue it is Linear's integer (1 = urgent … 4 = low, 0 = none).
 - Everything is paginated to the end. If a safety rail stops a walk (25k
