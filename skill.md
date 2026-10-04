@@ -138,7 +138,7 @@ linear projects create --name "Rush App" --lead you@co.com --target 2026-09-30
 linear projects update "Rush App" --description "..." # set description / lead / dates / state
 linear projects update "Rush App" --priority low      # urgent|high|medium|low|none
 linear projects archive "Old Project"                 # remove (moves to Linear trash)
-linear projects overview --json                       # one call: cycle + projects → milestones → open issues
+linear projects overview --json                       # one call: cycle + projects (with members) → milestones → open issues
 linear projects overview --project "Rush App" --json  # restrict (repeatable, strict names)
 
 linear initiatives                                    # workspace initiatives

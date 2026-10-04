@@ -2579,6 +2579,7 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
         "updatedAt": updated_at,
         "state": {"name": state_name or names[state_type], "type": state_type},
         "assignee": ({"id": f"u-{assignee.lower()}", "name": assignee,
+                      "displayName": assignee.lower(), "email": f"{assignee.lower()}@x.dev",
                       "avatarUrl": None, "app": False} if assignee else None),
         "delegate": ({"id": f"a-{delegate.lower()}", "name": delegate,
                       "avatarUrl": f"https://avatars/{delegate.lower()}", "app": True}
@@ -2623,7 +2624,9 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(set(doc["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
         agi = doc["projects"][1]
         self.assertEqual(set(agi), {"id", "name", "priority", "state", "targetDate",
-                                    "updatedAt", "milestones", "noMilestone"})
+                                    "updatedAt", "members", "milestones", "noMilestone"})
+        self.assertEqual(set(agi["members"][0]),
+                         {"id", "name", "displayName", "email", "avatarUrl", "role"})
         ms = agi["milestones"][0]
         self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
         self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
@@ -2701,6 +2704,43 @@ class OverviewBuildTest(unittest.TestCase):
             "avatarUrl": "https://avatars/claude", "app": True,
         })
 
+    def test_members_are_lead_then_members_and_skip_agents(self):
+        lead = {"id": "u-lee", "name": "Lee", "displayName": "lee", "email": "lee@x.dev",
+                "avatarUrl": "https://avatars/lee", "app": False}
+        project = dict(_OV_PROJECTS[0], lead=lead, members={
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [
+                {"id": "u-zoe", "name": "zoe", "displayName": "z", "email": None,
+                 "avatarUrl": None, "app": False},
+                dict(lead),  # the lead is usually a member too: listed once
+                {"id": "a-bot", "name": "Bot", "app": True},
+                {"id": "u-amy", "name": "Amy", "displayName": "amy", "email": "amy@x.dev",
+                 "avatarUrl": "https://avatars/amy", "app": False},
+            ]})
+        # Explicit people win: issue assignees are not mixed in.
+        members = linear_cli.overview_members(project, [_ov_issue("PHNX-1", assignee="Muqsit")])
+        self.assertEqual([(m["name"], m["role"]) for m in members],
+                         [("Lee", "lead"), ("Amy", "member"), ("zoe", "member")])
+        self.assertEqual(members[0], {"id": "u-lee", "name": "Lee", "displayName": "lee",
+                                      "email": "lee@x.dev", "avatarUrl": "https://avatars/lee",
+                                      "role": "lead"})
+
+    def test_members_fall_back_to_assignees_across_states_by_issue_count(self):
+        issues = [
+            _ov_issue("PHNX-1", assignee="Bisma"),
+            _ov_issue("PHNX-2", assignee="Muqsit", state_type="completed"),
+            _ov_issue("PHNX-3", assignee="Muqsit", milestone="m-early"),
+            _ov_issue("PHNX-4", assignee=None, delegate="Claude"),
+            _ov_issue("PHNX-5", project="p-zed", assignee="Zara"),
+        ]
+        doc = self._doc(issues)
+        agi, zed, alpha = doc["projects"][1], doc["projects"][0], doc["projects"][3]
+        self.assertEqual([(m["name"], m["role"]) for m in agi["members"]],
+                         [("Muqsit", "assignee"), ("Bisma", "assignee")])
+        self.assertEqual(agi["members"][0]["email"], "muqsit@x.dev")
+        self.assertEqual([m["name"] for m in zed["members"]], ["Zara"])
+        self.assertEqual(alpha["members"], [])
+
     def test_projects_carry_updated_at(self):
         doc = self._doc()
         self.assertEqual(doc["projects"][1]["updatedAt"], "2026-09-11T00:00:00.000Z")
@@ -2729,7 +2769,8 @@ class OverviewFetchTest(unittest.TestCase):
     project restriction, the fail-loud paths, pagination, and the safety rail
     are the shipping code; only the network edge is substituted."""
 
-    def _run(self, issue_pages, project=None, json_out=True, cycle_reply=None):
+    def _run(self, issue_pages, project=None, json_out=True, cycle_reply=None,
+             projects=_OV_PROJECTS):
         sent = {"queries": [], "ids": None}
         pages = iter(issue_pages)
 
@@ -2737,7 +2778,7 @@ class OverviewFetchTest(unittest.TestCase):
             sent["queries"].append(query)
             if "team(id: $teamId)" in query:
                 return {"data": {"team": {"projects": {
-                    "pageInfo": {"hasNextPage": False}, "nodes": list(_OV_PROJECTS)}}}}
+                    "pageInfo": {"hasNextPage": False}, "nodes": list(projects)}}}}
             if "activeCycle" in query:
                 return cycle_reply or {"data": {"team": {"activeCycle": dict(_OV_CYCLE)}}}
             if "projectMilestones(" in query:
@@ -2811,6 +2852,20 @@ class OverviewFetchTest(unittest.TestCase):
         self.assertIn("issues stopped at 250", doc["partialReason"])
         self.assertIn("safety rail", err)
 
+    def test_members_ride_the_project_query_and_a_capped_list_is_partial(self):
+        crowded = dict(_OV_PROJECTS[0], members={
+            "pageInfo": {"hasNextPage": True},
+            "nodes": [{"id": "u-amy", "name": "Amy", "app": False}]})
+        sent, out, _ = self._run([self._page([_ov_issue("PHNX-1")])], project=["AGI"],
+                                 projects=[crowded] + _OV_PROJECTS[1:])
+        # People come from the project page itself: still four queries, no N+1.
+        self.assertEqual(len(sent["queries"]), 4)
+        self.assertIn("members(first:", sent["queries"][0])
+        doc = json.loads(out)
+        self.assertEqual([m["name"] for m in doc["projects"][0]["members"]], ["Amy"])
+        self.assertIs(doc["partial"], True)
+        self.assertIn("AGI has more than 50 members", doc["partialReason"])
+
     def test_human_view_is_a_compact_tree(self):
         _, out, _ = self._run([self._page([
             _ov_issue("PHNX-1", milestone="m-early"),
@@ -2874,6 +2929,9 @@ class OverviewLiveTest(unittest.TestCase):
                     self.assertTrue(r["cycle"] is None or isinstance(r["cycle"], int))
                     self.assertTrue(r["assignee"] is None or isinstance(r["assignee"], str))
                     self.assertTrue(r["url"].startswith("https://"))
+            for m in p["members"]:
+                self.assertEqual(set(m), {"id", "name", "displayName", "email", "avatarUrl", "role"})
+                self.assertIn(m["role"], {"lead", "member", "assignee"})
 
     def test_project_restriction_matches_the_unrestricted_entry(self):
         # Restricting by UUID and by exact name both return the same single
