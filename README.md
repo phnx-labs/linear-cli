@@ -226,10 +226,10 @@ one document, nothing to join afterwards.
             "startsAt": "2026-09-08T07:00:00.000Z", "endsAt": "2026-09-15T07:00:00.000Z"},
   "projects": [
     {
-      "id": "8eb8…", "name": "AGI", "priority": "high", "state": "started", "targetDate": null,
+      "id": "…", "name": "Mobile app", "priority": "high", "state": "started", "targetDate": null,
       "members": [
         {"id": "…", "name": "Ada", "displayName": "ada",
-         "email": "muqsit@example.com", "avatarUrl": "https://public.linear.app/…", "role": "lead"}
+         "email": "ada@example.com", "avatarUrl": "https://public.linear.app/…", "role": "lead"}
       ],
       "milestones": [
         {"id": "ba96…", "name": "Fleet reliability", "targetDate": "2026-08-12",
