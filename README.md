@@ -228,7 +228,7 @@ one document, nothing to join afterwards.
     {
       "id": "8eb8…", "name": "AGI", "priority": "high", "state": "started", "targetDate": null,
       "members": [
-        {"id": "5594…", "name": "Muqsit", "displayName": "muqsitnawaz",
+        {"id": "…", "name": "Ada", "displayName": "ada",
          "email": "muqsit@example.com", "avatarUrl": "https://public.linear.app/…", "role": "lead"}
       ],
       "milestones": [
