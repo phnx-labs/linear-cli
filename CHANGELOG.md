@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`create` and `update` take `--remind-at`.** It sets Linear's issue reminder
+  ("Remind me"), which notifies you at an exact time: `YYYY-MM-DDTHH:MM` in
+  local time, or with a zone. A due date is date-only in Linear, so this is
+  where a to-do's time lives. A date without a time, or text that is not a
+  time, is refused before anything is created.
+
 ## [0.25.0] - 2026-10-04
 
 ### Added
