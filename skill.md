@@ -82,6 +82,7 @@ Everything you can set on `create` can be changed on `update` with the same flag
 
 ```
 linear update ANT-42 --priority urgent --assign bisma        # human by name or email
+linear update ANT-42 --remind-at 2026-10-08T09:10          # Linear reminds you then (local time; a zone is optional)
 linear update ANT-42 --title "Renamed" --description "Rewritten body"
 linear update ANT-42 --project "Phoenix" --milestone "v1.0"
 linear update ANT-42 --parent ANT-10             # nest under a parent (prints a tip)

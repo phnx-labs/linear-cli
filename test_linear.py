@@ -3940,5 +3940,24 @@ class BoardCacheTests(_IsolatedCache, unittest.TestCase):
         self.assertEqual(conn.execute("SELECT count(*) FROM issues").fetchone()[0], 0)
 
 
+
+class RemindAtTest(unittest.TestCase):
+    """--remind-at carries the time a TimelessDate dueDate cannot."""
+
+    def test_zoned_time_is_sent_as_utc(self):
+        self.assertEqual(linear_cli.parse_remind_at("2026-10-08T09:10-07:00"), "2026-10-08T16:10:00Z")
+        self.assertEqual(linear_cli.parse_remind_at("2026-10-08T16:10Z"), "2026-10-08T16:10:00Z")
+
+    def test_local_time_and_space_separator(self):
+        expected = datetime(2026, 10, 8, 9, 10).astimezone().astimezone(timezone.utc)
+        for raw in ("2026-10-08T09:10", "2026-10-08 09:10"):
+            self.assertEqual(linear_cli.parse_remind_at(raw), expected.isoformat().replace("+00:00", "Z"))
+
+    def test_date_only_or_garbage_is_refused(self):
+        for raw in ("2026-10-08", "tomorrow", "", "09:10"):
+            with self.assertRaises(SystemExit):
+                linear_cli.parse_remind_at(raw)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1633,6 +1633,36 @@ def parse_due_date(value: str) -> str | None:
         )
     return v
 
+def parse_remind_at(value: str) -> str:
+    """An exact time for Linear's issue reminder ("Remind me"), the time a
+    TimelessDate dueDate cannot hold. Accepts YYYY-MM-DDTHH:MM (or a space for
+    the T), with seconds and a zone optional; no zone means local time.
+    Returns UTC ISO 8601."""
+    raw = str(value).strip()
+    v = raw.replace(" ", "T", 1)
+    try:
+        at = datetime.fromisoformat(v.replace("Z", "+00:00")) if "T" in v else None
+    except ValueError:
+        at = None
+    if at is None:
+        raise SystemExit(
+            f"Invalid --remind-at '{raw}'. Use YYYY-MM-DDTHH:MM in local time "
+            "(e.g. 2026-10-08T09:10) or with a zone (2026-10-08T09:10-07:00)."
+        )
+    if at.tzinfo is None:
+        at = at.astimezone()
+    return at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def set_issue_reminder(api_key: str, issue_id: str, at: str) -> bool:
+    data = gql(api_key, """
+        mutation($id: String!, $at: DateTime!) {
+            issueReminder(id: $id, reminderAt: $at) { success }
+        }
+    """, {"id": issue_id, "at": at})
+    return not check_errors(data) and bool(((data.get("data") or {}).get("issueReminder") or {}).get("success"))
+
+
 # `id` and `updatedAt` are what the embeddings cache keys on — the vector for an
 # issue is reused until its updatedAt moves.
 ISSUE_FIELDS = """
@@ -3685,6 +3715,15 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
         else:
             print("Due date update failed.")
 
+    # Reminder: --remind-at <time>, a notification to you at that moment
+    if getattr(args, "remind_at", None):
+        at = parse_remind_at(args.remind_at)
+        if set_issue_reminder(api_key, issue["id"], at):
+            print(f"{issue.get('identifier', args.issue)} -> reminder: {at}")
+            did_something = True
+        else:
+            print("Reminder update failed.")
+
     # Comment (a proof already folds its comment in above, clearing `comment`)
     if comment:
         data = gql(api_key, """
@@ -3708,7 +3747,7 @@ def _apply_update(args, cfg, api_key, team_id, issue, single=True,
             return False
 
     if not did_something and single:
-        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --delegate, --title, --description, --due-date, or --comment.")
+        print("Nothing to do. Use --done, --pickup, --todo, --status, --cycle, --label, --priority, --assign, --delegate, --title, --description, --due-date, --remind-at, or --comment.")
     return did_something
 
 
@@ -4072,6 +4111,7 @@ def cmd_create(args, cfg, api_key, team_id):
         "image": args.image or [],
         "force": args.force,
     }
+    remind_at = parse_remind_at(args.remind_at) if getattr(args, "remind_at", None) else None
     input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
     if err:
         print(err, file=sys.stderr)
@@ -4087,6 +4127,12 @@ def cmd_create(args, cfg, api_key, team_id):
     dg = (issue.get("delegate") or {}).get("name")
     meta = f"{cyc} | {asg}" + (f" | delegate: {dg}" if dg else "")
     print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
+    if remind_at:
+        if set_issue_reminder(api_key, issue["identifier"], remind_at):
+            print(f"{issue['identifier']} -> reminder: {remind_at}")
+        else:
+            print(f"Created, but the reminder at {remind_at} could not be set.", file=sys.stderr)
+            sys.exit(1)
 
 
 def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
@@ -6063,6 +6109,8 @@ def main():
                           help="Read description from a file path, or '-' for stdin")
     p_update.add_argument("--due-date", dest="due_date",
                           help="Set due date (YYYY-MM-DD), or 'none' to clear")
+    p_update.add_argument("--remind-at", dest="remind_at",
+                          help="Remind you at an exact time: YYYY-MM-DDTHH:MM (local) or with a zone")
     p_update.add_argument("--cycle", choices=["active", "next", "none"],
                           help="Move issue: active cycle, next cycle, or remove from cycle")
     p_update.add_argument("--blocks", action="append",
@@ -6090,6 +6138,8 @@ def main():
                           help="Cycle assignment (default: active)")
     p_create.add_argument("--due-date", dest="due_date",
                           help="Due date (YYYY-MM-DD)")
+    p_create.add_argument("--remind-at", dest="remind_at",
+                          help="Remind you at an exact time: YYYY-MM-DDTHH:MM (local) or with a zone")
     p_create.add_argument("--assign", default=None,
                           help="Assign to a human by email or name (default: API key owner). "
                                "'none' leaves it unowned and requires --force.")
