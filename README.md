@@ -111,6 +111,7 @@ linear create "Sub-task" --parent ANT-42         # nested; prints a tip nudging 
 linear create "Roadmap item" --project "Phoenix" # project outside the cwd's binding
 linear create "Ship it" --delegate droid
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
+linear create "Fix the thing" --json   # print the created issue as JSON (an array with --from-file)
 linear create "Unowned" --assign none --force    # refused without --force: every issue needs an owner
 linear create "No deliverable yet" --skip-milestone  # escape hatch: warns, lands in "No milestone"
 

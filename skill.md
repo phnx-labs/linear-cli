@@ -181,6 +181,7 @@ linear create --description-file plan.md --milestone "v1.0"
 linear create "Sub-task" --parent ANT-42
 linear create "Crash on save" --bug                   # Bug label, backlog, low
 linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
+linear create "Title" --json                          # stdout: one JSON object (id, identifier, url, status, ...); array with --from-file
 ```
 
 ### Every issue needs an owner

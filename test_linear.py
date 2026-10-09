@@ -3273,7 +3273,7 @@ class CreateAdvisoryTests(_IsolatedCache, unittest.TestCase):
             description_file=None, priority=None, parent=None, project=None,
             milestone="v1", skip_milestone=True, status=None, cycle="active",
             assign=None, delegate=None, due_date=None, label=None, image=None,
-            force=False, backlog=False, bug=False, blocker=False,
+            force=False, backlog=False, bug=False, blocker=False, json=False,
         )
         for k, v in kw.items():
             setattr(ns, k, v)
@@ -3422,6 +3422,125 @@ def _emb_issue(ident, title, description="", issue_id=None, updated_at="2026-09-
     node["id"] = issue_id or f"uuid-{ident}"
     node["updatedAt"] = updated_at
     return node
+
+
+class CreateJsonOutputTest(unittest.TestCase):
+    """`create --json` prints the created issue as JSON on stdout and nothing
+    else; `--from-file --json` prints one array covering every input line."""
+
+    def setUp(self):
+        self._orig = {n: getattr(linear_cli, n) for n in (
+            "_build_create_input", "gql", "rank_similar", "set_issue_reminder")}
+        self.reminders = []
+        self.reminder_ok = True
+
+        def fake_build(_k, _t, _cfg, fields, ctx=None, **_kw):
+            ctx.update(applied="horizon now", remindAt=fields.get("sla_remind"))
+            if fields.get("title") == "bad":
+                return None, "unassigned issue refused"
+            return {"teamId": "team-id", "title": fields["title"]}, None
+
+        def fake_gql(_k, query, variables=None):
+            if "issueCreate" not in query:
+                raise AssertionError(f"unexpected query: {query[:80]}")
+            title = variables["input"]["title"]
+            if title == "rejected":
+                return {"errors": [{"message": "Linear said no"}]}
+            n = len(title)
+            return {"data": {"issueCreate": {"success": True, "issue": {
+                "id": f"uuid-{n}", "identifier": f"PHNX-{n}", "title": title,
+                "url": f"https://linear.app/x/issue/PHNX-{n}",
+                "priority": 2, "state": {"name": "Todo"}, "cycle": None,
+                "assignee": {"name": "Muqsit"}, "delegate": None}}}}
+
+        def fake_reminder(_k, issue_id, at):
+            self.reminders.append((issue_id, at))
+            return self.reminder_ok
+
+        linear_cli._build_create_input = fake_build
+        linear_cli.gql = fake_gql
+        linear_cli.rank_similar = lambda *_a, **_k: {"rows": [], "rankers": []}
+        linear_cli.set_issue_reminder = fake_reminder
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(linear_cli, n, v)
+
+    def _args(self, **kw):
+        ns = types.SimpleNamespace(
+            from_file=None, title="Fix the thing", description=None,
+            description_file=None, priority=None, parent=None, project=None,
+            milestone="v1", skip_milestone=True, status=None, cycle="active",
+            assign=None, delegate=None, due_date=None, label=None, image=None,
+            force=False, backlog=False, bug=False, blocker=False,
+            remind_at=None, json=True,
+        )
+        for k, v in kw.items():
+            setattr(ns, k, v)
+        return ns
+
+    def _run(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            linear_cli.cmd_create(args, {}, "api-key", "team-id")
+        return out.getvalue(), err.getvalue()
+
+    def test_single_prints_exactly_one_json_object(self):
+        out, err = self._run(self._args())
+        self.assertEqual(json.loads(out), {
+            "id": "uuid-13", "identifier": "PHNX-13", "title": "Fix the thing",
+            "url": "https://linear.app/x/issue/PHNX-13",
+            "status": "Todo", "priority": 2})
+        self.assertEqual(out.count("\n"), 1)
+        self.assertIn("horizon now", err)
+
+    def test_single_with_remind_at_reports_the_reminder(self):
+        out, _ = self._run(self._args(remind_at="2030-01-02T09:30Z"))
+        data = json.loads(out)
+        self.assertEqual(data["reminder"], self.reminders[0][1])
+        self.assertEqual(self.reminders[0][0], "uuid-13")
+
+    def test_failed_reminder_is_null_and_still_exits_nonzero(self):
+        self.reminder_ok = False
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                linear_cli.cmd_create(self._args(remind_at="2030-01-02T09:30Z"),
+                                      {}, "api-key", "team-id")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIsNone(json.loads(out.getvalue())["reminder"])
+        self.assertIn("reminder could not be set", err.getvalue())
+
+    def test_without_json_output_is_unchanged(self):
+        out, _ = self._run(self._args(json=False))
+        self.assertTrue(out.startswith("Created PHNX-13: Fix the thing  ["))
+
+    def test_from_file_prints_one_array_with_errors_in_input_order(self):
+        path = Path(tempfile.mkdtemp()) / "plan.jsonl"
+        path.write_text(
+            '{"title": "first"}\n'
+            '# comment\n'
+            '{"title": "bad"}\n'
+            'not json\n'
+            '{"title": "rejected"}\n'
+            '{"title": "last one", "sla_remind": "2030-01-02T09:30:00Z"}\n')
+        out, err = self._run(self._args(from_file=str(path)))
+        rows = json.loads(out)
+        self.assertEqual([r.get("identifier") or r["title"] for r in rows],
+                         ["PHNX-5", "bad", "<unparseable>", "rejected", "PHNX-8"])
+        self.assertEqual(rows[1], {"error": "unassigned issue refused", "title": "bad"})
+        self.assertEqual(rows[3], {"error": "Linear said no", "title": "rejected"})
+        self.assertNotIn("reminder", rows[0])
+        self.assertEqual(rows[4]["reminder"], "2030-01-02T09:30:00Z")
+        self.assertNotIn("\t", out)
+        self.assertIn("2 created, 3 failed.", err)
+
+    def test_from_file_without_json_still_prints_tsv(self):
+        path = Path(tempfile.mkdtemp()) / "plan.jsonl"
+        path.write_text('{"title": "first"}\n{"title": "bad"}\n')
+        out, _ = self._run(self._args(from_file=str(path), json=False))
+        self.assertEqual(out.splitlines(), [
+            "OK\tPHNX-5\tfirst", "ERROR\t-\tbad\tunassigned issue refused"])
 
 
 class EmbeddingTests(unittest.TestCase):
