@@ -3511,6 +3511,23 @@ class CreateJsonOutputTest(unittest.TestCase):
         self.assertIsNone(json.loads(out.getvalue())["reminder"])
         self.assertIn("reminder could not be set", err.getvalue())
 
+    def test_rejected_create_exits_nonzero_with_empty_stdout(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                linear_cli.cmd_create(self._args(title="rejected"), {}, "api-key", "team-id")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("Linear said no", err.getvalue())
+
+    def test_from_file_non_object_line_is_an_error_row(self):
+        path = Path(tempfile.mkdtemp()) / "plan.jsonl"
+        path.write_text('[1]\n{"title": "first"}\n')
+        out, _ = self._run(self._args(from_file=str(path)))
+        rows = json.loads(out)
+        self.assertEqual(rows[0], {"error": "line is not a JSON object", "title": "<unparseable>"})
+        self.assertEqual(rows[1]["identifier"], "PHNX-5")
+
     def test_without_json_output_is_unchanged(self):
         out, _ = self._run(self._args(json=False))
         self.assertTrue(out.startswith("Created PHNX-13: Fix the thing  ["))
