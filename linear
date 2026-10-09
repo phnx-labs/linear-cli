@@ -3945,9 +3945,14 @@ def load_policy(cfg: dict) -> dict:
     """`policy` from config over DEFAULT_POLICY, merged per priority and per key
     so a config that only changes `sla.low.due` keeps every other default."""
     user = cfg.get("policy") or {}
+    if not isinstance(user, dict) or not isinstance(user.get("sla") or {}, dict):
+        raise ValueError("policy and policy.sla must be JSON objects")
     sla = {}
     for key, rule in DEFAULT_POLICY["sla"].items():
-        sla[key] = {**rule, **((user.get("sla") or {}).get(key) or {})}
+        over = user.get("sla", {}).get(key) or {}
+        if not isinstance(over, dict):
+            raise ValueError(f'policy.sla.{key} must be an object like {{"due": "today", "remind": "15m"}}')
+        sla[key] = {**rule, **over}
     return {
         "sla": sla,
         "backlogMilestone": user.get("backlogMilestone") or DEFAULT_POLICY["backlogMilestone"],
@@ -3998,7 +4003,8 @@ def resolve_tz(name: str | None) -> tzinfo:
             from zoneinfo import ZoneInfo
             return ZoneInfo(name)
         except Exception:
-            pass
+            print(f"Note: timezone {name!r} is unavailable here (no tzdata?); "
+                  f"dates use this machine's zone.", file=sys.stderr)
     return datetime.now().astimezone().tzinfo
 
 
@@ -4176,7 +4182,10 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     else:
         horizon = "milestone" if fields.get("milestone") else "now"
     applied = [f"horizon {horizon}"]
-    policy = load_policy(cfg)
+    try:
+        policy = load_policy(cfg)
+    except ValueError as e:
+        return None, f"{e} (in {CONFIG_PATH})"
     if bug and fields.get("priority") is None:
         applied.append(f"bug → priority {PRIORITY_MAP[priority].lower()}")
 
@@ -4417,6 +4426,7 @@ def cmd_create(args, cfg, api_key, team_id):
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
+    explicit_remind = bool(remind_at)
     remind_at = remind_at or ctx["remindAt"]
     print(ctx["applied"], file=sys.stderr)
     advise_similar(api_key, team_id, cfg, input_obj.get("title") or "",
@@ -4436,7 +4446,10 @@ def cmd_create(args, cfg, api_key, team_id):
         else:
             print(f"Created {issue['identifier']}, but its reminder could not be set. "
                   f"Retry with: linear update {issue['identifier']} --remind-at {remind_at}", file=sys.stderr)
-            sys.exit(1)
+            # Only an asked-for reminder fails the command: the issue exists,
+            # and a non-zero exit invites a retry that files a duplicate.
+            if explicit_remind:
+                sys.exit(1)
 
 
 def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
@@ -6065,9 +6078,12 @@ def _goals_todo(args, cfg, api_key, team_id):
     _, day = pick_goals(state["nodes"], state["viewer"].get("id"),
                         (cycle or {}).get("id"), state["today"])
     if args.done:
-        issue = resolve_issue(api_key, team_id, args.done)
+        todos = {t["identifier"].upper(): t for t in (goal_object(day) or {}).get("todos") or []}
+        issue = todos.get(args.done.strip().upper())
         if not issue:
-            _die(f"{args.done} not found.")
+            _die(f"{args.done} is not a to-do of today's Daily goal"
+                 + (f" ({day['identifier']})." if day else " (none is set).")
+                 + " To close another issue: linear update <ID> --done --proof <…>")
         sid = resolve_state_id(get_states(api_key, team_id, cfg), "Done")
         if not sid:
             _die("No 'Done' workflow state on this team.")
@@ -6094,6 +6110,10 @@ def _goals_todo(args, cfg, api_key, team_id):
 
 def cmd_goals(args, cfg, api_key, team_id):
     """Company quarter, week and day goals; `set` and `todo` write yours."""
+    try:
+        load_policy(cfg)
+    except ValueError as e:
+        _die(f"{e} (in {CONFIG_PATH})")
     action = getattr(args, "goals_action", None)
     if action == "set":
         return _goals_set(args, cfg, api_key, team_id)

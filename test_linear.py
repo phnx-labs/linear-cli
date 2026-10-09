@@ -4396,3 +4396,35 @@ class GoalsJsonTest(unittest.TestCase):
         self.assertIn("My day    PHNX-11 title PHNX-11 (1/2)", text)
         self.assertIn("[x] PHNX-12", text)
         self.assertIn("  Bisma: PHNX-20", text)
+
+
+class GoalsWriteGuardTest(unittest.TestCase):
+    def test_bad_policy_shape_is_an_error_not_a_traceback(self):
+        for policy in ({"sla": {"low": "cycle_end"}}, "today", {"sla": "x"}):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                linear_cli.load_policy({"policy": policy})
+
+    def test_todo_done_only_closes_a_todo_of_todays_goal(self):
+        state = GoalsJsonTest().state()
+        state["tz"] = timezone.utc
+        writes = []
+        orig = (linear_cli.goals_state, linear_cli._issue_write, linear_cli._emit_goal,
+                linear_cli.get_states)
+        linear_cli.goals_state = lambda *_a: state
+        linear_cli._issue_write = lambda _k, iid, inp: writes.append((iid, inp)) or {"id": iid}
+        linear_cli._emit_goal = lambda *a, **k: None
+        linear_cli.get_states = lambda *a: {"Done": {"id": "done-id", "type": "completed"}}
+        args = types.SimpleNamespace(text=None, done=None, json=False)
+        try:
+            args.done = "PHNX-999"  # some unrelated ticket
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                linear_cli._goals_todo(args, {}, "k", "team")
+            self.assertIn("not a to-do of today's Daily goal (PHNX-11)", err.getvalue())
+            self.assertEqual(writes, [])
+            args.done = "phnx-13"
+            linear_cli._goals_todo(args, {}, "k", "team")
+            self.assertEqual(writes, [("id-PHNX-13", {"stateId": "done-id"})])
+        finally:
+            (linear_cli.goals_state, linear_cli._issue_write, linear_cli._emit_goal,
+             linear_cli.get_states) = orig
