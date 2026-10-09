@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Task lists and boards resolve cycle metadata without rereading the same cycle.
+- Project overview and goals overlap independent API reads, with at most two
+  and three concurrent requests respectively. Pagination and output stay the same.
+- GraphQL requests use a 20-second socket timeout and report stalled connections
+  as API errors instead of hanging indefinitely. (PHNX-4226)
+
 ## [0.26.0] - 2026-10-09
 
 ### Added

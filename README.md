@@ -510,6 +510,29 @@ Untested. The script is plain Python + `urllib` + `subprocess`, so it should run
 
 Because every Mac and every modern Linux already ships it. Zero install, zero toolchain, zero `npm audit` churn. The tradeoff is startup isn't as fast as a compiled binary (~170 ms vs ~10 ms), but for a tool invoked a handful of times per ticket that's noise.
 
+## Performance measurements
+
+`benchmark.py` compares two CLI files against your configured Linear workspace.
+It runs read-only task, board, overview and goals commands, plus a help startup
+control. Each sample starts a fresh Python process and includes startup,
+network, rendering and measurement overhead. Five paired runs alternate order;
+the JSON lines include every sample, medians, ranges and GraphQL request counts.
+
+```bash
+python3 benchmark.py --before /path/to/base/linear --after ./linear --project "Your project" --runs 5
+```
+
+Only timings, counts and SHA-256 output digests are printed. JSON comparisons
+ignore `generatedAt` and object key order; changes to the workspace during the
+run can still change the digest. `response_bytes` measures reserialized response
+JSON, not wire traffic. Timings depend on workspace size and network conditions.
+
+Overview overlaps independent reads with at most two requests in flight; goals
+uses at most three. Each cursor walk stays sequential. GraphQL has a 20-second
+socket timeout, not a deadline for the entire command or paginated walk. A
+stalled request returns an API error; mutations are not automatically retried
+by the GraphQL client.
+
 ## License
 
 MIT.

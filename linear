@@ -82,6 +82,7 @@ _UNSET = object()
 CONFIG_PATH = Path.home() / ".linear-cli" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".agents" / "linear.json"
 API_URL = "https://api.linear.app/graphql"
+API_TIMEOUT = 20
 
 # Config holds the Linear API key — keep it private on multi-user boxes.
 CONFIG_DIR_MODE = 0o700
@@ -255,9 +256,9 @@ def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
     req.add_header("Authorization", api_key)
 
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=API_TIMEOUT) as resp:
             return json.loads(resp.read())
-    except URLError as e:
+    except (URLError, TimeoutError) as e:
         # HTTPError has a response body with actual GraphQL error details
         body = ""
         status = getattr(e, "code", None)
@@ -274,7 +275,9 @@ def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
                     return parsed
             except (json.JSONDecodeError, Exception):
                 pass
-        detail = body if body else str(e)
+        timed_out = isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
+        detail = (f"Linear API timeout after {API_TIMEOUT} seconds"
+                  if timed_out else body if body else str(e))
         err: dict = {"message": detail}
         _annotate_error_extensions(err, status, retry_after)
         return {"errors": [err]}
@@ -1005,18 +1008,18 @@ def cycle_label(node: dict | None) -> str:
     return "no cycle"
 
 
-def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
-    """Return the active or next cycle ID for a team. Never cached (cycles rotate)."""
+def resolve_cycle_meta(api_key: str, team_id: str, which: str) -> dict | None:
+    """Return active or next cycle metadata for a team. Never cached (cycles rotate)."""
     if which not in ("active", "next"):
         return None
     if which == "active":
         data = gql(api_key, f"""{{
-            team(id: "{team_id}") {{ activeCycle {{ id name }} }}
+            team(id: "{team_id}") {{ activeCycle {{ id number name startsAt endsAt }} }}
         }}""")
         if check_errors(data):
             return None
         cycle = (data.get("data") or {}).get("team", {}).get("activeCycle")
-        return cycle.get("id") if cycle else None
+        return cycle or None
 
     # "next" — Linear has no team.nextCycle field. Find the first cycle whose
     # startsAt is after the active cycle's endsAt, ordered ascending.
@@ -1044,7 +1047,7 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
                 orderBy: updatedAt
                 first: 20
             ) {
-                nodes { id name startsAt }
+                nodes { id number name startsAt endsAt }
             }
         }
     """, {"teamId": team_id, "after": active_ends})
@@ -1054,7 +1057,12 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     nodes = (data.get("data") or {}).get("cycles", {}).get("nodes", []) or []
     nodes = [n for n in nodes if n.get("startsAt") and n["startsAt"] >= active_ends]
     nodes.sort(key=lambda n: n["startsAt"])
-    return nodes[0]["id"] if nodes else None
+    return nodes[0] if nodes else None
+
+
+def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
+    cycle = resolve_cycle_meta(api_key, team_id, which)
+    return cycle.get("id") if cycle else None
 
 
 # Every non-archived project a team can see (Linear's `team.projects` leaves
@@ -1866,31 +1874,6 @@ def paginate_issues(api_key: str, filter_str: str) -> list[dict] | None:
             )
             break
     return nodes
-
-
-def resolve_cycle_meta(api_key: str, team_id: str, which: str) -> dict | None:
-    """Resolve 'active'/'next' to {id, number, name, startsAt, endsAt}. None when
-    none. `name` is the real (possibly None) cycle name — numbered cycles have
-    none, so use cycle_label() for display."""
-    cid = get_cycle_id(api_key, team_id, which)
-    if not cid:
-        return None
-    data = gql(
-        api_key,
-        "query($id: String!) { cycle(id: $id) { id number name startsAt endsAt } }",
-        {"id": cid},
-    )
-    fallback = f"{which.capitalize()} cycle"
-    if check_errors(data):
-        return {"id": cid, "number": None, "name": fallback, "startsAt": None, "endsAt": None}
-    c = (data.get("data") or {}).get("cycle") or {}
-    return {
-        "id": cid,
-        "number": c.get("number"),
-        "name": c.get("name"),
-        "startsAt": c.get("startsAt"),
-        "endsAt": c.get("endsAt"),
-    }
 
 
 def paginate_connection(api_key: str, query: str, path: list[str],
@@ -4982,8 +4965,14 @@ def _project_overview(args, api_key, team_id):
     (projects with their people, active cycle, milestones, issues), each fully
     paginated; an API error on any of them exits non-zero rather than emitting
     a half document."""
-    projects = paginate_connection(api_key, _OVERVIEW_PROJECTS_QUERY, ["team", "projects"],
-                                   {"teamId": team_id}, page_size=_OVERVIEW_PROJECT_PAGE)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        project_read = pool.submit(
+            paginate_connection, api_key, _OVERVIEW_PROJECTS_QUERY, ["team", "projects"],
+            {"teamId": team_id}, page_size=_OVERVIEW_PROJECT_PAGE)
+        cycle_read = pool.submit(gql, api_key, _CURRENT_CYCLE_QUERY, {"id": team_id})
+        projects = project_read.result()
+        data = cycle_read.result()
     if projects is None:
         sys.exit(1)
     wanted = getattr(args, "project", None) or []
@@ -4996,7 +4985,6 @@ def _project_overview(args, api_key, team_id):
         if ((p.get("members") or {}).get("pageInfo") or {}).get("hasNextPage")
     ]
 
-    data = gql(api_key, _CURRENT_CYCLE_QUERY, {"id": team_id})
     if check_errors(data):
         sys.exit(1)
     cycle = ((data.get("data") or {}).get("team") or {}).get("activeCycle")
@@ -5005,25 +4993,28 @@ def _project_overview(args, api_key, team_id):
     milestones: list[dict] = []
     issues: list[dict] = []
     if ids:
-        capped: dict = {}
-        milestones = paginate_connection(api_key, _OVERVIEW_MILESTONE_QUERY,
-                                         ["projectMilestones"], {"ids": ids},
-                                         partial_out=capped)
+        milestone_cap: dict = {}
+        issue_cap: dict = {}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            milestone_read = pool.submit(
+                paginate_connection, api_key, _OVERVIEW_MILESTONE_QUERY,
+                ["projectMilestones"], {"ids": ids}, partial_out=milestone_cap)
+            issue_read = pool.submit(
+                paginate_connection, api_key, _OVERVIEW_ISSUE_QUERY, ["issues"],
+                {"ids": ids}, page_size=_OVERVIEW_ISSUE_PAGE, partial_out=issue_cap)
+            milestones = milestone_read.result()
+            issues = issue_read.result()
         if milestones is None:
             sys.exit(1)
-        if capped:
+        if milestone_cap:
             partial_reasons.append(
-                f"milestones stopped at {capped['rows']} (pagination safety rail); "
+                f"milestones stopped at {milestone_cap['rows']} (pagination safety rail); "
                 f"later milestones and their issues are missing")
-        capped = {}
-        issues = paginate_connection(api_key, _OVERVIEW_ISSUE_QUERY, ["issues"],
-                                     {"ids": ids}, page_size=_OVERVIEW_ISSUE_PAGE,
-                                     partial_out=capped)
         if issues is None:
             sys.exit(1)
-        if capped:
+        if issue_cap:
             partial_reasons.append(
-                f"issues stopped at {capped['rows']} (pagination safety rail); "
+                f"issues stopped at {issue_cap['rows']} (pagination safety rail); "
                 f"counts and open lists are understated")
 
     doc = build_overview(cycle, projects, milestones, issues,
@@ -5786,25 +5777,32 @@ def fetch_goal_issues(api_key: str, team_id: str, cycle_id: str | None,
 
 def goals_state(api_key: str, team_id: str) -> dict:
     """Everything `linear goals` reads, fetched once: four requests."""
-    data = gql(api_key, _GOALS_COMPANY_QUERY)
-    if check_errors(data):
-        sys.exit(1)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        company_read = pool.submit(gql, api_key, _GOALS_COMPANY_QUERY)
+        calendar_read = pool.submit(team_calendar, api_key, team_id)
+        users_read = pool.submit(list_workspace_users, api_key)
+        data = company_read.result()
+        if check_errors(data):
+            sys.exit(1)
+        cal = calendar_read.result()
+        today = datetime.now(cal["tz"]).date()
+        nodes = fetch_goal_issues(api_key, team_id, (cal["cycle"] or {}).get("id"), today)
+        users = users_read.result()
     d = data.get("data") or {}
     active = (d.get("initiatives") or {}).get("nodes") or []
     # Several Active initiatives: the company goal is the one due first.
     active.sort(key=lambda i: i.get("targetDate") or "9999-12-31")
-    cal = team_calendar(api_key, team_id)
-    today = datetime.now(cal["tz"]).date()
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "initiative": active[0] if active else None,
         "logoUrl": (d.get("organization") or {}).get("logoUrl"),
         "viewer": d.get("viewer") or {},
-        "users": list_workspace_users(api_key),
+        "users": users,
         "cycle": cal["cycle"],
         "tz": cal["tz"],
         "today": today,
-        "nodes": fetch_goal_issues(api_key, team_id, (cal["cycle"] or {}).get("id"), today),
+        "nodes": nodes,
     }
 
 
