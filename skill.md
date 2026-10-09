@@ -21,7 +21,10 @@ linear queue                           # closes waiting on a rate limit
 linear queue list                      # same as bare queue
 linear queue drain                     # apply queued closes with backoff
 linear queue drain --once              # apply one due intent
-linear create "Title" --milestone "v1.0" --label foo --priority high --description "..."
+linear create "Title" --label foo --priority high --description "..."  # dated by its horizon
+linear goals                          # company quarter, week, my week, my day + to-dos, team
+linear goals set day "<text>"         # today's goal (also: set week, set company-week)
+linear goals todo "<text>"            # a to-do under today's goal; `todo --done ANT-51` finishes one
 linear cycles                         # list cycles
 linear projects                       # list projects + issue counts (detail: `linear projects "Name"`)
 linear projects update "Name" --description "..."  # set description / lead / dates / state
@@ -167,15 +170,16 @@ adds a flag. `--from-file` bulk create skips the lookup (`searchIssues` is
 
 ## Creating issues — what's required
 
-A title OR a description, plus a milestone. Everything else has a sensible default.
+A title OR a description, and a project (`--project`, or run inside a repo
+`agents projects` binds to one). Everything else is set by the issue's horizon.
 
 ```
-linear create "Fix auth bug" --milestone "v1.0"       # minimum
-linear create --description "Long paragraph..." --milestone "v1.0"
+linear create "Fix auth bug"                          # minimum (inside a bound repo)
+linear create "Fix auth bug" --project "Phoenix"      # anywhere else
+linear create --description "Long paragraph..." --priority urgent
 linear create --description-file plan.md --milestone "v1.0"
-echo "..." | linear create --description-file - --skip-milestone
-linear create "Sub-task" --parent ANT-42 --milestone "v1.0"
-linear create "Item" --project "Phoenix" --milestone "v1.0"
+linear create "Sub-task" --parent ANT-42
+linear create "Crash on save" --bug                   # Bug label, backlog, low
 linear create --from-file plan.jsonl                  # bulk: one issue per JSON line
 ```
 
@@ -211,36 +215,38 @@ name the human who owns it too — `--assign bisma --delegate claude`.
 Unowned issues pile up in the board's "No assignee" bucket and nobody picks
 them up, which is why this is a hard refusal rather than a warning.
 
-### Every issue needs a milestone
+### Every issue lands in one horizon
 
-`create` refuses to make an issue with no milestone. There is no default —
-an omitted `--milestone` is a hard error, not a silent create. The refusal
-prints the actual milestone list (that project's when `--project` is set,
-otherwise the team's grouped by project) so you can pick one.
+`create` prints the defaults it applied on one stderr line, e.g.
+`horizon now · urgent → due 2026-10-08, reminder 13:45 · milestone: 0.1.0 (next for Rush) · cycle: … · delegate: claude`.
+Read it: it is the issue's due date, cycle and milestone.
 
-```
-linear create "Fix auth bug"
-# Refusing to create an issue without a milestone: 'Fix auth bug'
-#   Creating a task with no milestone is bad practice — it lands in the project's
-#   "No milestone" bucket and nobody can tell which deliverable it belongs to.
-#   Attach it:  --milestone "<name>"   (resolved within --project if set)
-#   ...
-#   If it genuinely has no milestone, say so explicitly: --skip-milestone
-```
+- **now** (default): due by priority. Urgent is due today with a reminder in
+  15 minutes, high today with a reminder in an hour, medium the next working
+  day, low at the end of the active cycle. Active cycle, and the project's next
+  open milestone unless you pass `--milestone`.
+- **milestone** (`--milestone "<name>"`): due on that milestone's target date
+  (urgent/high keep an earlier SLA date). In the active cycle only when that
+  date falls inside it.
+- **backlog** (`--backlog`): Backlog state, no cycle, no due date, and a future
+  milestone, by default `Q1 2027`.
 
-Pick one:
+`--due-date`, `--cycle` and `--status` always win. `--bug` adds the Bug label
+and means backlog at priority low; `--bug --blocker` means now at priority
+high. The configured agent (`linear setup --agent`) becomes the delegate; the
+API-key owner stays the assignee.
 
-- `--milestone "<name>"` — attach it to a deliverable (`linear milestones list`
-  / `linear projects` lists them). Resolved within `--project` if set.
-- `--skip-milestone` — create it with no milestone anyway. Deliberate, not a
-  default.
+With no project, or a project with no open milestone, `create` refuses and
+lists the three horizons and the real projects or milestones to pick from.
+`--skip-milestone` is the explicit escape hatch: it warns and the issue lands
+in the project's "No milestone" bucket. `--milestone` and `--skip-milestone`
+together is a hard error.
 
-`--milestone` and `--skip-milestone` together is a hard error: pass one, not
-both. `--project` is not required and nothing is auto-assigned.
+Retarget a milestone with `linear milestones set-target-date`: every open
+issue in it that was due on the old date moves to the new one.
 
-The milestone check applies per `--from-file` row — set `"milestone"` on the
-row, or `"skip_milestone": true` on a single row, or pass `--skip-milestone`
-to waive it for the whole file.
+The same rules apply per `--from-file` row; a row can set `"project"`,
+`"milestone"`, `"backlog"`, `"bug"`, `"blocker"` or `"skip_milestone": true`.
 
 Bulk output is tab-separated for easy parsing:
 ```
@@ -311,5 +317,5 @@ drains automatically.
 ## Common mistakes
 
 - Don't call the Linear GraphQL API directly — the CLI handles auth, uploads, cycle math, and state resolution.
-- Don't hand-edit `~/.linear-cli/config.json` — use `linear setup` to re-configure.
+- Don't hand-edit `~/.linear-cli/config.json` — use `linear setup` to re-configure. The one exception is the optional `policy` block (SLA table and backlog milestone, see the README's Horizons section).
 - If you see `Error: Invalid scope: read required`, the API key was created write-only. Regenerate it with Full access at linear.app/settings/account/security.

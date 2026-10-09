@@ -101,14 +101,26 @@ linear queue drain                      # apply queued closes with backoff
 linear queue drain --once               # apply one due intent, then stop
 linear queue drain --dry-run            # preview queued closes without applying
 
-linear create "Fix auth bug" --milestone "v1.0" --label security --priority high
-linear create --description "Paragraph dump — title is derived from this." --milestone "v1.0"
-linear create "Sub-task" --parent ANT-42 --milestone "v1.0"  # nested; prints a tip nudging a flat issue
-linear create "Roadmap item" --project "Phoenix" --milestone "v1.0"
-linear create "Ship it" --delegate droid --milestone "v1.0"
+linear create "Fix auth bug" --priority urgent   # horizon now: due today, reminder in 15m, next milestone
+linear create "Billing page" --milestone "v1.0"  # horizon milestone: due on v1.0's target date
+linear create "Someday idea" --backlog           # horizon backlog: Backlog, no cycle, no date, Q1 2027
+linear create "Crash on login" --bug             # label Bug, backlog, priority low
+linear create "Prod is down" --bug --blocker     # label Bug, horizon now, priority high
+linear create --description "Paragraph dump — title is derived from this."
+linear create "Sub-task" --parent ANT-42         # nested; prints a tip nudging a flat issue
+linear create "Roadmap item" --project "Phoenix" # project outside the cwd's binding
+linear create "Ship it" --delegate droid
 linear create --from-file plan.jsonl  # bulk: one JSON object per line
-linear create "Unowned" --assign none --force --skip-milestone  # refused without --force: every issue needs an owner
-linear create "No deliverable yet" --skip-milestone  # refused without --skip-milestone: every issue needs a milestone
+linear create "Unowned" --assign none --force    # refused without --force: every issue needs an owner
+linear create "No deliverable yet" --skip-milestone  # escape hatch: warns, lands in "No milestone"
+
+linear goals                          # company quarter, week, my week, my day + to-dos, team
+linear goals --json                   # the same as one document (see Goals JSON)
+linear goals set week "Ship checkout" --milestone "Ready to charge"
+linear goals set day "Stripe webhook green"     # parented to your week goal
+linear goals set company-week "Launch gate green"  # renames the active cycle
+linear goals todo "Write the refund test"        # a sub-issue of today's goal, due today
+linear goals todo --done ANT-51
 
 linear projects                       # list projects + progress + issue count
 linear projects "Phoenix"             # detail view: milestones with per-milestone % done
@@ -194,7 +206,7 @@ The same CLI works whether you're typing or a subagent is. Driving Linear from e
 - **Directory-aware scope.** When `agents projects` binds the current directory to a Linear project, `linear tasks` (and `--board`) auto-scope to that project — so an agent launched inside a project folder works that project's queue, not the whole workspace. `--all` shows every project, `--project X` overrides, and `autoScope: false` in `~/.linear-cli/config.json` disables it. Fail-open: with no `agents` CLI or no binding for the cwd, nothing changes. The `--json` output carries `project: {id, name, auto}` (null when unscoped).
 - **Milestones as deliverables.** `--milestone` scopes to one deliverable across all cycles; `--by-milestone` groups a project's issues by milestone (with a *No milestone* bucket for unmatched work), each row annotated with its cycle so you see which iteration a deliverable's work is scheduled in. `linear projects` / `milestones list` roll up per-milestone % done, so a deliverable's progress sits next to its target date. Scoping to `--project`/`--milestone` widens to all cycles by default (the whole deliverable, not just this cycle's slice).
 - **Every issue gets an owner.** `create` refuses to make an unassigned issue and says why. The default already assigns the API key owner, so this only fires when the assignee would be empty — `--assign none`, an `--assign` value matching no human (which used to warn and create it unowned anyway), or an unresolvable API key owner (which used to create it unowned with no warning at all). Fix it with `--assign <email|name>`, or say `--force` when it genuinely has no owner yet. `--delegate` doesn't count: it sets the agent, not the owner, so pair it with `--assign`. Keeps the board's "No assignee" bucket from filling with tickets nobody picks up.
-- **Every issue gets a milestone.** `create` refuses to make an issue with no milestone and says why — it would land in the project's "No milestone" bucket, and nobody can tell which deliverable it belongs to. Pass `--milestone "<name>"` (resolved within `--project` if set); the error prints the actual list so an agent can pick one. `--skip-milestone` is the explicit opt-out, like `--force` for an unowned issue. The two flags together are a hard error. `--from-file` applies the check per row; command-level `--skip-milestone` waives every row, or set `"skip_milestone": true` on a single row. Does not auto-assign a milestone or backfill existing issues.
+- **Every issue gets a date by rule.** `create` puts each issue in exactly one horizon and prints what it chose on one stderr line (`horizon now · urgent → due 2026-10-08, reminder 13:45 · milestone: 0.1.0 (next for Rush) · …`). See [Horizons](#horizons). The project comes from `--project` or the cwd's `agents projects` binding; the milestone from `--milestone` or the project's next open one. With neither, `create` refuses and its error teaches the three horizons. `--skip-milestone` is the one escape hatch and warns. `--from-file` applies the same rules per row (a row can set `backlog`, `bug`, `blocker`).
 - **Native agent delegation.** `linear update ANT-42 --delegate claude` sets Linear's `delegateId`: the human stays assignee, the agent becomes delegate, and review ownership stays clear.
 - **One ownership model.** `delegate` is the only thing that owns an issue. `linear tasks --agent claude` filters to issues delegated to Claude; the default view adds the issues nobody has been delegated (`delegate` is null). `linear tasks --board` groups its columns by delegate. There is no label lane — an unknown `--agent` aborts rather than printing an empty queue.
 - **Proof-first completion.** `--done --proof <file|url|text>` uploads attachments, records links, and appends notes in one call — so reviewers see evidence without digging.
@@ -274,6 +286,107 @@ one document, nothing to join afterwards.
   never silently undercounts. An auth or network error exits non-zero.
 - `--project <name|id>` restricts the document; repeat it for several. Names
   resolve strictly — a typo aborts with suggestions.
+
+## Horizons
+
+Every issue `linear create` makes resolves to one horizon:
+
+| Horizon | When | Due date | Cycle | Milestone | State |
+|---|---|---|---|---|---|
+| **now** | default | by priority (`policy.sla`) | active | `--milestone`, else the project's next open one | Todo |
+| **milestone** | `--milestone M` | M's target date; urgent/high keep an earlier SLA date | active only if the date falls in it | M | Todo |
+| **backlog** | `--backlog` | none | none | a future one, default `policy.backlogMilestone` | Backlog |
+
+- An explicit `--due-date`, `--cycle` or `--status` always wins.
+- "Next open milestone" is the project's earliest `targetDate` still under 100%,
+  never the backlog milestone. Undated milestones are skipped.
+- `--bug` adds label Bug and, without `--blocker`, means backlog at priority low.
+  `--bug --blocker` means now at priority high.
+- With an agent identity in config (`linear setup --agent claude`), new issues
+  are delegated to it while the assignee stays the API-key owner.
+- Dates are in the team's timezone (Linear's team setting), so a box running in
+  UTC files the same "today" as the people on the team.
+- `linear milestones set-target-date` carries along every open issue in that
+  milestone whose due date equalled the old target, and prints the count.
+
+The SLA table and the backlog milestone live in `~/.linear-cli/config.json`.
+Every key is optional; anything left out keeps the default shown here:
+
+```json
+{
+  "policy": {
+    "sla": {
+      "urgent": {"due": "today",     "remind": "15m"},
+      "high":   {"due": "today",     "remind": "1h"},
+      "medium": {"due": "+1wd",      "remind": "none"},
+      "low":    {"due": "cycle_end", "remind": "none"}
+    },
+    "backlogMilestone": "Q1 2027"
+  }
+}
+```
+
+`due` is `today`, `+Nwd` (N working days, Monday to Friday), `+Nd` (N calendar
+days) or `cycle_end` (the active cycle's last day). `remind` is `Nm`, `Nh` or
+`none`, and sets Linear's issue reminder that long after creation. Priority
+`none` is scheduled like medium.
+
+## Goals JSON
+
+`linear goals` reads four goal levels straight from Linear: the company quarter
+(the Active initiative and its milestones), the company week (the active
+cycle's name), your week (an issue labelled *Weekly goal* in the active cycle)
+and your day (an issue labelled *Daily goal* due today, whose sub-issues are
+the day's to-dos). `--json` prints one document:
+
+```json
+{
+  "generatedAt": "2026-10-09T05:52:07Z",
+  "company": {
+    "initiative": {"id": "…", "name": "First paying customers", "url": "https://linear.app/…",
+                   "startDate": "2026-08-02", "targetDate": "2026-12-31"},
+    "logoUrl": null,
+    "milestones": [{"id": "…", "name": "Ready to charge", "project": "Phoenix",
+                    "targetDate": "2026-10-30", "progress": 0}]
+  },
+  "week": {
+    "cycle": {"id": "…", "number": 32, "name": "Launch gate green",
+              "startsAt": "2026-10-06T07:00:00.000Z", "endsAt": "2026-10-13T07:00:00.000Z"},
+    "goal": "Launch gate green"
+  },
+  "me": {
+    "user": {"id": "…", "name": "Ada", "avatarUrl": null},
+    "weekGoal": null,
+    "dayGoal": {"id": "…", "identifier": "ANT-50", "title": "Stripe webhook green",
+                "url": "https://linear.app/…", "dueDate": "2026-10-08",
+                "milestone": {"name": "Ready to charge", "targetDate": "2026-10-30"},
+                "done": 1, "total": 2,
+                "todos": [{"id": "…", "identifier": "ANT-51", "title": "Write the refund test",
+                           "url": "https://linear.app/…", "completed": true}]}
+  },
+  "team": [{"user": {"id": "…", "name": "Grace", "avatarUrl": null},
+            "weekGoal": null, "dayGoal": null}]
+}
+```
+
+- `initiative` is the Active initiative (the one due first if there are
+  several), or `null`. `startDate` is its start date if set, else the day it was
+  created.
+- `milestones` are the open milestones (under 100%) of the initiative's
+  projects with a target date on or before the initiative's, earliest first,
+  without the backlog milestone. `progress` is Linear's 0-100.
+- `week.goal` is the cycle name, or `null` when it is empty or still Linear's
+  default `Cycle N`.
+- `team` is every other active human (no agents, no guests).
+- A Goal's `todos` are its sub-issues, canceled ones left out; `done`/`total`
+  count them. A duplicate goal for the same person resolves to the newest.
+- Dates use the team's timezone.
+
+The write commands (`set week|day|company-week`, `todo`, `todo --done`) take
+`--json` and print the resulting Goal (`set company-week` prints `week`).
+A new week goal is due on the cycle's last day, a new day goal today; both land
+in `--milestone` or, by default, the company's next open milestone. Errors go to
+stderr with exit 1.
 
 ## Agent skill
 

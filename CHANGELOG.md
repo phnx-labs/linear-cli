@@ -9,11 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every created issue gets a date by rule.** `create` resolves each issue to
+  one horizon. **now** (default): due by priority from `policy.sla` (urgent
+  and high today with a reminder in 15 minutes and 1 hour, medium the next
+  working day, low at the active cycle's end), active cycle, the project's next
+  open milestone. **milestone** (`--milestone M`): due on M's target date
+  (urgent/high keep an earlier SLA date), active cycle only when that date is
+  inside it. **backlog** (`--backlog`): Backlog state, no cycle, no due date,
+  a future milestone (`policy.backlogMilestone`, default `Q1 2027`). An
+  explicit `--due-date`, `--cycle` or `--status` wins. One stderr line names
+  every default applied. Dates use the team's timezone. (PHNX-4291)
+- **`create --bug` and `--bug --blocker`.** `--bug` adds label Bug and means
+  backlog at priority low; with `--blocker` it means horizon now at priority
+  high. (PHNX-4291)
+- **`policy` in `~/.linear-cli/config.json`.** Optional `sla` (per priority:
+  `due` = today | +Nwd | +Nd | cycle_end, `remind` = Nm | Nh | none) and
+  `backlogMilestone`. Documented in the README. (PHNX-4291)
+- **`milestones set-target-date` carries its issues along.** Every open issue
+  in the milestone due on the old target moves to the new one, and the count
+  is printed. (PHNX-4291)
+- **`linear goals`.** Reads the company quarter (Active initiative and its open
+  milestones), the company week (active cycle's name), your Weekly goal, your
+  Daily goal with its to-dos, and each teammate's goals; `--json` is the
+  contract documented under "Goals JSON". `goals set week|day|company-week`
+  and `goals todo "<text>"` / `goals todo --done <ID>` write them, each with
+  `--json`. (PHNX-4291)
+
 - **`create` and `update` take `--remind-at`.** It sets Linear's issue reminder
   ("Remind me"), which notifies you at an exact time: `YYYY-MM-DDTHH:MM` in
   local time, or with a zone. A due date is date-only in Linear, so this is
   where a to-do's time lives. A date without a time, or text that is not a
   time, is refused before anything is created.
+
+### Changed
+
+- **`create` needs a project.** `--project`, else the cwd's `agents projects`
+  binding (the same resolution `linear tasks` auto-scope uses); with neither
+  it refuses and lists the projects and the three horizons. The milestone is
+  no longer required by hand: it defaults to the project's next open one, so
+  the no-milestone refusal now fires only when a project has none. (PHNX-4291)
+- **`create` delegates to the configured agent.** With `agent` in config and
+  no `--delegate`, the new issue is delegated to that agent; the API-key owner
+  stays the assignee. `--delegate none` opts out. (PHNX-4291)
+- **`create` no longer puts every issue in the active cycle,** and priority low
+  no longer means Backlog state; both follow the horizon. `--skip-milestone`
+  now prints a warning. (PHNX-4291)
 
 ## [0.25.0] - 2026-10-04
 
