@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `linear create --json` prints the created issue as one JSON object (`id`,
+  `identifier`, `title`, `url`, `status`, `priority`, and `reminder` when a
+  reminder was requested, null if it could not be set). With `--from-file` it
+  prints one array, a created-issue object or `{"error", "title"}` per input
+  line, instead of the TSV rows. Warnings stay on stderr. (#64)
+
 ## [0.26.0] - 2026-10-09
 
 ### Added

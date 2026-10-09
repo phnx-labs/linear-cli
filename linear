@@ -4379,7 +4379,7 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
         mutation($input: IssueCreateInput!) {
             issueCreate(input: $input) {
                 success
-                issue { id identifier title state { name } cycle { number name } assignee { name } delegate { name } }
+                issue { id identifier title url priority state { name } cycle { number name } assignee { name } delegate { name } }
             }
         }
     """, {"input": input_obj})
@@ -4391,13 +4391,28 @@ def _send_issue_create(api_key: str, input_obj: dict) -> tuple[dict | None, str 
     return result["issue"], None
 
 
+def _created_issue_json(issue: dict, reminder: str | None = None, with_reminder: bool = False) -> dict:
+    out = {
+        "id": issue["id"],
+        "identifier": issue["identifier"],
+        "title": issue["title"],
+        "url": issue.get("url"),
+        "status": (issue.get("state") or {}).get("name"),
+        "priority": issue.get("priority") or 0,
+    }
+    if with_reminder:
+        out["reminder"] = reminder
+    return out
+
+
 def cmd_create(args, cfg, api_key, team_id):
     if args.from_file and getattr(args, "remind_at", None):
         print("--remind-at sets one issue's reminder; it cannot be combined with --from-file.", file=sys.stderr)
         sys.exit(2)
     if args.from_file:
         return _bulk_create(args.from_file, cfg, api_key, team_id,
-                            force=args.force, skip_milestone=args.skip_milestone)
+                            force=args.force, skip_milestone=args.skip_milestone,
+                            as_json=args.json)
 
     fields = {
         "title": args.title,
@@ -4434,15 +4449,23 @@ def cmd_create(args, cfg, api_key, team_id):
     issue, err = _send_issue_create(api_key, input_obj)
     if err:
         print(f"Error: {err}", file=sys.stderr)
+        if args.json:
+            sys.exit(1)
         return
-    cyc = cycle_label(issue.get("cycle"))
-    asg = (issue.get("assignee") or {}).get("name") or "unassigned"
-    dg = (issue.get("delegate") or {}).get("name")
-    meta = f"{cyc} | {asg}" + (f" | delegate: {dg}" if dg else "")
-    print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
+    if not args.json:
+        cyc = cycle_label(issue.get("cycle"))
+        asg = (issue.get("assignee") or {}).get("name") or "unassigned"
+        dg = (issue.get("delegate") or {}).get("name")
+        meta = f"{cyc} | {asg}" + (f" | delegate: {dg}" if dg else "")
+        print(f"Created {issue['identifier']}: {issue['title']}  [{meta}]")
+    reminder_set = bool(remind_at) and set_issue_reminder(api_key, issue["id"], remind_at)
+    if args.json:
+        print(json.dumps(_created_issue_json(
+            issue, remind_at if reminder_set else None, with_reminder=bool(remind_at))))
     if remind_at:
-        if set_issue_reminder(api_key, issue["id"], remind_at):
-            print(f"{issue['identifier']} -> reminder: {remind_at}")
+        if reminder_set:
+            if not args.json:
+                print(f"{issue['identifier']} -> reminder: {remind_at}")
         else:
             print(f"Created {issue['identifier']}, but its reminder could not be set. "
                   f"Retry with: linear update {issue['identifier']} --remind-at {remind_at}", file=sys.stderr)
@@ -4453,14 +4476,17 @@ def cmd_create(args, cfg, api_key, team_id):
 
 
 def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
-                 skip_milestone: bool = False):
+                 skip_milestone: bool = False, as_json: bool = False):
     """Bulk create from JSONL. Each line is a JSON object with field names
     matching the single-create flags. Continue-on-error; tab-separated output:
     OK<TAB>IDENT<TAB>TITLE  or  ERROR<TAB>-<TAB>TITLE<TAB>REASON.
 
     `force` applies the --force owner-check bypass to every row; a row can also
     carry its own "force": true. `skip_milestone` is the same for the
-    milestone check; a row can carry "skip_milestone": true."""
+    milestone check; a row can carry "skip_milestone": true.
+
+    `as_json` prints one JSON array instead: a created-issue object per
+    created row, {"error", "title"} per failed row, in input order."""
     if path == "-":
         stream = sys.stdin
     else:
@@ -4472,6 +4498,14 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
     ok_count = 0
     err_count = 0
     ctx: dict = {}
+    results: list[dict] = []
+
+    def fail(title, reason):
+        if as_json:
+            results.append({"error": reason, "title": title})
+        else:
+            print(f"ERROR\t-\t{tsv_field(title)}\t{reason}")
+
     for raw in stream:
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -4479,7 +4513,11 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
         try:
             fields = json.loads(line)
         except json.JSONDecodeError as e:
-            print(f"ERROR\t-\t<unparseable>\t{e}")
+            fail("<unparseable>", str(e))
+            err_count += 1
+            continue
+        if not isinstance(fields, dict):
+            fail("<unparseable>", "line is not a JSON object")
             err_count += 1
             continue
 
@@ -4487,28 +4525,36 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
             fields["force"] = True
         if skip_milestone:
             fields["skip_milestone"] = True
-        title_hint = tsv_field(
+        title_hint = (
             fields.get("title")
             or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
         )
         input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False, ctx=ctx)
         if err:
-            print(f"ERROR\t-\t{title_hint}\t{err}")
+            fail(title_hint, err)
             err_count += 1
             continue
         issue, err = _send_issue_create(api_key, input_obj)
         if err:
-            print(f"ERROR\t-\t{title_hint}\t{err}")
+            fail(title_hint, err)
             err_count += 1
             continue
-        print(f"OK\t{issue['identifier']}\t{tsv_field(issue['title'])}")
+        if not as_json:
+            print(f"OK\t{issue['identifier']}\t{tsv_field(issue['title'])}")
         print(f"{issue['identifier']}: {ctx['applied']}", file=sys.stderr)
-        if ctx["remindAt"] and not set_issue_reminder(api_key, issue["id"], ctx["remindAt"]):
+        reminder_set = bool(ctx["remindAt"]) and set_issue_reminder(api_key, issue["id"], ctx["remindAt"])
+        if ctx["remindAt"] and not reminder_set:
             print(f"{issue['identifier']}: reminder could not be set", file=sys.stderr)
+        if as_json:
+            results.append(_created_issue_json(
+                issue, ctx["remindAt"] if reminder_set else None,
+                with_reminder=bool(ctx["remindAt"])))
         ok_count += 1
 
     if path != "-":
         stream.close()
+    if as_json:
+        print(json.dumps(results))
     print(f"\n{ok_count} created, {err_count} failed.", file=sys.stderr)
 
 
@@ -6910,6 +6956,8 @@ def main():
                                "'none' leaves it unowned and requires --force.")
     p_create.add_argument("--delegate", default=None,
                           help="Delegate the new issue to an agent by name (e.g. --delegate claude)")
+    p_create.add_argument("--json", action="store_true",
+                          help="Print the created issue as JSON (a JSON array with --from-file)")
     p_create.add_argument("--from-file", dest="from_file", default=None,
                           help="Bulk create from JSONL (one issue per line). '-' for stdin.")
     p_create.add_argument("--parent", default=None,
