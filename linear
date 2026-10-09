@@ -16,6 +16,7 @@ Commands:
     projects            List / show / create / update / archive / delete projects
     milestones          List / create / move / retarget / delete milestones
     initiatives         List / show / create / update / link / unlink / archive
+    goals               Company, week and day goals; `set` and `todo` write yours
     labels              List / create / update / delete labels
     users               List assignable users
     agents              List agent members you can --delegate to (auto-detected)
@@ -44,7 +45,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -875,7 +876,7 @@ def list_workspace_users(api_key: str) -> list[dict]:
     query = """query($cursor: String) {
         users(filter: { active: { eq: true } }, first: 100, after: $cursor) {
             pageInfo { hasNextPage endCursor }
-            nodes { id name email displayName app avatarUrl }
+            nodes { id name email displayName app guest avatarUrl }
         }
     }"""
     return paginate_connection(api_key, query, ["users"]) or []
@@ -1399,7 +1400,7 @@ _MILESTONE_CATALOG_QUERY = """query($ids: [ID!], $cursor: String) {
     projectMilestones(first: 100, after: $cursor,
                       filter: { project: { id: { in: $ids } } }) {
         pageInfo { hasNextPage endCursor }
-        nodes { id name targetDate sortOrder project { id name } }
+        nodes { id name targetDate progress sortOrder project { id name } }
     }
 }"""
 
@@ -3847,7 +3848,8 @@ def _grouped_catalog(catalog: list[dict]) -> list[tuple[str, list[dict]]]:
 
 def missing_milestone_error(title: str, catalog: list[dict],
                             project_name: str | None = None,
-                            multiline: bool = True) -> str:
+                            multiline: bool = True,
+                            backlog_milestone: str | None = None) -> str:
     """The message shown when a create would leave an issue with no milestone.
 
     Multi-line for interactive `linear create` (lists real milestones so an
@@ -3860,7 +3862,8 @@ def missing_milestone_error(title: str, catalog: list[dict],
     if not multiline:
         msg = (f"issue without a milestone refused. Creating a task with no milestone "
                f"is bad practice — it lands in the project's \"No milestone\" bucket. "
-               f"Set \"milestone\" on this row, or pass --skip-milestone.")
+               f"Set \"milestone\" on this row, or pass --skip-milestone. "
+               f"{horizons_help(False, backlog_milestone)}")
         if catalog:
             names = [repr(m.get("name") or "") for m in catalog[:_MILESTONE_CATALOG_CAP]]
             msg += " Available: " + ", ".join(names) + "."
@@ -3877,7 +3880,9 @@ def missing_milestone_error(title: str, catalog: list[dict],
         f"Refusing to create an issue without a milestone: {title!r}",
         "  Creating a task with no milestone is bad practice — it lands in the project's",
         '  "No milestone" bucket and nobody can tell which deliverable it belongs to.',
-        '  Attach it:  --milestone "<name>"   (resolved within --project if set)',
+        '  Attach it:  --milestone "<name>"   (resolved within the project)',
+        "",
+        horizons_help(True, backlog_milestone),
         "",
     ]
     if not catalog:
@@ -3918,14 +3923,207 @@ def missing_milestone_error(title: str, catalog: list[dict],
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Horizon policy: every created issue gets a due date, cycle and milestone by rule
+# ---------------------------------------------------------------------------
+
+DEFAULT_POLICY = {
+    "sla": {
+        "urgent": {"due": "today", "remind": "15m"},
+        "high": {"due": "today", "remind": "1h"},
+        "medium": {"due": "+1wd", "remind": "none"},
+        "low": {"due": "cycle_end", "remind": "none"},
+    },
+    "backlogMilestone": "Q1 2027",
+}
+
+# "none" priority has no SLA row of its own; it is scheduled like medium.
+_SLA_KEY = {1: "urgent", 2: "high", 3: "medium", 4: "low", 0: "medium"}
+
+
+def load_policy(cfg: dict) -> dict:
+    """`policy` from config over DEFAULT_POLICY, merged per priority and per key
+    so a config that only changes `sla.low.due` keeps every other default."""
+    user = cfg.get("policy") or {}
+    sla = {}
+    for key, rule in DEFAULT_POLICY["sla"].items():
+        sla[key] = {**rule, **((user.get("sla") or {}).get(key) or {})}
+    return {
+        "sla": sla,
+        "backlogMilestone": user.get("backlogMilestone") or DEFAULT_POLICY["backlogMilestone"],
+    }
+
+
+def add_working_days(start: date, n: int) -> date:
+    d = start
+    while n > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d
+
+
+def sla_due(rule: str, today: date, cycle_last: date | None) -> date | None:
+    """A `policy.sla.<priority>.due` rule as a date: today | +Nwd | +Nd |
+    cycle_end. None when the rule is cycle_end and there is no active cycle."""
+    r = str(rule).strip().lower()
+    if r == "today":
+        return today
+    if r == "cycle_end":
+        return cycle_last
+    m = re.fullmatch(r"\+(\d+)(wd|d)", r)
+    if m:
+        n = int(m.group(1))
+        return add_working_days(today, n) if m.group(2) == "wd" else today + timedelta(days=n)
+    raise ValueError(f"policy.sla due rule {rule!r} is not one of today, +Nwd, +Nd, cycle_end")
+
+
+def sla_remind(rule: str, now: datetime) -> datetime | None:
+    """A `policy.sla.<priority>.remind` rule (15m | 1h | none) as a time."""
+    r = str(rule).strip().lower()
+    if r in ("none", ""):
+        return None
+    m = re.fullmatch(r"(\d+)([mh])", r)
+    if not m:
+        raise ValueError(f"policy.sla remind rule {rule!r} is not Nm, Nh or none")
+    n = int(m.group(1))
+    return now + (timedelta(minutes=n) if m.group(2) == "m" else timedelta(hours=n))
+
+
+def resolve_tz(name: str | None) -> tzinfo:
+    """The team's timezone, so "today" and a cycle's last day are the team's,
+    not the host's (fleet boxes run in UTC). Falls back to the host zone."""
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return datetime.now().astimezone().tzinfo
+
+
+def team_calendar(api_key: str, team_id: str) -> dict:
+    """{"tz": tzinfo, "cycle": active cycle node or None} in one request."""
+    data = gql(api_key, """query($id: String!) {
+        team(id: $id) { timezone activeCycle { id number name startsAt endsAt } }
+    }""", {"id": team_id})
+    team = {} if check_errors(data) else ((data.get("data") or {}).get("team") or {})
+    return {"tz": resolve_tz(team.get("timezone")), "cycle": team.get("activeCycle")}
+
+
+def cycle_days(cycle: dict | None, tz: tzinfo) -> tuple[date, date] | None:
+    """A cycle's first and last day in `tz`. Linear's endsAt is the exclusive
+    instant the next cycle starts, so the last day is the one just before it."""
+    if not cycle or not cycle.get("startsAt") or not cycle.get("endsAt"):
+        return None
+    start = datetime.fromisoformat(cycle["startsAt"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(cycle["endsAt"].replace("Z", "+00:00"))
+    return (start.astimezone(tz).date(),
+            (end - timedelta(microseconds=1)).astimezone(tz).date())
+
+
+def next_open_milestone(milestones: list[dict], exclude: str | None = None) -> dict | None:
+    """The project's next deliverable: earliest targetDate still under 100%,
+    never the parking milestone (policy.backlogMilestone)."""
+    skip = (exclude or "").lower()
+    open_ms = [m for m in milestones
+               if m.get("targetDate") and (m.get("progress") or 0) < 100
+               and (m.get("name") or "").lower() != skip]
+    return min(open_ms, key=lambda m: m["targetDate"]) if open_ms else None
+
+
+def plan_horizon(horizon: str, priority: int, policy: dict, today: date,
+                 now: datetime, cycle: tuple[date, date] | None,
+                 milestone: dict | None, due: str | None) -> dict:
+    """Due date, reminder and cycle for one horizon. Pure: every input is
+    already resolved, so the whole rule table is testable offline.
+
+    Returns {"due": "YYYY-MM-DD"|None, "remind": datetime|None,
+    "cycle": "active"|"none", "why": short reason for the due date}.
+    An explicit `due` always wins and never carries an SLA reminder.
+    """
+    rule = policy["sla"][_SLA_KEY.get(priority, "medium")]
+    cycle_last = cycle[1] if cycle else None
+    out = {"due": due, "remind": None, "cycle": "none", "why": "explicit"}
+    if horizon == "backlog":
+        return out
+
+    sla_date = sla_due(rule["due"], today, cycle_last)
+    sla_at = sla_remind(rule["remind"], now)
+    if horizon == "now":
+        if due is None:
+            out.update(due=sla_date.isoformat() if sla_date else None,
+                       remind=sla_at, why=_SLA_KEY.get(priority, "medium"))
+        out["cycle"] = "active"
+        return out
+
+    # milestone horizon
+    if due is None:
+        target = (milestone or {}).get("targetDate")
+        target = date.fromisoformat(target[:10]) if target else None
+        urgent = priority in (1, 2)
+        if target and not (urgent and sla_date and sla_date < target):
+            out.update(due=target.isoformat(), why="milestone target")
+        else:
+            out.update(due=sla_date.isoformat() if sla_date else None,
+                       remind=sla_at if (urgent or not target) else None,
+                       why=_SLA_KEY.get(priority, "medium"))
+    if cycle and out["due"] and cycle[0] <= date.fromisoformat(out["due"]) <= cycle[1]:
+        out["cycle"] = "active"
+    return out
+
+
+def horizons_help(multiline: bool = True, backlog_milestone: str | None = None) -> str:
+    """The three horizons, as taught by every create refusal."""
+    bm = backlog_milestone or DEFAULT_POLICY["backlogMilestone"]
+    lines = [
+        "now (default): due by priority (urgent/high today, medium next working day, "
+        "low at cycle end), active cycle, the project's next open milestone",
+        "--milestone M: due on M's target date (urgent/high keep an earlier SLA date), "
+        "active cycle only when that date falls inside it",
+        f"--backlog: Backlog state, no cycle, no due date, a future milestone "
+        f"(default {bm!r})",
+    ]
+    if not multiline:
+        return "Horizons: " + "; ".join(lines) + "."
+    return "  Every issue lands in one horizon:\n" + "\n".join(f"    {l}" for l in lines)
+
+
+def missing_project_error(title: str, projects: list[dict], multiline: bool = True,
+                          backlog_milestone: str | None = None) -> str:
+    names = [p.get("name") or "" for p in projects]
+    if not multiline:
+        shown = ", ".join(repr(n) for n in names[:_MILESTONE_CATALOG_CAP])
+        return (f"issue without a project refused. Set \"project\" on this row, or run "
+                f"from a directory `agents projects` binds to one. Projects: {shown}. "
+                f"{horizons_help(False, backlog_milestone)}")
+    lines = [
+        f"Refusing to create an issue without a project: {title!r}",
+        "  Pass --project <name>, or run from a repo `agents projects` binds to one.",
+        "",
+        horizons_help(True, backlog_milestone),
+        "",
+        "  Projects:",
+    ]
+    lines += [f"    {n}" for n in names[:_MILESTONE_CATALOG_CAP]]
+    if len(names) > _MILESTONE_CATALOG_CAP:
+        lines.append("    …  (full list: linear projects)")
+    return "\n".join(lines)
+
+
 def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
-                        verbose: bool = True) -> tuple[dict | None, str | None]:
+                        verbose: bool = True, ctx: dict | None = None
+                        ) -> tuple[dict | None, str | None]:
     """Build an IssueCreateInput from a flat fields dict (keys match flag names:
     title, description, description_file, priority, parent, project,
-    milestone, skip_milestone, status, cycle, assign, due_date, label, force).
+    milestone, skip_milestone, status, cycle, assign, delegate, due_date, label,
+    force, backlog, bug, blocker).
 
     Returns (input_obj, None) on success or (None, error) on hard failure.
-    Smart defaults applied silently. Warnings go to stderr when verbose=True.
+    Warnings go to stderr when verbose=True. `ctx` memoizes the cwd project
+    and team calendar across a bulk run, and receives two outputs per call:
+    `applied` (the defaults line to print) and `remindAt` (the SLA reminder to
+    set once the issue exists, or None).
     """
     def warn(msg):
         if verbose:
@@ -3948,19 +4146,39 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     if description:
         input_obj["description"] = description
 
+    ctx = {} if ctx is None else ctx
+    ctx["remindAt"] = None
+    ctx["applied"] = ""
+
+    due_explicit = None
     if fields.get("due_date"):
         try:
-            due = parse_due_date(fields["due_date"])
-            if due is not None:
-                input_obj["dueDate"] = due
+            due_explicit = parse_due_date(fields["due_date"])
         except SystemExit as e:
             return None, str(e)
 
+    bug, blocker = bool(fields.get("bug")), bool(fields.get("blocker"))
+    if blocker and not bug:
+        return None, "--blocker qualifies a bug: pass --bug --blocker"
+    if blocker and fields.get("backlog"):
+        return None, "--bug --blocker is horizon now; it cannot be combined with --backlog"
     try:
-        priority = parse_priority(fields["priority"]) if fields.get("priority") is not None else 3
+        if fields.get("priority") is not None:
+            priority = parse_priority(fields["priority"])
+        else:
+            priority = (2 if blocker else 4) if bug else 3
     except SystemExit as e:
         return None, str(e)
     input_obj["priority"] = priority
+
+    if fields.get("backlog") or (bug and not blocker):
+        horizon = "backlog"
+    else:
+        horizon = "milestone" if fields.get("milestone") else "now"
+    applied = [f"horizon {horizon}"]
+    policy = load_policy(cfg)
+    if bug and fields.get("priority") is None:
+        applied.append(f"bug → priority {PRIORITY_MAP[priority].lower()}")
 
     if fields.get("parent"):
         parent_issue = resolve_issue(api_key, team_id, fields["parent"])
@@ -3973,39 +4191,95 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
 
     # A named --project/--milestone that doesn't resolve is a hard error: creating
     # the issue without it would silently ignore what the user asked for (RUSH-1496).
-    project_id = None
-    if fields.get("project"):
+    # With no --project the cwd's `agents projects` binding decides, as it does
+    # for `linear tasks`; with neither, the issue would be nobody's deliverable.
+    project_name = fields.get("project")
+    if project_name:
         try:
-            project_id = resolve_project_id(api_key, team_id, fields["project"], strict=True)
+            project_id = resolve_project_id(api_key, team_id, project_name, strict=True)
         except LookupError as e:
             return None, str(e)
-        input_obj["projectId"] = project_id
+    else:
+        if "cwd_project" not in ctx:
+            ctx["cwd_project"] = resolve_cwd_project()
+        cwd_id, cwd_name = ctx["cwd_project"]
+        project_id = (resolve_auto_project_id(api_key, team_id, cwd_id or "")
+                      or resolve_auto_project_id(api_key, team_id, cwd_name or ""))
+        if not project_id:
+            return None, missing_project_error(title, list_team_projects(api_key, team_id),
+                                               multiline=verbose,
+                                               backlog_milestone=policy["backlogMilestone"])
+        project_name = cwd_name or project_id
+        applied.append(f"project: {project_name} (cwd)")
+    input_obj["projectId"] = project_id
 
     skip_milestone = bool(fields.get("skip_milestone"))
     milestone = fields.get("milestone")
     if milestone and skip_milestone:
         return None, conflicting_milestone_flags_error(milestone, multiline=verbose)
 
+    if "calendar" not in ctx:
+        ctx["calendar"] = team_calendar(api_key, team_id)
+    cal = ctx["calendar"]
+    now = datetime.now(cal["tz"])
+    today = now.date()
+
+    catalog = list_milestone_catalog(api_key, team_id, project_id)
+    project_name = _catalog_heading(catalog, project_name) or project_name
+    chosen = None
     if milestone:
-        try:
-            mid = resolve_milestone_id(api_key, team_id, fields["milestone"], project_id, strict=True)
-        except LookupError as e:
-            return None, str(e)
-        input_obj["projectMilestoneId"] = mid
+        if len(milestone) == 36 and milestone.count("-") == 4:
+            chosen = next((m for m in catalog if m.get("id") == milestone), None)
+            if not chosen:
+                return None, f"milestone '{milestone}' is not in project {project_name!r}."
+        else:
+            try:
+                chosen = _select_named_node(catalog, milestone, "milestone",
+                                            strict=True, suggest=True)
+            except LookupError as e:
+                return None, str(e)
+    elif skip_milestone:
+        warn("--skip-milestone: this issue lands in the project's \"No milestone\" bucket.")
+    elif horizon == "backlog":
+        want = policy["backlogMilestone"]
+        chosen = next((m for m in catalog
+                       if (m.get("name") or "").lower() == want.lower()), None)
+        if not chosen:
+            return None, (f"--backlog needs a future milestone, and the backlog milestone "
+                          f"{want!r} (policy.backlogMilestone) is not in project "
+                          f"{project_name!r}. Pass --milestone <a future milestone>.")
+        applied.append(f"milestone: {chosen['name']} (backlog)")
+    else:
+        chosen = next_open_milestone(catalog, policy["backlogMilestone"])
+        if not chosen:
+            return None, missing_milestone_error(title, catalog, project_name=project_name,
+                                                 multiline=verbose,
+                                                 backlog_milestone=policy["backlogMilestone"])
+        applied.append(f"milestone: {chosen['name']} (next for {project_name})")
+    if horizon == "backlog" and chosen:
+        target = (chosen.get("targetDate") or "")[:10]
+        if not target or target <= today.isoformat():
+            return None, (f"--backlog needs a future milestone; {chosen.get('name')!r} "
+                          f"targets {target or 'no date'}. Pass --milestone <a future milestone>.")
+    if chosen:
+        input_obj["projectMilestoneId"] = chosen["id"]
 
-    # An issue with no milestone is nobody's deliverable — it sits in the
-    # project's "No milestone" bucket. Refuse by default; --skip-milestone
-    # is the deliberate escape hatch (mirrors --force for unowned).
-    if "projectMilestoneId" not in input_obj and not skip_milestone:
-        catalog = list_milestone_catalog(api_key, team_id, project_id)
-        heading = fields.get("project") if (project_id or fields.get("project")) else None
-        return None, missing_milestone_error(
-            title, catalog, project_name=heading, multiline=verbose,
-        )
+    try:
+        plan = plan_horizon(horizon, priority, policy, today, now,
+                            cycle_days(cal["cycle"], cal["tz"]), chosen, due_explicit)
+    except ValueError as e:
+        return None, f"{e} (set in {CONFIG_PATH})"
+    if plan["due"]:
+        input_obj["dueDate"] = plan["due"]
+    if due_explicit is None:
+        due_note = (f"{plan['why']} → due {plan['due']}" if plan["due"] else "no due date")
+        if plan["remind"]:
+            due_note += f", reminder {plan['remind'].astimezone(cal['tz']):%H:%M}"
+            ctx["remindAt"] = (plan["remind"].astimezone(timezone.utc)
+                               .isoformat(timespec="seconds").replace("+00:00", "Z"))
+        applied.insert(1, due_note)
 
-    desired_status = fields.get("status")
-    if not desired_status:
-        desired_status = "Backlog" if priority == 4 else "Todo"
+    desired_status = fields.get("status") or ("Backlog" if horizon == "backlog" else "Todo")
     states = get_states(api_key, team_id, cfg)
     sid = resolve_state_id(states, desired_status)
     if sid:
@@ -4013,13 +4287,21 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     else:
         warn(f"state '{desired_status}' not found; letting Linear pick the default.")
 
-    cycle_choice = (fields.get("cycle") or "active").lower()
-    if cycle_choice in ("active", "next"):
-        cid = get_cycle_id(api_key, team_id, cycle_choice)
+    cycle_choice = (fields.get("cycle") or plan["cycle"]).lower()
+    if cycle_choice == "active":
+        cid = (cal["cycle"] or {}).get("id")
         if cid:
             input_obj["cycleId"] = cid
         else:
-            warn(f"no {cycle_choice} cycle found; creating without cycle.")
+            warn("no active cycle found; creating without cycle.")
+    elif cycle_choice == "next":
+        cid = get_cycle_id(api_key, team_id, "next")
+        if cid:
+            input_obj["cycleId"] = cid
+        else:
+            warn("no next cycle found; creating without cycle.")
+    if not fields.get("cycle"):
+        applied.append("cycle: " + (cycle_label(cal["cycle"]) if "cycleId" in input_obj else "none"))
 
     assign_arg = fields.get("assign")
     unassigned_reason = ""
@@ -4048,7 +4330,12 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     if "assigneeId" not in input_obj and not fields.get("force"):
         return None, unassigned_error(title, unassigned_reason, multiline=verbose)
 
+    # The configured agent identity is who files the work, so it is the
+    # delegate; the API-key owner (a human) stays the assignee.
     delegate_arg = fields.get("delegate")
+    if delegate_arg is None and cfg.get("agent"):
+        delegate_arg = cfg["agent"]
+        applied.append(f"delegate: {delegate_arg}")
     if delegate_arg and delegate_arg.lower() != "none":
         did = resolve_agent_id(api_key, cfg, delegate_arg)
         if did:
@@ -4060,6 +4347,9 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     label_names = fields.get("label") or []
     if isinstance(label_names, str):
         label_names = [label_names]
+    label_names = list(label_names)
+    if bug and not any(l.lower() == "bug" for l in label_names):
+        label_names.append("Bug")
     if label_names:
         label_map = {l["name"]: l["id"] for l in list_team_labels(api_key, team_id)}
         label_ids = []
@@ -4071,6 +4361,7 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
         if label_ids:
             input_obj["labelIds"] = label_ids
 
+    ctx["applied"] = " · ".join(applied)
     return input_obj, None
 
 
@@ -4116,12 +4407,18 @@ def cmd_create(args, cfg, api_key, team_id):
         "label": args.label or [],
         "image": args.image or [],
         "force": args.force,
+        "backlog": args.backlog,
+        "bug": args.bug,
+        "blocker": args.blocker,
     }
     remind_at = parse_remind_at(args.remind_at) if getattr(args, "remind_at", None) else None
-    input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True)
+    ctx: dict = {}
+    input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=True, ctx=ctx)
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
+    remind_at = remind_at or ctx["remindAt"]
+    print(ctx["applied"], file=sys.stderr)
     advise_similar(api_key, team_id, cfg, input_obj.get("title") or "",
                    input_obj.get("description"))
     issue, err = _send_issue_create(api_key, input_obj)
@@ -4161,6 +4458,7 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
 
     ok_count = 0
     err_count = 0
+    ctx: dict = {}
     for raw in stream:
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -4180,7 +4478,7 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
             fields.get("title")
             or (fields.get("description", "")[:60] if fields.get("description") else "<no title>")
         )
-        input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False)
+        input_obj, err = _build_create_input(api_key, team_id, cfg, fields, verbose=False, ctx=ctx)
         if err:
             print(f"ERROR\t-\t{title_hint}\t{err}")
             err_count += 1
@@ -4191,6 +4489,9 @@ def _bulk_create(path: str, cfg, api_key, team_id, force: bool = False,
             err_count += 1
             continue
         print(f"OK\t{issue['identifier']}\t{tsv_field(issue['title'])}")
+        print(f"{issue['identifier']}: {ctx['applied']}", file=sys.stderr)
+        if ctx["remindAt"] and not set_issue_reminder(api_key, issue["id"], ctx["remindAt"]):
+            print(f"{issue['identifier']}: reminder could not be set", file=sys.stderr)
         ok_count += 1
 
     if path != "-":
@@ -5049,6 +5350,11 @@ def _milestone_set_target(args, api_key, team_id):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     target = parse_timeless_date(args.date, "target date")  # None when 'none'
+    before = gql(api_key, "query($id: String!) { projectMilestone(id: $id) { targetDate } }",
+                 {"id": mid})
+    if check_errors(before):
+        sys.exit(1)
+    old_target = ((before.get("data") or {}).get("projectMilestone") or {}).get("targetDate")
     data = gql(api_key, """
         mutation($id: String!, $input: ProjectMilestoneUpdateInput!) {
             projectMilestoneUpdate(id: $id, input: $input) {
@@ -5065,6 +5371,40 @@ def _milestone_set_target(args, api_key, team_id):
         sys.exit(1)
     m = result["projectMilestone"]
     print(f"Set '{m['name']}' target date -> {m.get('targetDate') or 'cleared'}.")
+    if old_target and target and old_target != target:
+        moved, failed = cascade_due_dates(api_key, mid, old_target, target)
+        print(f"Moved {moved} open issue(s) due {old_target} -> {target}."
+              + (f" {len(failed)} failed: {', '.join(failed)}" if failed else ""))
+        if failed:
+            sys.exit(1)
+
+
+def cascade_due_dates(api_key: str, milestone_id: str, old: str, new: str
+                      ) -> tuple[int, list[str]]:
+    """Issues in the milestone that were due on its old target were dated by
+    the milestone horizon, so a retarget carries them along. Open issues only:
+    a done issue's due date is history. Returns (moved, failed identifiers)."""
+    query = """query($mid: ID!, $due: TimelessDateOrDuration!, $cursor: String) {
+        issues(first: 100, after: $cursor, filter: {
+            projectMilestone: { id: { eq: $mid } }
+            dueDate: { eq: $due }
+            state: { type: { nin: ["completed", "canceled"] } }
+        }) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id identifier }
+        }
+    }"""
+    nodes = paginate_connection(api_key, query, ["issues"], {"mid": milestone_id, "due": old}) or []
+    moved, failed = 0, []
+    for n in nodes:
+        data = gql(api_key, """mutation($id: String!, $due: TimelessDate) {
+            issueUpdate(id: $id, input: { dueDate: $due }) { success }
+        }""", {"id": n["id"], "due": new})
+        if check_errors(data) or not ((data.get("data") or {}).get("issueUpdate") or {}).get("success"):
+            failed.append(n["identifier"])
+        else:
+            moved += 1
+    return moved, failed
 
 
 def _milestone_delete(args, api_key, team_id):
@@ -5374,6 +5714,397 @@ def _initiative_archive(args, api_key, team_id):
         print("Initiative archive failed.", file=sys.stderr)
         sys.exit(1)
     print(f"Archived initiative '{args.initiative}'.")
+
+
+# ---------------------------------------------------------------------------
+# goals: company quarter (initiative) -> week (cycle name) -> my week / my day
+# ---------------------------------------------------------------------------
+
+WEEKLY_GOAL_LABEL = "Weekly goal"
+DAILY_GOAL_LABEL = "Daily goal"
+_UNNAMED_CYCLE = re.compile(r"^Cycle \d+$")
+# Matches nothing: stands in for the active cycle's id when there is none, so
+# the goals query keeps one shape.
+_NO_CYCLE_ID = "00000000-0000-0000-0000-000000000000"
+
+# Sized to stay under Linear's complexity cap (5 x 10 x 50).
+_GOALS_COMPANY_QUERY = """{
+    viewer { id name avatarUrl }
+    organization { logoUrl }
+    initiatives(first: 5, filter: { status: { eq: "Active" } }) {
+        nodes {
+            id name url startedAt createdAt targetDate
+            projects(first: 10) {
+                nodes { id name projectMilestones(first: 50) { nodes { id name targetDate progress } } }
+            }
+        }
+    }
+}"""
+
+_GOAL_ISSUES_QUERY = """query($teamId: ID!, $cycleId: ID!, $today: TimelessDateOrDuration!,
+                             $cursor: String) {
+    issues(first: 25, after: $cursor, filter: {
+        team: { id: { eq: $teamId } }
+        state: { type: { neq: "canceled" } }
+        or: [
+            { labels: { some: { name: { eqIgnoreCase: "%s" } } }, cycle: { id: { eq: $cycleId } } }
+            { labels: { some: { name: { eqIgnoreCase: "%s" } } }, dueDate: { eq: $today } }
+        ]
+    }) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+            id identifier title url dueDate createdAt
+            assignee { id } cycle { id } project { id }
+            labels(first: 10) { nodes { name } }
+            projectMilestone { id name targetDate }
+            children(first: 50) { nodes { id identifier title url state { type } } }
+        }
+    }
+}""" % (WEEKLY_GOAL_LABEL, DAILY_GOAL_LABEL)
+
+
+def fetch_goal_issues(api_key: str, team_id: str, cycle_id: str | None,
+                      today: date) -> list[dict]:
+    """Every Weekly goal in the active cycle and Daily goal due today, all people."""
+    return paginate_connection(api_key, _GOAL_ISSUES_QUERY, ["issues"], {
+        "teamId": team_id, "cycleId": cycle_id or _NO_CYCLE_ID, "today": today.isoformat(),
+    }) or []
+
+
+def goals_state(api_key: str, team_id: str) -> dict:
+    """Everything `linear goals` reads, fetched once: four requests."""
+    data = gql(api_key, _GOALS_COMPANY_QUERY)
+    if check_errors(data):
+        sys.exit(1)
+    d = data.get("data") or {}
+    active = (d.get("initiatives") or {}).get("nodes") or []
+    # Several Active initiatives: the company goal is the one due first.
+    active.sort(key=lambda i: i.get("targetDate") or "9999-12-31")
+    cal = team_calendar(api_key, team_id)
+    today = datetime.now(cal["tz"]).date()
+    return {
+        "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "initiative": active[0] if active else None,
+        "logoUrl": (d.get("organization") or {}).get("logoUrl"),
+        "viewer": d.get("viewer") or {},
+        "users": list_workspace_users(api_key),
+        "cycle": cal["cycle"],
+        "tz": cal["tz"],
+        "today": today,
+        "nodes": fetch_goal_issues(api_key, team_id, (cal["cycle"] or {}).get("id"), today),
+    }
+
+
+def _has_label(node: dict, name: str) -> bool:
+    return any((l.get("name") or "").lower() == name.lower()
+               for l in (node.get("labels") or {}).get("nodes") or [])
+
+
+def pick_goals(nodes: list[dict], user_id: str | None, cycle_id: str | None,
+               today: date) -> tuple[dict | None, dict | None]:
+    """(Weekly goal, Daily goal) for one person; the newest wins a duplicate."""
+    mine = sorted((n for n in nodes if (n.get("assignee") or {}).get("id") == user_id),
+                  key=lambda n: n.get("createdAt") or "", reverse=True)
+    week = next((n for n in mine if _has_label(n, WEEKLY_GOAL_LABEL) and cycle_id
+                 and (n.get("cycle") or {}).get("id") == cycle_id), None)
+    day = next((n for n in mine if _has_label(n, DAILY_GOAL_LABEL)
+                and n.get("dueDate") == today.isoformat()), None)
+    return week, day
+
+
+def goal_object(node: dict | None) -> dict | None:
+    """The contract's Goal: the issue plus its sub-issues as to-dos."""
+    if not node:
+        return None
+    kids = [c for c in (node.get("children") or {}).get("nodes") or []
+            if (c.get("state") or {}).get("type") != "canceled"]
+    todos = [{"id": c["id"], "identifier": c["identifier"], "title": c["title"],
+              "url": c.get("url"), "completed": (c.get("state") or {}).get("type") == "completed"}
+             for c in kids]
+    ms = node.get("projectMilestone")
+    return {
+        "id": node["id"], "identifier": node["identifier"], "title": node["title"],
+        "url": node.get("url"), "dueDate": node.get("dueDate"),
+        "milestone": {"name": ms.get("name"), "targetDate": ms.get("targetDate")} if ms else None,
+        "done": sum(1 for t in todos if t["completed"]), "total": len(todos), "todos": todos,
+    }
+
+
+def initiative_milestones(initiative: dict | None, exclude: str | None = None) -> list[dict]:
+    """The quarter's key results: open milestones of the initiative's projects
+    due by its target date, never the parking milestone. Each carries its
+    project as {id, name} so a goal can be filed into it."""
+    if not initiative:
+        return []
+    until = initiative.get("targetDate") or "9999-12-31"
+    skip = (exclude or "").lower()
+    out = []
+    for p in (initiative.get("projects") or {}).get("nodes") or []:
+        for m in (p.get("projectMilestones") or {}).get("nodes") or []:
+            tgt = m.get("targetDate")
+            if (tgt and tgt <= until and (m.get("progress") or 0) < 100
+                    and (m.get("name") or "").lower() != skip):
+                out.append({**m, "project": {"id": p["id"], "name": p["name"]}})
+    return sorted(out, key=lambda m: (m["targetDate"], m.get("name") or ""))
+
+
+def _person(u: dict) -> dict:
+    return {"id": u.get("id"), "name": u.get("name"), "avatarUrl": u.get("avatarUrl")}
+
+
+def build_goals(state: dict, backlog_milestone: str | None = None) -> dict:
+    """The `linear goals --json` document from goals_state(). Pure."""
+    ini = state.get("initiative")
+    cycle = state.get("cycle")
+    cid = (cycle or {}).get("id")
+    today = state["today"]
+    viewer = state.get("viewer") or {}
+    name = ((cycle or {}).get("name") or "").strip()
+
+    def goals_for(uid):
+        week, day = pick_goals(state.get("nodes") or [], uid, cid, today)
+        return goal_object(week), goal_object(day)
+
+    my_week, my_day = goals_for(viewer.get("id"))
+    team = []
+    for u in sorted(state.get("users") or [], key=lambda u: (u.get("name") or "").lower()):
+        if u.get("app") or u.get("guest") or u.get("id") == viewer.get("id"):
+            continue
+        w, dg = goals_for(u.get("id"))
+        team.append({"user": _person(u), "weekGoal": w, "dayGoal": dg})
+    return {
+        "generatedAt": state.get("generatedAt"),
+        "company": {
+            "initiative": {
+                "id": ini["id"], "name": ini["name"], "url": ini.get("url"),
+                "startDate": (ini.get("startedAt") or ini.get("createdAt") or "")[:10] or None,
+                "targetDate": ini.get("targetDate"),
+            } if ini else None,
+            "logoUrl": state.get("logoUrl"),
+            "milestones": [
+                {"id": m["id"], "name": m["name"], "project": m["project"]["name"],
+                 "targetDate": m.get("targetDate"), "progress": round(m.get("progress") or 0)}
+                for m in initiative_milestones(ini, backlog_milestone)
+            ],
+        },
+        "week": {
+            "cycle": {"id": cycle["id"], "number": cycle.get("number"), "name": cycle.get("name"),
+                      "startsAt": cycle.get("startsAt"), "endsAt": cycle.get("endsAt")} if cycle else None,
+            "goal": name if name and not _UNNAMED_CYCLE.match(name) else None,
+        },
+        "me": {"user": _person(viewer), "weekGoal": my_week, "dayGoal": my_day},
+        "team": team,
+    }
+
+
+def _goal_line(g: dict | None, level: str) -> str:
+    if not g:
+        return f'not set: linear goals set {level} "<text>"'
+    ms = f" · {g['milestone']['name']}" if g.get("milestone") else ""
+    return f"{g['identifier']} {g['title']} ({g['done']}/{g['total']}) · due {g['dueDate']}{ms}"
+
+
+def print_goals(doc: dict, today: date, tz: tzinfo) -> None:
+    ini = doc["company"]["initiative"]
+    if ini:
+        left = ""
+        if ini.get("targetDate"):
+            days = (date.fromisoformat(ini["targetDate"]) - today).days
+            left = f" · {days} days left (target {ini['targetDate']})"
+        print(f"Company   {ini['name']}{left}")
+    else:
+        print("Company   no Active initiative")
+    for m in doc["company"]["milestones"]:
+        print(f"            {m['name']}  {m['targetDate']}  {m['progress']}%")
+    cyc = doc["week"]["cycle"]
+    if cyc:
+        span = cycle_days(cyc, tz)
+        ends = f" · ends {span[1]} ({(span[1] - today).days} days)" if span else ""
+        goal = doc["week"]["goal"] or 'no week goal set: linear goals set company-week "<text>"'
+        print(f"Week      {goal} · Cycle {cyc.get('number')}{ends}")
+    else:
+        print("Week      no active cycle")
+    print(f"My week   {_goal_line(doc['me']['weekGoal'], 'week')}")
+    day = doc["me"]["dayGoal"]
+    print(f"My day    {_goal_line(day, 'day')}")
+    for t in (day or {}).get("todos") or []:
+        print(f"            [{'x' if t['completed'] else ' '}] {t['identifier']} {t['title']}")
+    if doc["team"]:
+        print("Team")
+        for row in doc["team"]:
+            dg = row["dayGoal"]
+            day_txt = f"{dg['identifier']} {dg['title']} ({dg['done']}/{dg['total']})" if dg else "no day goal"
+            wg = row["weekGoal"]
+            week_txt = f" · week: {wg['title']}" if wg else ""
+            print(f"  {row['user']['name']}: {day_txt}{week_txt}")
+
+
+def _die(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def _goal_milestone(api_key: str, team_id: str, cfg: dict, state: dict,
+                    value: str | None) -> dict:
+    """--milestone resolved across the team, else the policy default: the
+    company's next open key-result milestone. Returns a catalog node with
+    `project: {id, name}`."""
+    if value:
+        try:
+            return _select_named_node(list_milestone_catalog(api_key, team_id), value,
+                                      "milestone", strict=True, suggest=True)
+        except LookupError as e:
+            _die(str(e))
+    m = next_open_milestone(initiative_milestones(state["initiative"]),
+                            load_policy(cfg)["backlogMilestone"])
+    if not m:
+        _die("No open milestone in the Active initiative's projects to file the goal in. "
+             "Pass --milestone <name>.")
+    return m
+
+
+def _goal_label_id(api_key: str, team_id: str, name: str) -> str:
+    for l in list_team_labels(api_key, team_id):
+        if (l.get("name") or "").lower() == name.lower():
+            return l["id"]
+    _die(f"label {name!r} not found. Goals are issues with that label; ask the owner to add it.")
+
+
+def _issue_write(api_key: str, issue_id: str | None, input_obj: dict) -> dict:
+    if issue_id:
+        data = gql(api_key, """mutation($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) { success issue { id identifier } }
+        }""", {"id": issue_id, "input": input_obj})
+        key = "issueUpdate"
+    else:
+        data = gql(api_key, """mutation($input: IssueCreateInput!) {
+            issueCreate(input: $input) { success issue { id identifier } }
+        }""", {"input": input_obj})
+        key = "issueCreate"
+    if check_errors(data):
+        sys.exit(1)
+    result = (data.get("data") or {}).get(key) or {}
+    if not result.get("success"):
+        _die(f"{key} failed.")
+    return result["issue"]
+
+
+def _emit_goal(args, api_key: str, team_id: str, state: dict, level: str, verb: str) -> None:
+    """Re-read the goals after a write and print the resulting Goal."""
+    cid = (state["cycle"] or {}).get("id")
+    nodes = fetch_goal_issues(api_key, team_id, cid, state["today"])
+    week, day = pick_goals(nodes, state["viewer"].get("id"), cid, state["today"])
+    goal = goal_object(week if level == "week" else day)
+    if getattr(args, "json", False):
+        print(json.dumps(goal, indent=2))
+        return
+    print(f"{verb}: {_goal_line(goal, level)}")
+    for t in (goal or {}).get("todos") or [] if level == "day" else []:
+        print(f"  [{'x' if t['completed'] else ' '}] {t['identifier']} {t['title']}")
+
+
+def _goals_set(args, cfg, api_key, team_id):
+    if args.level == "company-week":
+        cal = team_calendar(api_key, team_id)
+        if not cal["cycle"]:
+            _die("No active cycle to name. The company week goal is the active cycle's name.")
+        data = gql(api_key, """mutation($id: String!, $name: String!) {
+            cycleUpdate(id: $id, input: { name: $name }) {
+                success cycle { id number name startsAt endsAt }
+            }
+        }""", {"id": cal["cycle"]["id"], "name": args.text})
+        if check_errors(data):
+            sys.exit(1)
+        c = ((data.get("data") or {}).get("cycleUpdate") or {}).get("cycle")
+        if not c:
+            _die("cycleUpdate failed.")
+        week = build_goals({"cycle": c, "today": datetime.now(cal["tz"]).date()})["week"]
+        if getattr(args, "json", False):
+            print(json.dumps(week, indent=2))
+        else:
+            print(f"Week goal: {week['goal'] or 'cleared'} (cycle {c.get('number')})")
+        return
+
+    state = goals_state(api_key, team_id)
+    viewer_id = state["viewer"].get("id")
+    cycle = state["cycle"]
+    week, day = pick_goals(state["nodes"], viewer_id, (cycle or {}).get("id"), state["today"])
+    existing = week if args.level == "week" else day
+    input_obj: dict = {"title": args.text}
+    if args.milestone or not existing:
+        m = _goal_milestone(api_key, team_id, cfg, state, args.milestone)
+        input_obj.update(projectId=m["project"]["id"], projectMilestoneId=m["id"])
+    if args.level == "day" and week:
+        input_obj["parentId"] = week["id"]
+    if not existing:
+        if args.level == "week":
+            span = cycle_days(cycle, state["tz"])
+            if not span:
+                _die("No active cycle. A Weekly goal belongs to the active cycle and is due at its end.")
+            due = span[1]
+        else:
+            due = state["today"]
+        label = WEEKLY_GOAL_LABEL if args.level == "week" else DAILY_GOAL_LABEL
+        input_obj.update(teamId=team_id, assigneeId=viewer_id, dueDate=due.isoformat(),
+                         labelIds=[_goal_label_id(api_key, team_id, label)])
+        if cycle:
+            input_obj["cycleId"] = cycle["id"]
+        sid = resolve_state_id(get_states(api_key, team_id, cfg), "Todo")
+        if sid:
+            input_obj["stateId"] = sid
+    _issue_write(api_key, (existing or {}).get("id"), input_obj)
+    _emit_goal(args, api_key, team_id, state, args.level,
+               "Updated" if existing else "Created")
+
+
+def _goals_todo(args, cfg, api_key, team_id):
+    if bool(args.text) == bool(args.done):
+        _die('Pass a to-do text, or --done <ID>: linear goals todo "<text>" | linear goals todo --done PHNX-12')
+    state = goals_state(api_key, team_id)
+    cycle = state["cycle"]
+    _, day = pick_goals(state["nodes"], state["viewer"].get("id"),
+                        (cycle or {}).get("id"), state["today"])
+    if args.done:
+        issue = resolve_issue(api_key, team_id, args.done)
+        if not issue:
+            _die(f"{args.done} not found.")
+        sid = resolve_state_id(get_states(api_key, team_id, cfg), "Done")
+        if not sid:
+            _die("No 'Done' workflow state on this team.")
+        _issue_write(api_key, issue["id"], {"stateId": sid})
+        _emit_goal(args, api_key, team_id, state, "day", f"Done {issue['identifier']}")
+        return
+    if not day:
+        _die("No Daily goal for today, so there is nothing to add a to-do to. "
+             'Set one first: linear goals set day "<text>"')
+    input_obj = {"teamId": team_id, "title": args.text, "parentId": day["id"],
+                 "assigneeId": state["viewer"].get("id"), "dueDate": state["today"].isoformat()}
+    if (day.get("project") or {}).get("id"):
+        input_obj["projectId"] = day["project"]["id"]
+    if (day.get("projectMilestone") or {}).get("id"):
+        input_obj["projectMilestoneId"] = day["projectMilestone"]["id"]
+    if cycle:
+        input_obj["cycleId"] = cycle["id"]
+    sid = resolve_state_id(get_states(api_key, team_id, cfg), "Todo")
+    if sid:
+        input_obj["stateId"] = sid
+    created = _issue_write(api_key, None, input_obj)
+    _emit_goal(args, api_key, team_id, state, "day", f"Added {created['identifier']}")
+
+
+def cmd_goals(args, cfg, api_key, team_id):
+    """Company quarter, week and day goals; `set` and `todo` write yours."""
+    action = getattr(args, "goals_action", None)
+    if action == "set":
+        return _goals_set(args, cfg, api_key, team_id)
+    if action == "todo":
+        return _goals_todo(args, cfg, api_key, team_id)
+    state = goals_state(api_key, team_id)
+    doc = build_goals(state, load_policy(cfg)["backlogMilestone"])
+    if getattr(args, "json", False):
+        print(json.dumps(doc, indent=2))
+        return
+    print_goals(doc, state["today"], state["tz"])
 
 
 def cmd_labels(args, cfg, api_key, team_id):
@@ -6139,12 +6870,19 @@ def main():
                           help="Read description from a file path, or '-' for stdin")
     p_create.add_argument("--image", action="append",
                           help="Image file path to upload and embed (repeatable)")
-    p_create.add_argument("--status", help="Initial status (default: Todo)")
-    p_create.add_argument("--cycle", default="active",
+    p_create.add_argument("--status", help="Initial status (default: Todo; Backlog with --backlog)")
+    p_create.add_argument("--cycle", default=None,
                           choices=["active", "next", "none"],
-                          help="Cycle assignment (default: active)")
+                          help="Cycle assignment (default: set by the horizon)")
     p_create.add_argument("--due-date", dest="due_date",
-                          help="Due date (YYYY-MM-DD)")
+                          help="Due date (YYYY-MM-DD). Always wins over the horizon's date.")
+    p_create.add_argument("--backlog", action="store_true",
+                          help="Horizon backlog: Backlog state, no cycle, no due date, a "
+                               "future milestone (default policy.backlogMilestone)")
+    p_create.add_argument("--bug", action="store_true",
+                          help="Label Bug. Alone it implies --backlog and priority low")
+    p_create.add_argument("--blocker", action="store_true",
+                          help="With --bug: horizon now, priority high, the next milestone")
     p_create.add_argument("--remind-at", dest="remind_at",
                           help="Remind you at an exact time: YYYY-MM-DDTHH:MM (local) or with a zone")
     p_create.add_argument("--assign", default=None,
@@ -6157,13 +6895,13 @@ def main():
     p_create.add_argument("--parent", default=None,
                           help="Parent issue identifier for sub-issues (e.g. ANT-42)")
     p_create.add_argument("--project", default=None,
-                          help="Project name or ID")
+                          help="Project name or ID (default: the cwd's `agents projects` binding)")
     p_create.add_argument("--milestone", default=None,
-                          help="Project milestone name (resolved within --project if set). "
-                               "Required unless --skip-milestone.")
+                          help="Project milestone name. Horizon milestone: due on its "
+                               "target date. Default: the project's next open milestone.")
     p_create.add_argument("--skip-milestone", action="store_true",
-                          help="Create even with no milestone. Without it, an issue that "
-                               "would land in the project's \"No milestone\" bucket is refused.")
+                          help="Escape hatch: create with no milestone (warns). The issue "
+                               "lands in the project's \"No milestone\" bucket.")
     p_create.add_argument("--force", action="store_true",
                           help="Create even with no assignee. Without it, an issue that "
                                "would land unowned is refused — every ticket needs an owner.")
@@ -6297,6 +7035,24 @@ def main():
     ini_archive = init_sub.add_parser("archive", help="Archive an initiative")
     ini_archive.add_argument("initiative", help="Initiative name or id")
 
+    # goals (read: company / week / my week / my day / team; write: set, todo)
+    p_goals = sub.add_parser("goals",
+                             help="Company, week and day goals; set yours and add to-dos")
+    p_goals.add_argument("--json", action="store_true", help="JSON output")
+    goals_sub = p_goals.add_subparsers(dest="goals_action")
+    g_set = goals_sub.add_parser("set", help="Set your week or day goal, or the company week goal")
+    g_set.add_argument("level", choices=["week", "day", "company-week"])
+    g_set.add_argument("text", help="The goal")
+    g_set.add_argument("--milestone", default=None,
+                       help="Milestone it moves (default: the company's next open milestone)")
+    g_set.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="Print the resulting goal as JSON")
+    g_todo = goals_sub.add_parser("todo", help="Add a to-do under today's Daily goal, or finish one")
+    g_todo.add_argument("text", nargs="?", default=None, help="The to-do")
+    g_todo.add_argument("--done", metavar="ID", default=None, help="Mark this to-do done")
+    g_todo.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="Print today's goal as JSON")
+
     # labels (list / create / update / delete)
     p_labels = sub.add_parser("labels", help="List, create, update, or delete labels")
     p_labels.add_argument("--json", action="store_true", help="JSON output")
@@ -6407,6 +7163,8 @@ def main():
         cmd_milestones(args, cfg, api_key, team_id)
     elif args.command == "initiatives":
         cmd_initiatives(args, cfg, api_key, team_id)
+    elif args.command == "goals":
+        cmd_goals(args, cfg, api_key, team_id)
     elif args.command == "labels":
         cmd_labels(args, cfg, api_key, team_id)
     elif args.command == "users":

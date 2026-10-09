@@ -25,7 +25,7 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -331,7 +331,60 @@ class NameResolutionTest(unittest.TestCase):
             linear_cli.list_team_labels = original
 
 
-class CreateImageTest(unittest.TestCase):
+class _CreateWorld:
+    """A team for `_build_create_input`: project Rush bound to the cwd, cycle
+    32 running from two days ago to five days ahead, and Rush's milestones.
+    Each test can replace one piece (e.g. `self.cwd = (None, None)`)."""
+
+    TODAY = datetime.now(timezone.utc).date()
+    CYCLE = {
+        "id": "cyc-32", "number": 32, "name": "Launch gate green",
+        "startsAt": f"{TODAY - timedelta(days=2)}T00:00:00.000Z",
+        "endsAt": f"{TODAY + timedelta(days=5)}T00:00:00.000Z",
+    }
+    MILESTONES = [
+        {"id": "m-next", "name": "0.1.0 — Interactive cloud run", "progress": 92,
+         "targetDate": str(TODAY + timedelta(days=8)), "sortOrder": 1,
+         "project": {"id": "p1", "name": "Rush"}},
+        {"id": "m-charge", "name": "Ready to charge", "progress": 0,
+         "targetDate": str(TODAY + timedelta(days=21)), "sortOrder": 2,
+         "project": {"id": "p1", "name": "Rush"}},
+        {"id": "m-done", "name": "0.1.1 — Headless", "progress": 100,
+         "targetDate": str(TODAY - timedelta(days=30)), "sortOrder": 0,
+         "project": {"id": "p1", "name": "Rush"}},
+        {"id": "m-q1", "name": "Q1 2027", "progress": 0,
+         "targetDate": str(TODAY + timedelta(days=170)), "sortOrder": 9,
+         "project": {"id": "p1", "name": "Rush"}},
+    ]
+    _PATCHED = ("resolve_cwd_project", "resolve_auto_project_id", "resolve_project_id",
+                "list_team_projects", "list_milestone_catalog", "team_calendar",
+                "get_cycle_id", "list_team_labels", "get_agents")
+
+    def setUp(self):
+        super().setUp()
+        self._world_orig = {n: getattr(linear_cli, n) for n in self._PATCHED}
+        self.cwd = ("p1", "Rush")
+        self.catalog = [dict(m) for m in self.MILESTONES]
+        self.cycle = dict(self.CYCLE)
+        linear_cli.resolve_cwd_project = lambda *a, **k: self.cwd
+        linear_cli.resolve_auto_project_id = (
+            lambda _a, _t, v: "p1" if v in ("p1", "Rush") else None)
+        linear_cli.resolve_project_id = lambda *a, **k: "p1"
+        linear_cli.list_team_projects = lambda *a, **k: [{"id": "p1", "name": "Rush"},
+                                                         {"id": "p2", "name": "AGI"}]
+        linear_cli.list_milestone_catalog = lambda *a, **k: list(self.catalog)
+        linear_cli.team_calendar = lambda *a, **k: {"tz": timezone.utc, "cycle": self.cycle}
+        linear_cli.get_cycle_id = lambda *a, **k: None
+        linear_cli.list_team_labels = lambda *a, **k: [{"id": "bug-id", "name": "Bug"}]
+        linear_cli.get_agents = lambda *a, **k: [{"id": "claude-id", "name": "Claude"}]
+
+    def tearDown(self):
+        for n, f in self._world_orig.items():
+            setattr(linear_cli, n, f)
+        super().tearDown()
+
+
+class CreateImageTest(_CreateWorld, unittest.TestCase):
     def test_images_uploaded_and_embedded_in_description(self):
         cfg = {
             "states": {"Todo": {"id": "state-id", "type": "unstarted"}},
@@ -456,7 +509,7 @@ class CreateImageTest(unittest.TestCase):
             linear_cli.get_cycle_id = original_get_cycle_id
 
 
-class CreateRequiresOwnerTest(unittest.TestCase):
+class CreateRequiresOwnerTest(_CreateWorld, unittest.TestCase):
     """An issue with no assignee is nobody's job. `create` refuses to make one
     unless the caller says --force. See the "No assignee" bucket on the board."""
 
@@ -466,17 +519,16 @@ class CreateRequiresOwnerTest(unittest.TestCase):
     }
 
     def setUp(self):
-        self._orig_cycle = linear_cli.get_cycle_id
+        super().setUp()
         self._orig_resolve = linear_cli.resolve_assignee_id
-        linear_cli.get_cycle_id = lambda _a, _t, _w: None
         # Only "bisma" is a real human; anything else resolves to nobody.
         linear_cli.resolve_assignee_id = (
             lambda _a, value: "bisma-id" if value == "bisma" else None
         )
 
     def tearDown(self):
-        linear_cli.get_cycle_id = self._orig_cycle
         linear_cli.resolve_assignee_id = self._orig_resolve
+        super().tearDown()
 
     def _build(self, **fields):
         base = {"title": "Fix the login redirect", "cycle": "active",
@@ -568,7 +620,7 @@ class CreateRequiresOwnerTest(unittest.TestCase):
                 self.assertIn("matched no human", err)
 
 
-class CreateRequiresMilestoneTest(unittest.TestCase):
+class CreateRequiresMilestoneTest(_CreateWorld, unittest.TestCase):
     """An issue with no milestone is nobody's deliverable. `create` refuses
     to make one unless the caller says --skip-milestone. See the project's
     "No milestone" bucket on `linear projects overview`."""
@@ -578,30 +630,19 @@ class CreateRequiresMilestoneTest(unittest.TestCase):
         "viewerId": "viewer-id",
     }
 
+    # Every milestone is finished, so there is no "next open" one to default to.
     CATALOG = [
-        {"id": "m1", "name": "0.1.0 — Interactive cloud run",
+        {"id": "m1", "name": "0.1.0 — Interactive cloud run", "progress": 100,
          "targetDate": "2026-09-11", "sortOrder": 1,
          "project": {"id": "p1", "name": "Rush"}},
-        {"id": "m2", "name": "0.1.1 — Headless mode + unblock",
+        {"id": "m2", "name": "0.1.1 — Headless mode + unblock", "progress": 100,
          "targetDate": "2026-09-08", "sortOrder": 2,
          "project": {"id": "p1", "name": "Rush"}},
     ]
 
     def setUp(self):
-        self._orig_cycle = linear_cli.get_cycle_id
-        self._orig_catalog = linear_cli.list_milestone_catalog
-        self._orig_resolve = linear_cli.resolve_milestone_id
-        self._orig_project = linear_cli.resolve_project_id
-        linear_cli.get_cycle_id = lambda *_a, **_k: None
-        linear_cli.list_milestone_catalog = lambda *_a, **_k: list(self.CATALOG)
-        linear_cli.resolve_milestone_id = lambda *_a, **_k: "mid-1"
-        linear_cli.resolve_project_id = lambda *_a, **_k: "p1"
-
-    def tearDown(self):
-        linear_cli.get_cycle_id = self._orig_cycle
-        linear_cli.list_milestone_catalog = self._orig_catalog
-        linear_cli.resolve_milestone_id = self._orig_resolve
-        linear_cli.resolve_project_id = self._orig_project
+        super().setUp()
+        self.catalog = list(self.CATALOG)
 
     def _build(self, verbose=True, **fields):
         base = {"title": "getrush worker open proxy", "cycle": "active"}
@@ -628,7 +669,7 @@ class CreateRequiresMilestoneTest(unittest.TestCase):
     def test_named_milestone_sets_project_milestone_id(self):
         input_obj, err = self._build(milestone="0.1.0 — Interactive cloud run")
         self.assertIsNone(err)
-        self.assertEqual(input_obj["projectMilestoneId"], "mid-1")
+        self.assertEqual(input_obj["projectMilestoneId"], "m1")
 
     def test_milestone_and_skip_together_is_refused(self):
         input_obj, err = self._build(milestone="0.1.0", skip_milestone=True)
@@ -3216,8 +3257,10 @@ class CreateAdvisoryTests(_IsolatedCache, unittest.TestCase):
         self._orig_build = linear_cli._build_create_input
         self._orig_gql = linear_cli.gql
         self._orig_rank = linear_cli.rank_similar
-        linear_cli._build_create_input = lambda *a, **k: (
-            {"teamId": "team-id", "title": self.TITLE}, None)
+        def fake_build(*_a, ctx=None, **_k):
+            ctx.update(applied="horizon now", remindAt=None)
+            return {"teamId": "team-id", "title": self.TITLE}, None
+        linear_cli._build_create_input = fake_build
 
     def tearDown(self):
         linear_cli._build_create_input = self._orig_build
@@ -3230,7 +3273,7 @@ class CreateAdvisoryTests(_IsolatedCache, unittest.TestCase):
             description_file=None, priority=None, parent=None, project=None,
             milestone="v1", skip_milestone=True, status=None, cycle="active",
             assign=None, delegate=None, due_date=None, label=None, image=None,
-            force=False,
+            force=False, backlog=False, bug=False, blocker=False,
         )
         for k, v in kw.items():
             setattr(ns, k, v)
@@ -3768,7 +3811,7 @@ class EmbeddingRealTests(unittest.TestCase):
             self.assertAlmostEqual(a, b, places=2)
 
 
-class UnknownLabelMessageTests(unittest.TestCase):
+class UnknownLabelMessageTests(_CreateWorld, unittest.TestCase):
     """A skipped label names the real labels so the fix is picking one, not
     creating one."""
 
@@ -3961,3 +4004,395 @@ class RemindAtTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- horizon policy ------------------------------------------------------------
+
+class SlaTableTest(unittest.TestCase):
+    """policy.sla turns a priority into a due date and a reminder."""
+
+    FRI = date(2026, 10, 9)
+
+    def test_due_rules(self):
+        last = date(2026, 10, 12)
+        self.assertEqual(linear_cli.sla_due("today", self.FRI, last), self.FRI)
+        self.assertEqual(linear_cli.sla_due("+1wd", self.FRI, last), date(2026, 10, 12))  # Fri -> Mon
+        self.assertEqual(linear_cli.sla_due("+1wd", date(2026, 10, 7), last), date(2026, 10, 8))
+        self.assertEqual(linear_cli.sla_due("+1wd", date(2026, 10, 10), last), date(2026, 10, 12))  # Sat -> Mon
+        self.assertEqual(linear_cli.sla_due("+3d", self.FRI, last), date(2026, 10, 12))
+        self.assertEqual(linear_cli.sla_due("cycle_end", self.FRI, last), last)
+        self.assertIsNone(linear_cli.sla_due("cycle_end", self.FRI, None))
+        with self.assertRaises(ValueError):
+            linear_cli.sla_due("tomorrow", self.FRI, last)
+
+    def test_remind_rules(self):
+        now = datetime(2026, 10, 8, 13, 30, tzinfo=timezone.utc)
+        self.assertEqual(linear_cli.sla_remind("15m", now), now + timedelta(minutes=15))
+        self.assertEqual(linear_cli.sla_remind("1h", now), now + timedelta(hours=1))
+        self.assertIsNone(linear_cli.sla_remind("none", now))
+        with self.assertRaises(ValueError):
+            linear_cli.sla_remind("soon", now)
+
+    def test_default_table(self):
+        sla = linear_cli.load_policy({})["sla"]
+        self.assertEqual(sla["urgent"], {"due": "today", "remind": "15m"})
+        self.assertEqual(sla["high"], {"due": "today", "remind": "1h"})
+        self.assertEqual(sla["medium"], {"due": "+1wd", "remind": "none"})
+        self.assertEqual(sla["low"], {"due": "cycle_end", "remind": "none"})
+        self.assertEqual(linear_cli.load_policy({})["backlogMilestone"], "Q1 2027")
+
+    def test_config_overrides_one_key_and_keeps_the_rest(self):
+        policy = linear_cli.load_policy({"policy": {
+            "sla": {"low": {"due": "+5wd"}}, "backlogMilestone": "Someday"}})
+        self.assertEqual(policy["sla"]["low"], {"due": "+5wd", "remind": "none"})
+        self.assertEqual(policy["sla"]["urgent"]["remind"], "15m")
+        self.assertEqual(policy["backlogMilestone"], "Someday")
+
+    def test_cycle_last_day_is_in_the_team_timezone(self):
+        # Linear's endsAt is the instant the next cycle starts (midnight in LA).
+        cycle = {"startsAt": "2026-10-06T07:00:00.000Z", "endsAt": "2026-10-13T07:00:00.000Z"}
+        la = linear_cli.resolve_tz("America/Los_Angeles")
+        self.assertEqual(linear_cli.cycle_days(cycle, la), (date(2026, 10, 6), date(2026, 10, 12)))
+        self.assertIsNone(linear_cli.cycle_days(None, la))
+
+    def test_next_open_milestone_skips_done_undated_and_backlog(self):
+        ms = [
+            {"name": "done", "targetDate": "2026-09-01", "progress": 100},
+            {"name": "undated", "targetDate": None, "progress": 0},
+            {"name": "Q1 2027", "targetDate": "2026-10-01", "progress": 0},
+            {"name": "later", "targetDate": "2026-11-20", "progress": 18},
+            {"name": "next", "targetDate": "2026-10-16", "progress": 92},
+        ]
+        self.assertEqual(linear_cli.next_open_milestone(ms, "Q1 2027")["name"], "next")
+        self.assertIsNone(linear_cli.next_open_milestone(ms[:2]))
+
+
+class PlanHorizonTest(unittest.TestCase):
+    TODAY = date(2026, 10, 8)
+    NOW = datetime(2026, 10, 8, 13, 30, tzinfo=timezone.utc)
+    CYCLE = (date(2026, 10, 6), date(2026, 10, 12))
+    POLICY = linear_cli.load_policy({})
+
+    def plan(self, horizon, priority, milestone=None, due=None, cycle=CYCLE):
+        return linear_cli.plan_horizon(horizon, priority, self.POLICY, self.TODAY,
+                                       self.NOW, cycle, milestone, due)
+
+    def test_now_dates_by_priority(self):
+        urgent = self.plan("now", 1)
+        self.assertEqual((urgent["due"], urgent["cycle"]), ("2026-10-08", "active"))
+        self.assertEqual(urgent["remind"], self.NOW + timedelta(minutes=15))
+        self.assertEqual(self.plan("now", 2)["remind"], self.NOW + timedelta(hours=1))
+        medium = self.plan("now", 3)
+        self.assertEqual((medium["due"], medium["remind"]), ("2026-10-09", None))
+        self.assertEqual(self.plan("now", 4)["due"], "2026-10-12")
+        self.assertEqual(self.plan("now", 0)["due"], "2026-10-09")  # none schedules like medium
+
+    def test_milestone_uses_the_target_and_leaves_the_cycle_when_outside_it(self):
+        p = self.plan("milestone", 3, {"targetDate": "2026-10-30"})
+        self.assertEqual((p["due"], p["cycle"], p["remind"]), ("2026-10-30", "none", None))
+
+    def test_milestone_inside_the_cycle_joins_it(self):
+        p = self.plan("milestone", 4, {"targetDate": "2026-10-10"})
+        self.assertEqual((p["due"], p["cycle"]), ("2026-10-10", "active"))
+
+    def test_urgent_and_high_keep_an_earlier_sla_date(self):
+        p = self.plan("milestone", 1, {"targetDate": "2026-10-30"})
+        self.assertEqual((p["due"], p["cycle"]), ("2026-10-08", "active"))
+        self.assertIsNotNone(p["remind"])
+        # A milestone due before the SLA date wins even for high.
+        self.assertEqual(self.plan("milestone", 2, {"targetDate": "2026-10-01"})["due"], "2026-10-01")
+
+    def test_backlog_has_no_date_and_no_cycle(self):
+        p = self.plan("backlog", 3, {"targetDate": "2027-03-31"})
+        self.assertEqual((p["due"], p["cycle"], p["remind"]), (None, "none", None))
+
+    def test_explicit_due_always_wins(self):
+        for horizon in ("now", "milestone", "backlog"):
+            with self.subTest(horizon=horizon):
+                p = self.plan(horizon, 1, {"targetDate": "2026-10-30"}, due="2026-11-02")
+                self.assertEqual((p["due"], p["remind"]), ("2026-11-02", None))
+
+    def test_low_without_an_active_cycle_has_no_date(self):
+        self.assertIsNone(self.plan("now", 4, cycle=None)["due"])
+
+
+class CreateHorizonTest(_CreateWorld, unittest.TestCase):
+    """`create` resolves every issue to one horizon and says what it chose."""
+
+    CFG = {"states": {"Todo": {"id": "todo-id", "type": "unstarted"},
+                      "Backlog": {"id": "backlog-id", "type": "backlog"}},
+           "viewerId": "viewer-id"}
+
+    def build(self, cfg=None, verbose=True, **fields):
+        ctx = {}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            obj, error = linear_cli._build_create_input(
+                "k", "team-id", dict(cfg or self.CFG), {"title": "t", **fields},
+                verbose=verbose, ctx=ctx)
+        return obj, error, ctx, err.getvalue()
+
+    def test_now_is_the_default(self):
+        obj, err, ctx, _ = self.build(priority="urgent")
+        self.assertIsNone(err)
+        self.assertEqual(obj["dueDate"], self.TODAY.isoformat())
+        self.assertEqual(obj["cycleId"], "cyc-32")
+        self.assertEqual(obj["projectId"], "p1")
+        self.assertEqual(obj["projectMilestoneId"], "m-next")
+        self.assertEqual(obj["stateId"], "todo-id")
+        self.assertTrue(ctx["remindAt"].endswith("Z"))
+        self.assertRegex(ctx["applied"],
+                         r"^horizon now · urgent → due \d{4}-\d\d-\d\d, reminder \d\d:\d\d · "
+                         r"project: Rush \(cwd\) · milestone: 0\.1\.0 — Interactive cloud run "
+                         r"\(next for Rush\) · cycle: Launch gate green$")
+
+    def test_milestone_horizon_dates_by_the_target(self):
+        obj, err, ctx, _ = self.build(milestone="Ready to charge")
+        self.assertIsNone(err)
+        self.assertEqual(obj["projectMilestoneId"], "m-charge")
+        self.assertEqual(obj["dueDate"], self.MILESTONES[1]["targetDate"])
+        self.assertNotIn("cycleId", obj)  # 21 days out, past this cycle
+        self.assertIsNone(ctx["remindAt"])
+        self.assertIn("horizon milestone · milestone target → due", ctx["applied"])
+
+    def test_backlog(self):
+        obj, err, ctx, _ = self.build(backlog=True)
+        self.assertIsNone(err)
+        self.assertEqual(obj["stateId"], "backlog-id")
+        self.assertEqual(obj["projectMilestoneId"], "m-q1")
+        self.assertNotIn("dueDate", obj)
+        self.assertNotIn("cycleId", obj)
+        self.assertIn("horizon backlog · no due date · project: Rush (cwd) · "
+                      "milestone: Q1 2027 (backlog) · cycle: none", ctx["applied"])
+
+    def test_backlog_refuses_when_the_backlog_milestone_is_missing(self):
+        self.catalog = [m for m in self.catalog if m["name"] != "Q1 2027"]
+        _, err, _, _ = self.build(backlog=True)
+        self.assertIn("'Q1 2027' (policy.backlogMilestone) is not in project 'Rush'", err)
+
+    def test_backlog_refuses_a_past_milestone(self):
+        _, err, _, _ = self.build(backlog=True, milestone="0.1.1 — Headless")
+        self.assertIn("--backlog needs a future milestone", err)
+
+    def test_bug_alone_is_backlog_and_low(self):
+        obj, err, ctx, _ = self.build(bug=True)
+        self.assertIsNone(err)
+        self.assertEqual(obj["priority"], 4)
+        self.assertEqual(obj["labelIds"], ["bug-id"])
+        self.assertEqual(obj["stateId"], "backlog-id")
+        self.assertIn("horizon backlog", ctx["applied"])
+        self.assertIn("bug → priority low", ctx["applied"])
+
+    def test_bug_blocker_is_now_and_high(self):
+        obj, err, ctx, _ = self.build(bug=True, blocker=True)
+        self.assertIsNone(err)
+        self.assertEqual(obj["priority"], 2)
+        self.assertEqual(obj["projectMilestoneId"], "m-next")
+        self.assertEqual(obj["dueDate"], self.TODAY.isoformat())
+        self.assertEqual(obj["labelIds"], ["bug-id"])
+        self.assertIsNotNone(ctx["remindAt"])
+
+    def test_blocker_needs_bug(self):
+        _, err, _, _ = self.build(blocker=True)
+        self.assertIn("--bug --blocker", err)
+
+    def test_no_project_teaches_the_three_horizons(self):
+        self.cwd = (None, None)
+        _, err, _, _ = self.build()
+        self.assertIn("Refusing to create an issue without a project", err)
+        self.assertIn("now (default):", err)
+        self.assertIn("--milestone M:", err)
+        self.assertIn("--backlog:", err)
+        self.assertIn("    AGI", err)
+        _, err, _, _ = self.build(verbose=False)
+        self.assertNotIn("\n", err)
+        self.assertIn("Horizons: now (default)", err)
+
+    def test_no_open_milestone_teaches_the_three_horizons(self):
+        self.catalog = [m for m in self.catalog if m["progress"] == 100]
+        _, err, _, _ = self.build()
+        self.assertIn("Refusing to create an issue without a milestone", err)
+        self.assertIn("Every issue lands in one horizon", err)
+
+    def test_explicit_due_and_cycle_win(self):
+        obj, err, ctx, _ = self.build(priority="urgent", due_date="2026-12-01", cycle="none")
+        self.assertIsNone(err)
+        self.assertEqual(obj["dueDate"], "2026-12-01")
+        self.assertNotIn("cycleId", obj)
+        self.assertIsNone(ctx["remindAt"])
+        self.assertNotIn("due", ctx["applied"])
+
+    def test_agent_identity_is_the_delegate_and_the_human_stays_assignee(self):
+        obj, err, ctx, _ = self.build(cfg={**self.CFG, "agent": "claude"})
+        self.assertIsNone(err)
+        self.assertEqual(obj["delegateId"], "claude-id")
+        self.assertEqual(obj["assigneeId"], "viewer-id")
+        self.assertIn("delegate: claude", ctx["applied"])
+        obj, _, _, _ = self.build(cfg={**self.CFG, "agent": "claude"}, delegate="none")
+        self.assertNotIn("delegateId", obj)
+
+    def test_skip_milestone_warns(self):
+        obj, err, _, stderr = self.build(skip_milestone=True)
+        self.assertIsNone(err)
+        self.assertNotIn("projectMilestoneId", obj)
+        self.assertIn("--skip-milestone", stderr)
+
+    def test_bad_policy_rule_is_refused(self):
+        _, err, _, _ = self.build(cfg={**self.CFG, "policy": {"sla": {"medium": {"due": "soon"}}}})
+        self.assertIn("policy.sla due rule 'soon'", err)
+
+
+class MilestoneRetargetCascadeTest(unittest.TestCase):
+    """Retargeting a milestone moves the open issues dated by it."""
+
+    def test_moves_open_issues_due_on_the_old_target(self):
+        calls = []
+
+        def fake_gql(_k, query, variables=None):
+            calls.append((query, variables))
+            if "issues(" in query:
+                return {"data": {"issues": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [{"id": "i1", "identifier": "PHNX-1"},
+                              {"id": "i2", "identifier": "PHNX-2"}]}}}
+            ok = variables["id"] == "i1"
+            return {"data": {"issueUpdate": {"success": ok}}}
+
+        orig = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            moved, failed = linear_cli.cascade_due_dates("k", "m1", "2026-10-30", "2026-11-06")
+        finally:
+            linear_cli.gql = orig
+        self.assertEqual((moved, failed), (1, ["PHNX-2"]))
+        query, variables = calls[0]
+        self.assertEqual((variables["mid"], variables["due"]), ("m1", "2026-10-30"))
+        self.assertIn('nin: ["completed", "canceled"]', query)
+        self.assertEqual([v["due"] for _q, v in calls[1:]], ["2026-11-06", "2026-11-06"])
+
+
+# --- goals -----------------------------------------------------------------------
+
+def _goal_issue(ident, label, assignee, due, cycle="cyc-32", kids=(), created="2026-10-08T01:00:00Z"):
+    return {
+        "id": f"id-{ident}", "identifier": ident, "title": f"title {ident}",
+        "url": f"https://linear.app/x/{ident}", "dueDate": due, "createdAt": created,
+        "assignee": {"id": assignee}, "cycle": {"id": cycle} if cycle else None,
+        "project": {"id": "p1"}, "labels": {"nodes": [{"name": label}]},
+        "projectMilestone": {"id": "m1", "name": "Ready to charge", "targetDate": "2026-10-30"},
+        "children": {"nodes": [{"id": f"id-{k}", "identifier": k, "title": f"todo {k}",
+                                "url": None, "state": {"type": t}} for k, t in kids]},
+    }
+
+
+class GoalsJsonTest(unittest.TestCase):
+    TODAY = date(2026, 10, 8)
+
+    def state(self, **over):
+        st = {
+            "generatedAt": "2026-10-08T20:00:00Z",
+            "initiative": {
+                "id": "ini", "name": "Rush Cloud - first paying customers", "url": "https://l/ini",
+                "startedAt": None, "createdAt": "2026-08-28T10:00:00.000Z", "targetDate": "2026-12-31",
+                "projects": {"nodes": [{"id": "p1", "name": "Rush", "projectMilestones": {"nodes": [
+                    {"id": "m0", "name": "0.1.1", "targetDate": "2026-09-08", "progress": 100},
+                    {"id": "m1", "name": "Ready to charge", "targetDate": "2026-10-30", "progress": 0},
+                    {"id": "m2", "name": "0.1.0 — Interactive cloud run", "targetDate": "2026-10-16", "progress": 91.67},
+                    {"id": "m3", "name": "Q1 2027", "targetDate": "2027-03-31", "progress": 0},
+                    {"id": "m4", "name": "Undated", "targetDate": None, "progress": 10},
+                ]}}]},
+            },
+            "logoUrl": None,
+            "viewer": {"id": "me", "name": "Muqsit", "avatarUrl": "https://a/me"},
+            "users": [
+                {"id": "me", "name": "Muqsit", "avatarUrl": None},
+                {"id": "bisma", "name": "Bisma", "avatarUrl": None},
+                {"id": "bot", "name": "Claude", "app": True},
+                {"id": "guest", "name": "Guest", "guest": True},
+            ],
+            "cycle": {"id": "cyc-32", "number": 32, "name": "Launch gate green on all three harnesses",
+                      "startsAt": "2026-10-06T07:00:00.000Z", "endsAt": "2026-10-13T07:00:00.000Z"},
+            "today": self.TODAY,
+            "nodes": [
+                _goal_issue("PHNX-10", "Weekly goal", "me", "2026-10-12", kids=[("PHNX-11", "started")]),
+                _goal_issue("PHNX-11", "Daily goal", "me", "2026-10-08",
+                            kids=[("PHNX-12", "completed"), ("PHNX-13", "unstarted"), ("PHNX-14", "canceled")]),
+                _goal_issue("PHNX-20", "daily goal", "bisma", "2026-10-08"),
+                _goal_issue("PHNX-21", "Daily goal", "bisma", "2026-10-07"),  # yesterday's
+                _goal_issue("PHNX-30", "Weekly goal", "bisma", "2026-10-05", cycle="cyc-31"),
+            ],
+        }
+        st.update(over)
+        return st
+
+    def test_contract_shape(self):
+        doc = linear_cli.build_goals(self.state(), "Q1 2027")
+        self.assertEqual(set(doc), {"generatedAt", "company", "week", "me", "team"})
+        self.assertEqual(doc["company"]["initiative"], {
+            "id": "ini", "name": "Rush Cloud - first paying customers", "url": "https://l/ini",
+            "startDate": "2026-08-28", "targetDate": "2026-12-31"})
+        self.assertIsNone(doc["company"]["logoUrl"])
+        self.assertEqual(doc["company"]["milestones"], [
+            {"id": "m2", "name": "0.1.0 — Interactive cloud run", "project": "Rush",
+             "targetDate": "2026-10-16", "progress": 92},
+            {"id": "m1", "name": "Ready to charge", "project": "Rush",
+             "targetDate": "2026-10-30", "progress": 0},
+        ])
+        self.assertEqual(doc["week"]["goal"], "Launch gate green on all three harnesses")
+        self.assertEqual(set(doc["week"]["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
+        self.assertEqual(doc["me"]["user"], {"id": "me", "name": "Muqsit", "avatarUrl": "https://a/me"})
+
+        day = doc["me"]["dayGoal"]
+        self.assertEqual(set(day), {"id", "identifier", "title", "url", "dueDate", "milestone",
+                                    "done", "total", "todos"})
+        self.assertEqual(day["identifier"], "PHNX-11")
+        self.assertEqual(day["milestone"], {"name": "Ready to charge", "targetDate": "2026-10-30"})
+        self.assertEqual((day["done"], day["total"]), (1, 2))  # canceled to-dos don't count
+        self.assertEqual(day["todos"][0], {"id": "id-PHNX-12", "identifier": "PHNX-12",
+                                           "title": "todo PHNX-12", "url": None, "completed": True})
+        self.assertEqual(doc["me"]["weekGoal"]["identifier"], "PHNX-10")
+
+        self.assertEqual([r["user"]["name"] for r in doc["team"]], ["Bisma"])
+        bisma = doc["team"][0]
+        self.assertEqual(bisma["dayGoal"]["identifier"], "PHNX-20")
+        self.assertIsNone(bisma["weekGoal"])  # last cycle's
+        json.dumps(doc)
+
+    def test_started_at_wins_over_created_at(self):
+        st = self.state()
+        st["initiative"]["startedAt"] = "2026-09-01T00:00:00.000Z"
+        self.assertEqual(linear_cli.build_goals(st)["company"]["initiative"]["startDate"], "2026-09-01")
+
+    def test_unnamed_cycle_is_no_week_goal(self):
+        for name in ("Cycle 33", "", None, "  "):
+            with self.subTest(name=name):
+                st = self.state(cycle={**self.state()["cycle"], "name": name})
+                self.assertIsNone(linear_cli.build_goals(st)["week"]["goal"])
+
+    def test_nothing_set(self):
+        doc = linear_cli.build_goals(self.state(initiative=None, cycle=None, nodes=[]))
+        self.assertIsNone(doc["company"]["initiative"])
+        self.assertEqual(doc["company"]["milestones"], [])
+        self.assertEqual(doc["week"], {"cycle": None, "goal": None})
+        self.assertIsNone(doc["me"]["weekGoal"])
+        self.assertIsNone(doc["me"]["dayGoal"])
+
+    def test_newest_duplicate_wins(self):
+        st = self.state()
+        st["nodes"].append(_goal_issue("PHNX-99", "Daily goal", "me", "2026-10-08",
+                                       created="2026-10-08T09:00:00Z"))
+        self.assertEqual(linear_cli.build_goals(st)["me"]["dayGoal"]["identifier"], "PHNX-99")
+
+    def test_human_output(self):
+        st = self.state()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            linear_cli.print_goals(linear_cli.build_goals(st), self.TODAY,
+                                   linear_cli.resolve_tz("America/Los_Angeles"))
+        text = out.getvalue()
+        self.assertIn("Company   Rush Cloud - first paying customers · 84 days left", text)
+        self.assertIn("Week      Launch gate green on all three harnesses · Cycle 32 · ends 2026-10-12 (4 days)", text)
+        self.assertIn("My week   PHNX-10", text)
+        self.assertIn("My day    PHNX-11 title PHNX-11 (1/2)", text)
+        self.assertIn("[x] PHNX-12", text)
+        self.assertIn("  Bisma: PHNX-20", text)
