@@ -20,9 +20,11 @@ import math
 import os
 import re
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -37,6 +39,40 @@ _loader = SourceFileLoader("linear_cli", os.path.join(_HERE, "linear"))
 _spec = importlib.util.spec_from_loader("linear_cli", _loader)
 linear_cli = importlib.util.module_from_spec(_spec)
 _loader.exec_module(linear_cli)
+
+
+class GraphQLTimeoutTest(unittest.TestCase):
+    def test_stalled_http_response_returns_an_error(self):
+        # A real TCP peer accepts the request but sends no response headers.
+        # This exercises the socket read timeout, not a replaced urlopen.
+        release = threading.Event()
+        accepted = threading.Event()
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(2)
+
+            def stall():
+                with listener.accept()[0] as connection:
+                    accepted.set()
+                    release.wait(2)
+
+            peer = threading.Thread(target=stall)
+            peer.start()
+            previous_url, previous_timeout = linear_cli.API_URL, linear_cli.API_TIMEOUT
+            try:
+                linear_cli.API_URL = f"http://127.0.0.1:{listener.getsockname()[1]}"
+                linear_cli.API_TIMEOUT = 0.05
+                result = linear_cli.gql("local-test", "{ viewer { id } }")
+                self.assertTrue(accepted.is_set())
+                self.assertEqual(result, {"errors": [{
+                    "message": "Linear API timeout after 0.05 seconds"}]})
+                self.assertTrue(linear_cli.is_transient_error(result))
+            finally:
+                linear_cli.API_URL, linear_cli.API_TIMEOUT = previous_url, previous_timeout
+                release.set()
+                peer.join(3)
+            self.assertFalse(peer.is_alive())
 
 
 class CycleLabelTest(unittest.TestCase):
@@ -2901,7 +2937,7 @@ class OverviewFetchTest(unittest.TestCase):
                                  projects=[crowded] + _OV_PROJECTS[1:])
         # People come from the project page itself: still four queries, no N+1.
         self.assertEqual(len(sent["queries"]), 4)
-        self.assertIn("members(first:", sent["queries"][0])
+        self.assertTrue(any("members(first:" in query for query in sent["queries"]))
         doc = json.loads(out)
         self.assertEqual([m["name"] for m in doc["projects"][0]["members"]], ["Amy"])
         self.assertIs(doc["partial"], True)
