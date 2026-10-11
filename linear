@@ -1065,6 +1065,12 @@ def get_cycle_id(api_key: str, team_id: str, which: str) -> str | None:
     return cycle.get("id") if cycle else None
 
 
+# Linear closes an issue with one of three state types: `completed`, `canceled`,
+# or `duplicate` (an issue merged into another). Every other type is open work.
+CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
+OPEN_STATE_FILTER = "state: { type: { nin: [%s] } }" % ", ".join(f'"{t}"' for t in CLOSED_STATE_TYPES)
+
+
 # Every non-archived project a team can see (Linear's `team.projects` leaves
 # archived ones out unless asked). Shared by the project list and the overview
 # so both read the same rows.
@@ -2902,7 +2908,7 @@ def list_tasks(args, cfg, api_key, team_id):
     if args.status:
         status = args.status.lower()
         if status == "open":
-            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+            filters.append(OPEN_STATE_FILTER)
         elif status == "done":
             filters.append('state: { type: { eq: "completed" } }')
         else:
@@ -2913,7 +2919,7 @@ def list_tasks(args, cfg, api_key, team_id):
             else:
                 filters.append(f'state: {{ name: {{ eqi: "{status}" }} }}')
     else:
-        filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+        filters.append(OPEN_STATE_FILTER)
 
     filter_str = ", ".join(filters)
 
@@ -3018,7 +3024,7 @@ def show_board(args, api_key, team_id, cfg):
 
     filters = [
         f'team: {{ id: {{ eq: "{team_id}" }} }}',
-        'state: { type: { nin: ["completed", "canceled"] } }',
+        OPEN_STATE_FILTER,
     ]
     if fragment:
         filters.append(fragment)
@@ -4836,6 +4842,8 @@ def overview_issue_row(n: dict) -> dict:
     and the cycle as its number so a caller can compare it against the top-level
     `cycle.number` to pick out "this cycle".
 
+    `stateType` is Linear's workflow-state type (backlog | unstarted | started
+    | triage), so a client buckets by type rather than by a team's state names.
     `assignee` stays the human's NAME string (unchanged contract); `assigneeId`
     and `updatedAt` are added beside it, and `delegate` carries the full agent
     identity {id,name,avatarUrl,app} the menu draws an avatar from."""
@@ -4844,6 +4852,7 @@ def overview_issue_row(n: dict) -> dict:
         "identifier": n.get("identifier"),
         "title": n.get("title"),
         "state": (n.get("state") or {}).get("name"),
+        "stateType": (n.get("state") or {}).get("type"),
         "cycle": (n.get("cycle") or {}).get("number"),
         "assignee": assignee.get("name"),
         "assigneeId": assignee.get("id"),
@@ -4861,25 +4870,31 @@ def overview_issue_sort_key(row: dict) -> tuple:
     return (cyc is None, cyc or 0, row.get("priority") or 5, row.get("identifier") or "")
 
 
-def overview_bucket(issues: list[dict]) -> dict:
-    """Counts for one milestone (or a project's no-milestone bucket) plus its
-    open rows. `open` is every state type that is neither completed nor
-    canceled — backlog, unstarted, started, and triage (unfinished work too) —
+def overview_counts(issues: list[dict]) -> dict:
+    """{total, open, done, canceled} over issues. `done` is state type
+    completed; `canceled` is canceled or duplicate (closed without doing the
+    work); `open` is every other type (backlog, unstarted, started, triage),
     so open + done + canceled == total always holds."""
     counts = {"total": 0, "open": 0, "done": 0, "canceled": 0}
-    open_rows: list[dict] = []
     for n in issues:
         counts["total"] += 1
         state_type = (n.get("state") or {}).get("type")
         if state_type == "completed":
             counts["done"] += 1
-        elif state_type == "canceled":
+        elif state_type in CLOSED_STATE_TYPES:
             counts["canceled"] += 1
         else:
             counts["open"] += 1
-            open_rows.append(overview_issue_row(n))
+    return counts
+
+
+def overview_bucket(issues: list[dict]) -> dict:
+    """Counts for one milestone (or a project's no-milestone bucket) plus its
+    open rows, one row per issue `overview_counts` counts open."""
+    open_rows = [overview_issue_row(n) for n in issues
+                 if (n.get("state") or {}).get("type") not in CLOSED_STATE_TYPES]
     open_rows.sort(key=overview_issue_sort_key)
-    return {"issues": counts, "open": open_rows}
+    return {"issues": overview_counts(issues), "open": open_rows}
 
 
 def build_overview(cycle: dict | None, projects: list[dict], milestones: list[dict],
@@ -4916,6 +4931,10 @@ def build_overview(cycle: dict | None, projects: list[dict], milestones: list[di
             "targetDate": p.get("targetDate"),
             "updatedAt": p.get("updatedAt"),
             "members": overview_members(p, issues_by_project.get(p["id"], [])),
+            "cycleIssues": (overview_counts([
+                n for n in issues_by_project.get(p["id"], [])
+                if (n.get("cycle") or {}).get("number") == cycle.get("number")
+            ]) if cycle else None),
             "milestones": [
                 {"id": m["id"], "name": m.get("name"), "targetDate": m.get("targetDate"),
                  **overview_bucket(issues_by_ms.get(m["id"], []))}
@@ -5392,12 +5411,12 @@ def cascade_due_dates(api_key: str, milestone_id: str, old: str, new: str
         issues(first: 100, after: $cursor, filter: {
             projectMilestone: { id: { eq: $mid } }
             dueDate: { eq: $due }
-            state: { type: { nin: ["completed", "canceled"] } }
+            %s
         }) {
             pageInfo { hasNextPage endCursor }
             nodes { id identifier }
         }
-    }"""
+    }""" % OPEN_STATE_FILTER
     nodes = paginate_connection(api_key, query, ["issues"], {"mid": milestone_id, "due": old}) or []
     moved, failed = 0, []
     for n in nodes:

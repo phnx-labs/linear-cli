@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Duplicate issue is closed, not open.** Linear's `duplicate` state type
+  (an issue merged into another) was counted as open work: `tasks` listed it
+  and `projects overview` put it in `open`. Both now treat it like canceled;
+  the overview counts it under `canceled`. (PHNX-4326)
+
+### Added
+
+- **`projects overview` carries state types and the cycle's done count.** Each
+  open row has `stateType`, and each project has `cycleIssues` (`{total, open,
+  done, canceled}` for the current cycle), so a menu's cycle bar buckets by
+  type and shows done work. (PHNX-4326)
+
 ### Changed
 
 - Task lists and boards resolve cycle metadata without rereading the same cycle.

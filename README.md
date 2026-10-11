@@ -243,11 +243,13 @@ one document, nothing to join afterwards.
         {"id": "…", "name": "Ada", "displayName": "ada",
          "email": "ada@example.com", "avatarUrl": "https://public.linear.app/…", "role": "lead"}
       ],
+      "cycleIssues": {"total": 31, "open": 9, "done": 18, "canceled": 4},
       "milestones": [
         {"id": "ba96…", "name": "Fleet reliability", "targetDate": "2026-08-12",
          "issues": {"total": 14, "open": 3, "done": 11, "canceled": 0},
          "open": [
-           {"identifier": "PHNX-3999", "title": "…", "state": "Doing", "cycle": 28,
+           {"identifier": "PHNX-3999", "title": "…", "state": "Doing",
+            "stateType": "started", "cycle": 28,
             "assignee": "Muqsit", "priority": 2, "url": "https://linear.app/…"}
          ]}
       ],
@@ -265,9 +267,16 @@ one document, nothing to join afterwards.
   cycle" is `row.cycle == doc.cycle.number`; `null` means not scheduled.
 - `issues` counts every issue in the bucket. `open` = state type `backlog`,
   `unstarted`, `started` (and `triage`); `done` = `completed`; `canceled` =
-  `canceled`; `open + done + canceled == total`. Only open issues are listed —
-  done and canceled are counts only. `noMilestone` is the same `{issues, open}`
-  pair for the project's issues that sit in no milestone.
+  `canceled` or `duplicate` (merged into another issue); `open + done +
+  canceled == total`. Only open issues are listed — done and canceled are
+  counts only. `noMilestone` is the same `{issues, open}` pair for the
+  project's issues that sit in no milestone.
+- `cycleIssues` is the same `{total, open, done, canceled}` count over the
+  project's issues in the current cycle, milestone or not (`null` when there is
+  no current cycle), so a cycle progress bar has its done count.
+- An open row's `stateType` is its workflow state's type (`backlog`,
+  `unstarted`, `started`, `triage`). Bucket by it, not by `state`: a team can
+  name two `started` states "In Review" and "Review".
 - Ordering: projects by priority (`urgent` → `low`, then `none`) then name;
   milestones by Linear's sortOrder; open rows by cycle number ascending (no
   cycle last), then priority (urgent first), then identifier.

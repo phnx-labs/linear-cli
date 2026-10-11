@@ -2648,7 +2648,8 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
               updated_at="2026-09-12T00:00:00.000Z", delegate=None):
     """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
     names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
-             "completed": "Done", "canceled": "Canceled", "triage": "Triage"}
+             "completed": "Done", "canceled": "Canceled", "triage": "Triage",
+             "duplicate": "Duplicate"}
     return {
         "identifier": ident, "title": f"title {ident}",
         "url": f"https://linear.app/x/issue/{ident}",
@@ -2701,15 +2702,16 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(set(doc["cycle"]), {"id", "number", "name", "startsAt", "endsAt"})
         agi = doc["projects"][1]
         self.assertEqual(set(agi), {"id", "name", "priority", "state", "targetDate",
-                                    "updatedAt", "members", "milestones", "noMilestone"})
+                                    "updatedAt", "members", "cycleIssues", "milestones",
+                                    "noMilestone"})
         self.assertEqual(set(agi["members"][0]),
                          {"id", "name", "displayName", "email", "avatarUrl", "role"})
         ms = agi["milestones"][0]
         self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
         self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
         self.assertEqual(set(ms["open"][0]),
-                         {"identifier", "title", "state", "cycle", "assignee", "assigneeId",
-                          "delegate", "updatedAt", "priority", "url"})
+                         {"identifier", "title", "state", "stateType", "cycle", "assignee",
+                          "assigneeId", "delegate", "updatedAt", "priority", "url"})
         self.assertEqual(set(agi["noMilestone"]), {"issues", "open"})
         self.assertEqual(doc["generatedAt"], "2026-09-10T09:30:05.127Z")
         self.assertIs(doc["partial"], False)
@@ -2746,6 +2748,37 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(sorted(r["identifier"] for r in ms["open"]),
                          ["PHNX-1", "PHNX-4", "PHNX-5", "PHNX-6"])
 
+    def test_duplicate_is_closed_not_open(self):
+        # Linear's `duplicate` state type (an issue merged into another) closes
+        # the issue like canceled does; it must never surface as open work.
+        issues = [
+            _ov_issue("PHNX-1", milestone="m-early", state_type="duplicate"),
+            _ov_issue("PHNX-2", milestone="m-early", state_type="unstarted"),
+        ]
+        ms = self._doc(issues)["projects"][1]["milestones"][0]
+        self.assertEqual(ms["issues"], {"total": 2, "open": 1, "done": 0, "canceled": 1})
+        self.assertEqual([r["identifier"] for r in ms["open"]], ["PHNX-2"])
+
+    def test_cycle_issues_count_the_current_cycle_across_milestones(self):
+        issues = [
+            _ov_issue("PHNX-1", milestone="m-early", state_type="completed"),
+            _ov_issue("PHNX-2", state_type="completed"),
+            _ov_issue("PHNX-3", milestone="m-late", state_type="started"),
+            _ov_issue("PHNX-4", state_type="duplicate"),
+            _ov_issue("PHNX-5", state_type="unstarted"),
+            _ov_issue("PHNX-6", state_type="completed", cycle=27),   # last cycle
+            _ov_issue("PHNX-7", state_type="unstarted", cycle=None),  # unscheduled
+            _ov_issue("PHNX-8", project="p-zed", state_type="unstarted"),
+        ]
+        doc = self._doc(issues)
+        self.assertEqual(doc["projects"][1]["cycleIssues"],
+                         {"total": 5, "open": 2, "done": 2, "canceled": 1})
+        self.assertEqual(doc["projects"][0]["cycleIssues"],
+                         {"total": 1, "open": 1, "done": 0, "canceled": 0})
+        self.assertEqual(doc["projects"][3]["cycleIssues"],
+                         {"total": 0, "open": 0, "done": 0, "canceled": 0})
+        self.assertIsNone(self._doc(issues, cycle=None)["projects"][1]["cycleIssues"])
+
     def test_open_rows_sort_by_cycle_then_priority_then_identifier(self):
         issues = [
             _ov_issue("PHNX-9", cycle=None, priority=1),         # no cycle: last
@@ -2764,7 +2797,7 @@ class OverviewBuildTest(unittest.TestCase):
                         )["projects"][1]["noMilestone"]["open"][0]
         self.assertEqual(row, {
             "identifier": "PHNX-1", "title": "title PHNX-1", "state": "Doing",
-            "cycle": None, "assignee": None, "assigneeId": None, "delegate": None,
+            "stateType": "started", "cycle": None, "assignee": None, "assigneeId": None, "delegate": None,
             "updatedAt": "2026-09-12T00:00:00.000Z", "priority": 0,
             "url": "https://linear.app/x/issue/PHNX-1",
         })
@@ -3006,6 +3039,14 @@ class OverviewLiveTest(unittest.TestCase):
                     self.assertTrue(r["cycle"] is None or isinstance(r["cycle"], int))
                     self.assertTrue(r["assignee"] is None or isinstance(r["assignee"], str))
                     self.assertTrue(r["url"].startswith("https://"))
+                    self.assertNotIn(r["stateType"], linear_cli.CLOSED_STATE_TYPES)
+            ci = p["cycleIssues"]
+            if doc["cycle"] is None:
+                self.assertIsNone(ci)
+            else:
+                self.assertEqual(ci["open"] + ci["done"] + ci["canceled"], ci["total"], p["name"])
+                self.assertEqual(ci["open"], sum(1 for b in buckets for r in b["open"]
+                                                 if r["cycle"] == doc["cycle"]["number"]), p["name"])
             for m in p["members"]:
                 self.assertEqual(set(m), {"id", "name", "displayName", "email", "avatarUrl", "role"})
                 self.assertIn(m["role"], {"lead", "member", "assignee"})
@@ -4303,7 +4344,7 @@ class MilestoneRetargetCascadeTest(unittest.TestCase):
         self.assertEqual((moved, failed), (1, ["PHNX-2"]))
         query, variables = calls[0]
         self.assertEqual((variables["mid"], variables["due"]), ("m1", "2026-10-30"))
-        self.assertIn('nin: ["completed", "canceled"]', query)
+        self.assertIn('nin: ["completed", "canceled", "duplicate"]', query)
         self.assertEqual([v["due"] for _q, v in calls[1:]], ["2026-11-06", "2026-11-06"])
 
 
