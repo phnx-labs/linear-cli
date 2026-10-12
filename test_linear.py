@@ -4386,6 +4386,22 @@ class CreateHorizonTest(_CreateWorld, unittest.TestCase):
         self.assertNotIn("\n", err)
         self.assertIn("Horizons: now (default)", err)
 
+    def test_closed_project_refuses_new_issues_unless_forced(self):
+        for state in ("paused", "completed", "canceled"):
+            linear_cli.list_team_projects = lambda *a, s=state, **k: [
+                {"id": "p1", "name": "Rush", "state": s}]
+            _, err, _, _ = self.build()
+            self.assertIn(f"project 'Rush' is {state} in Linear", err)
+            _, err, _, _ = self.build(verbose=False)
+            self.assertNotIn("\n", err)
+            obj, err, _, _ = self.build(force=True)
+            self.assertIsNone(err)
+            self.assertEqual(obj["projectId"], "p1")
+        linear_cli.list_team_projects = lambda *a, **k: [
+            {"id": "p1", "name": "Rush", "state": "started"}]
+        obj, err, _, _ = self.build()
+        self.assertIsNone(err)
+
     def test_no_open_milestone_teaches_the_three_horizons(self):
         self.catalog = [m for m in self.catalog if m["progress"] == 100]
         _, err, _, _ = self.build()

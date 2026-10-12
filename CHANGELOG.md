@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `create` refuses an issue for a project whose Linear status is paused,
+  completed or canceled, so pausing a project closes it to new tickets from
+  agents working in its directory. `--force` (or `"force"` on a `--from-file`
+  row) files it anyway.
+
 ## [0.29.0] - 2026-10-12
 
 ### Added
