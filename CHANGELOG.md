@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-12
+
+### Added
+
+- `projects overview --json` open rows carry `dueDate`, `createdAt`,
+  `startedAt` and `stateType`, so a menu can sort by due date or age and tell
+  started work from unstarted without a second read.
+
 ## [0.27.1] - 2026-10-12
 
 ### Fixed
