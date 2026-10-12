@@ -3135,7 +3135,9 @@ def fetch_issue_comments(api_key: str, issue_id: str) -> list[dict] | None:
 
 UPLOADS_DIR = Path.home() / ".linear-cli" / "uploads"
 UPLOADS_MAX = 12
-_UPLOAD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((https://uploads\.linear\.app/[^\s)]+)\)")
+UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+UPLOAD_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg", ".bmp", ".tiff", ".img")
+_UPLOAD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(\s*<?(https://uploads\.linear\.app/[^\s)>]+)>?(?:\s+"[^"]*")?\s*\)')
 
 
 def issue_images(api_key: str, texts: list[str]) -> list[dict]:
@@ -3156,26 +3158,37 @@ def issue_images(api_key: str, texts: list[str]) -> list[dict]:
 
 def _cached_upload(api_key: str, url: str) -> str | None:
     stem = hashlib.sha256(url.encode()).hexdigest()[:24]
-    UPLOADS_DIR.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
-    for existing in UPLOADS_DIR.glob(stem + ".*"):
-        return str(existing)
+    for ext in UPLOAD_EXTENSIONS:
+        if (UPLOADS_DIR / f"{stem}{ext}").is_file():
+            return str(UPLOADS_DIR / f"{stem}{ext}")
     req = Request(url)
     # Never forwarded on a redirect: the key is for uploads.linear.app alone.
     req.add_unredirected_header("Authorization", api_key)
     try:
         with urlopen(req, timeout=API_TIMEOUT) as resp:
             kind = (resp.headers.get_content_type() or "").lower()
-            body = resp.read()
+            if not kind.startswith("image/"):
+                return None
+            body = resp.read(UPLOAD_MAX_BYTES + 1)
     except (URLError, TimeoutError, OSError):
         return None
-    if not kind.startswith("image/"):
+    if len(body) > UPLOAD_MAX_BYTES:
         return None
     ext = mimetypes.guess_extension(kind) or ".img"
+    if ext not in UPLOAD_EXTENSIONS:
+        ext = ".img"
     target = UPLOADS_DIR / f"{stem}{ext}"
-    partial = target.with_suffix(target.suffix + ".part")
-    partial.write_bytes(body)
-    os.chmod(partial, CONFIG_FILE_MODE)
-    os.replace(partial, target)
+    partial = UPLOADS_DIR / f"{stem}.part"
+    try:
+        UPLOADS_DIR.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONFIG_FILE_MODE)
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        os.replace(partial, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            partial.unlink()
+        return None
     return str(target)
 
 
