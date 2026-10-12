@@ -4165,6 +4165,22 @@ def missing_project_error(title: str, projects: list[dict], multiline: bool = Tr
     return "\n".join(lines)
 
 
+# Project status types that take no new issues (Linear's `project.state`).
+CLOSED_PROJECT_STATES = frozenset({"paused", "completed", "canceled"})
+
+
+def closed_project_error(title: str, project: dict, multiline: bool = True) -> str:
+    name, state = project.get("name") or project.get("id"), project.get("state")
+    if not multiline:
+        return (f"project {name!r} is {state} and takes no new issues. Comment on or "
+                f"update an existing issue, or set \"force\" on this row to file anyway.")
+    return "\n".join([
+        f"Refusing to create {title!r}: project {name!r} is {state} in Linear.",
+        "  A paused, completed or canceled project takes no new issues. Comment on or",
+        "  update an existing issue instead; --force files it anyway.",
+    ])
+
+
 def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
                         verbose: bool = True, ctx: dict | None = None
                         ) -> tuple[dict | None, str | None]:
@@ -4269,6 +4285,15 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
         project_name = cwd_name or project_id
         applied.append(f"project: {project_name} (cwd)")
     input_obj["projectId"] = project_id
+
+    # Pausing, completing or canceling a project in Linear is how the owner
+    # closes it to new work; agents that land in its directory must not keep
+    # filing into it. --force is the deliberate escape hatch.
+    project = next((p for p in list_team_projects(api_key, team_id)
+                    if p.get("id") == project_id), None)
+    if (project and project.get("state") in CLOSED_PROJECT_STATES
+            and not fields.get("force")):
+        return None, closed_project_error(title, project, multiline=verbose)
 
     skip_milestone = bool(fields.get("skip_milestone"))
     milestone = fields.get("milestone")
@@ -6992,8 +7017,8 @@ def main():
                           help="Escape hatch: create with no milestone (warns). The issue "
                                "lands in the project's \"No milestone\" bucket.")
     p_create.add_argument("--force", action="store_true",
-                          help="Create even with no assignee. Without it, an issue that "
-                               "would land unowned is refused — every ticket needs an owner.")
+                          help="Create even with no assignee, or in a paused, completed or "
+                               "canceled project. Without it, both are refused.")
 
     # cycles (list / create / update). No delete: archiving a cycle discards
     # sprint history, so it's intentionally not exposed here.
