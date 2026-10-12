@@ -8,7 +8,7 @@ REPO="phnx-labs/linear-cli"
 # LINEAR_CLI_SHA256 only when you deliberately install a different revision.
 VERSION="${LINEAR_CLI_VERSION:-v0.29.0}"
 # SHA-256 of the `linear` file at VERSION. Recomputed whenever VERSION bumps.
-EXPECTED_SHA256="${LINEAR_CLI_SHA256:-4db4a6b9154d9dac6c99f55bf9238873164605829f1a10c6ecd0738627e51ff3}"
+EXPECTED_SHA256="${LINEAR_CLI_SHA256:-30097b79d710ed8957ec22c4e4633523e013413a3bff301576861983afee435d}"
 URL="https://raw.githubusercontent.com/${REPO}/${VERSION}/linear"
 
 pick_install_dir() {

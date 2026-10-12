@@ -13,9 +13,10 @@ Re-run with PYTHONDONTWRITEBYTECODE=1 before believing the result.
 import array
 import contextlib
 import errno
+import hashlib
+import http.server
 import importlib.util
 import io
-import hashlib
 import json
 import math
 import os
@@ -4048,9 +4049,47 @@ class BoardCacheTests(_IsolatedCache, unittest.TestCase):
 
 
 
+class _UploadServer:
+    """A real localhost HTTP server: `/img` an image, `/text` a page, `/move`
+    a redirect to `target`, anything else 404. Records each request's
+    Authorization header."""
+
+    def __init__(self, target=None):
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                if self.path == "/move" and target:
+                    self.send_response(302)
+                    self.send_header("Location", target)
+                    self.end_headers()
+                    return
+                body, kind = {"/img": (b"\x89PNG-bytes", "image/png"), "/text": (b"<html>", "text/html")}.get(self.path, (None, None))
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class IssueImagesTest(unittest.TestCase):
-    """`tasks <id> --json` images: Linear uploads in order, once each, served
-    from the cache without a request once downloaded."""
+    """`tasks <id> --json` images: Linear uploads in order, once each, from a
+    private cache, the API key never sent past a redirect."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -4058,6 +4097,11 @@ class IssueImagesTest(unittest.TestCase):
         saved = linear_cli.UPLOADS_DIR
         linear_cli.UPLOADS_DIR = Path(tmp.name) / "uploads"
         self.addCleanup(lambda: setattr(linear_cli, "UPLOADS_DIR", saved))
+
+    def _server(self, target=None):
+        server = _UploadServer(target)
+        self.addCleanup(server.close)
+        return server
 
     def _seed(self, url):
         stem = hashlib.sha256(url.encode()).hexdigest()[:24]
@@ -4069,7 +4113,7 @@ class IssueImagesTest(unittest.TestCase):
     def test_uploads_in_order_once_each_from_the_cache(self):
         a, b = "https://uploads.linear.app/t/a/1", "https://uploads.linear.app/t/b/2"
         pa, pb = self._seed(a), self._seed(b)
-        texts = [f"before ![shot]({a}) and ![](https://example.com/x.png)", f"again ![shot]({a}) ![second]({b})"]
+        texts = [f'before ![shot]({a} "a title") and ![](https://example.com/x.png)', f"again ![shot]({a}) ![second](<{b}>)"]
         self.assertEqual(linear_cli.issue_images("key", texts), [
             {"url": a, "alt": "shot", "path": pa},
             {"url": b, "alt": "second", "path": pb},
@@ -4078,6 +4122,44 @@ class IssueImagesTest(unittest.TestCase):
     def test_no_uploads_no_folder(self):
         self.assertEqual(linear_cli.issue_images("key", ["plain text", ""]), [])
         self.assertFalse(linear_cli.UPLOADS_DIR.exists())
+
+    def test_downloads_once_privately_then_serves_the_cache(self):
+        server = self._server()
+        path = linear_cli._cached_upload("key", server.url + "/img")
+        self.assertTrue(path.endswith(".png"))
+        self.assertEqual(Path(path).read_bytes(), b"\x89PNG-bytes")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(linear_cli._cached_upload("key", server.url + "/img"), path)
+        self.assertEqual(server.seen, [("/img", "key")])
+
+    def test_not_an_image_or_missing_is_null_and_leaves_nothing(self):
+        server = self._server()
+        self.assertIsNone(linear_cli._cached_upload("key", server.url + "/text"))
+        self.assertIsNone(linear_cli._cached_upload("key", server.url + "/gone"))
+        self.assertEqual(list(linear_cli.UPLOADS_DIR.glob("*")) if linear_cli.UPLOADS_DIR.exists() else [], [])
+
+    def test_a_leftover_partial_is_not_a_cache_hit(self):
+        server = self._server()
+        url = server.url + "/img"
+        stem = hashlib.sha256(url.encode()).hexdigest()[:24]
+        linear_cli.UPLOADS_DIR.mkdir(parents=True)
+        (linear_cli.UPLOADS_DIR / f"{stem}.part").write_bytes(b"trunc")
+        path = linear_cli._cached_upload("key", url)
+        self.assertEqual(Path(path).read_bytes(), b"\x89PNG-bytes")
+        self.assertEqual(len(server.seen), 1)
+
+    def test_the_key_stays_off_a_redirect(self):
+        cdn = self._server()
+        origin = self._server(target=cdn.url + "/img")
+        self.assertIsNotNone(linear_cli._cached_upload("key", origin.url + "/move"))
+        self.assertEqual(origin.seen, [("/move", "key")])
+        self.assertEqual(cdn.seen, [("/img", None)])
+
+    def test_an_unwritable_cache_is_null_not_a_crash(self):
+        server = self._server()
+        linear_cli.UPLOADS_DIR.parent.mkdir(parents=True, exist_ok=True)
+        linear_cli.UPLOADS_DIR.write_text("a file where the folder should be")
+        self.assertIsNone(linear_cli._cached_upload("key", server.url + "/img"))
 
 
 class RemindAtTest(unittest.TestCase):
