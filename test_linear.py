@@ -2645,7 +2645,8 @@ class ProjectPriorityTest(unittest.TestCase):
 
 def _ov_issue(ident, project=None, milestone=None, state_type="started",
               state_name=None, cycle=28, priority=2, assignee="Muqsit",
-              updated_at="2026-09-12T00:00:00.000Z", delegate=None):
+              updated_at="2026-09-12T00:00:00.000Z", delegate=None, due_date=None,
+              created_at="2026-09-01T00:00:00.000Z", started_at=None):
     """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
     names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
              "completed": "Done", "canceled": "Canceled", "triage": "Triage",
@@ -2655,6 +2656,9 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
         "url": f"https://linear.app/x/issue/{ident}",
         "priority": priority,
         "updatedAt": updated_at,
+        "createdAt": created_at,
+        "startedAt": started_at,
+        "dueDate": due_date,
         "state": {"name": state_name or names[state_type], "type": state_type},
         "assignee": ({"id": f"u-{assignee.lower()}", "name": assignee,
                       "displayName": assignee.lower(), "email": f"{assignee.lower()}@x.dev",
@@ -2709,12 +2713,31 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(set(ms), {"id", "name", "targetDate", "issues", "open"})
         self.assertEqual(set(ms["issues"]), {"total", "open", "done", "canceled"})
         self.assertEqual(set(ms["open"][0]),
-                         {"identifier", "title", "state", "cycle", "assignee", "assigneeId",
-                          "delegate", "updatedAt", "priority", "url"})
+                         {"identifier", "title", "state", "stateType", "cycle", "assignee", "assigneeId",
+                          "delegate", "updatedAt", "createdAt", "startedAt", "dueDate", "priority", "url"})
         self.assertEqual(set(agi["noMilestone"]), {"issues", "open"})
         self.assertEqual(doc["generatedAt"], "2026-09-10T09:30:05.127Z")
         self.assertIs(doc["partial"], False)
         self.assertIsNone(doc["partialReason"])
+
+    def test_open_rows_carry_dates_and_state_type_for_sorting(self):
+        doc = self._doc([
+            _ov_issue("PHNX-1", milestone="m-early", due_date="2026-09-14",
+                      created_at="2026-09-02T10:00:00.000Z", started_at="2026-09-09T08:00:00.000Z"),
+            _ov_issue("PHNX-2", milestone="m-early", state_type="unstarted"),
+        ])
+        rows = {r["identifier"]: r for r in doc["projects"][1]["milestones"][0]["open"]}
+        self.assertEqual(rows["PHNX-1"]["dueDate"], "2026-09-14")
+        self.assertEqual(rows["PHNX-1"]["createdAt"], "2026-09-02T10:00:00.000Z")
+        self.assertEqual(rows["PHNX-1"]["startedAt"], "2026-09-09T08:00:00.000Z")
+        self.assertEqual(rows["PHNX-1"]["stateType"], "started")
+        self.assertIsNone(rows["PHNX-2"]["dueDate"])
+        self.assertIsNone(rows["PHNX-2"]["startedAt"])
+        self.assertEqual(rows["PHNX-2"]["stateType"], "unstarted")
+
+    def test_overview_issue_query_selects_the_row_fields(self):
+        for field in ("createdAt", "dueDate", "startedAt", "state { name type }"):
+            self.assertIn(field, linear_cli._OVERVIEW_ISSUE_QUERY)
 
     def test_projects_sort_by_priority_then_name_with_none_last(self):
         doc = self._doc()
@@ -2768,7 +2791,8 @@ class OverviewBuildTest(unittest.TestCase):
         self.assertEqual(row, {
             "identifier": "PHNX-1", "title": "title PHNX-1", "state": "Doing",
             "cycle": None, "assignee": None, "assigneeId": None, "delegate": None,
-            "updatedAt": "2026-09-12T00:00:00.000Z", "priority": 0,
+            "updatedAt": "2026-09-12T00:00:00.000Z", "createdAt": "2026-09-01T00:00:00.000Z",
+            "startedAt": None, "dueDate": None, "stateType": "started", "priority": 0,
             "url": "https://linear.app/x/issue/PHNX-1",
         })
 

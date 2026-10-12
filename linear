@@ -72,7 +72,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.27.1"
+__version__ = "0.28.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -4759,7 +4759,7 @@ _OVERVIEW_ISSUE_QUERY = f"""query($ids: [ID!], $cursor: String) {{
            filter: {{ project: {{ id: {{ in: $ids }} }} }}) {{
         pageInfo {{ hasNextPage endCursor }}
         nodes {{
-            identifier title url priority updatedAt
+            identifier title url priority updatedAt createdAt dueDate startedAt
             state {{ name type }}
             assignee {{ {_PERSON_FIELDS} }}
             delegate {{ id name avatarUrl app }}
@@ -4842,7 +4842,9 @@ def overview_issue_row(n: dict) -> dict:
 
     `assignee` stays the human's NAME string (unchanged contract); `assigneeId`
     and `updatedAt` are added beside it, and `delegate` carries the full agent
-    identity {id,name,avatarUrl,app} the menu draws an avatar from."""
+    identity {id,name,avatarUrl,app} the menu draws an avatar from. `dueDate`
+    (YYYY-MM-DD or null), `createdAt`, `startedAt` and `stateType` let a menu
+    sort and group without a second read."""
     assignee = n.get("assignee") or {}
     return {
         "identifier": n.get("identifier"),
@@ -4853,6 +4855,10 @@ def overview_issue_row(n: dict) -> dict:
         "assigneeId": assignee.get("id"),
         "delegate": _identity(n.get("delegate")),
         "updatedAt": n.get("updatedAt"),
+        "createdAt": n.get("createdAt"),
+        "startedAt": n.get("startedAt"),
+        "dueDate": n.get("dueDate"),
+        "stateType": (n.get("state") or {}).get("type"),
         "priority": n.get("priority") or 0,
         "url": n.get("url"),
     }
