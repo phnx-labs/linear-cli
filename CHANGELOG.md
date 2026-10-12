@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-12
+
+### Added
+
+- `tasks <id> --json` carries `images`: each Linear-hosted image the
+  description and comments embed, as `{url, alt, path}`. The file is
+  downloaded once with the API key into `~/.linear-cli/uploads/` (private
+  modes), so a menu or agent can show the picture without the key; `path` is
+  null when the download failed. At most 12 per ticket.
+
 ## [0.28.0] - 2026-10-12
 
 ### Added

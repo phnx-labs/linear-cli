@@ -15,6 +15,7 @@ import contextlib
 import errno
 import importlib.util
 import io
+import hashlib
 import json
 import math
 import os
@@ -4045,6 +4046,38 @@ class BoardCacheTests(_IsolatedCache, unittest.TestCase):
         self.assertEqual(conn.execute("SELECT count(*) FROM vectors").fetchone()[0], 1)
         self.assertEqual(conn.execute("SELECT count(*) FROM issues").fetchone()[0], 0)
 
+
+
+class IssueImagesTest(unittest.TestCase):
+    """`tasks <id> --json` images: Linear uploads in order, once each, served
+    from the cache without a request once downloaded."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = linear_cli.UPLOADS_DIR
+        linear_cli.UPLOADS_DIR = Path(tmp.name) / "uploads"
+        self.addCleanup(lambda: setattr(linear_cli, "UPLOADS_DIR", saved))
+
+    def _seed(self, url):
+        stem = hashlib.sha256(url.encode()).hexdigest()[:24]
+        linear_cli.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        path = linear_cli.UPLOADS_DIR / f"{stem}.png"
+        path.write_bytes(b"png")
+        return str(path)
+
+    def test_uploads_in_order_once_each_from_the_cache(self):
+        a, b = "https://uploads.linear.app/t/a/1", "https://uploads.linear.app/t/b/2"
+        pa, pb = self._seed(a), self._seed(b)
+        texts = [f"before ![shot]({a}) and ![](https://example.com/x.png)", f"again ![shot]({a}) ![second]({b})"]
+        self.assertEqual(linear_cli.issue_images("key", texts), [
+            {"url": a, "alt": "shot", "path": pa},
+            {"url": b, "alt": "second", "path": pb},
+        ])
+
+    def test_no_uploads_no_folder(self):
+        self.assertEqual(linear_cli.issue_images("key", ["plain text", ""]), [])
+        self.assertFalse(linear_cli.UPLOADS_DIR.exists())
 
 
 class RemindAtTest(unittest.TestCase):
