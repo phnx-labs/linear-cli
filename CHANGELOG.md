@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A ticket in the Duplicate state is closed work: `--status open`, the default
+  task list, cycle lists, project overview counts and milestone retargets no
+  longer count it as open.
+- An issue's detail view shows "Duplicated by" for the tickets marked as its
+  duplicates, instead of claiming it is a duplicate of them.
+
 ## [0.27.0] - 2026-10-11
 
 ### Changed

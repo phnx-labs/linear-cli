@@ -2648,7 +2648,8 @@ def _ov_issue(ident, project=None, milestone=None, state_type="started",
               updated_at="2026-09-12T00:00:00.000Z", delegate=None):
     """An issue node shaped the way _OVERVIEW_ISSUE_QUERY returns it."""
     names = {"started": "Doing", "unstarted": "Todo", "backlog": "Backlog",
-             "completed": "Done", "canceled": "Canceled", "triage": "Triage"}
+             "completed": "Done", "canceled": "Canceled", "triage": "Triage",
+             "duplicate": "Duplicate"}
     return {
         "identifier": ident, "title": f"title {ident}",
         "url": f"https://linear.app/x/issue/{ident}",
@@ -2739,9 +2740,11 @@ class OverviewBuildTest(unittest.TestCase):
             _ov_issue("PHNX-5", milestone="m-early", state_type="unstarted"),
             # Triage is unfinished work: counted open so the buckets sum to total.
             _ov_issue("PHNX-6", milestone="m-early", state_type="triage"),
+            # A Duplicate is closed work, not open.
+            _ov_issue("PHNX-7", milestone="m-early", state_type="duplicate"),
         ]
         ms = self._doc(issues)["projects"][1]["milestones"][0]
-        self.assertEqual(ms["issues"], {"total": 6, "open": 4, "done": 1, "canceled": 1})
+        self.assertEqual(ms["issues"], {"total": 7, "open": 4, "done": 1, "canceled": 2})
         self.assertEqual(len(ms["open"]), ms["issues"]["open"])
         self.assertEqual(sorted(r["identifier"] for r in ms["open"]),
                          ["PHNX-1", "PHNX-4", "PHNX-5", "PHNX-6"])
@@ -4303,7 +4306,7 @@ class MilestoneRetargetCascadeTest(unittest.TestCase):
         self.assertEqual((moved, failed), (1, ["PHNX-2"]))
         query, variables = calls[0]
         self.assertEqual((variables["mid"], variables["due"]), ("m1", "2026-10-30"))
-        self.assertIn('nin: ["completed", "canceled"]', query)
+        self.assertIn('nin: ["completed", "canceled", "duplicate"]', query)
         self.assertEqual([v["due"] for _q, v in calls[1:]], ["2026-11-06", "2026-11-06"])
 
 
