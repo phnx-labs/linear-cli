@@ -73,7 +73,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.30.0"
+__version__ = "0.31.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -1078,7 +1078,7 @@ _TEAM_PROJECTS_QUERY = """query($teamId: String!, $cursor: String) {
         projects(first: 100, after: $cursor) {
             pageInfo { hasNextPage endCursor }
             nodes {
-                id name state progress scope priority
+                id name state status { name type } progress scope priority
                 startDate targetDate updatedAt
                 lead { name }
             }
@@ -1094,8 +1094,20 @@ def list_team_projects(api_key: str, team_id: str) -> list[dict]:
                                    {"teamId": team_id})
     if projects is None:
         return []
+    for p in projects:
+        p["state"] = project_state(p)
     projects.sort(key=lambda p: p.get("updatedAt") or "", reverse=True)
     return projects
+
+
+def project_state(project: dict) -> str | None:
+    """The project's status type, read from `status` (Linear deprecated `state`).
+    Linear's settings UI files a Paused status under the Planned category, so
+    its type is `planned`; a status named Paused is read as paused."""
+    status = project.get("status") or {}
+    if (status.get("name") or "").strip().lower() == "paused":
+        return "paused"
+    return status.get("type") or project.get("state")
 
 
 def _suggest(value: str, names: list[str]) -> str:
@@ -1261,8 +1273,8 @@ def list_project_statuses(api_key: str) -> list[dict]:
 def resolve_project_status_id(api_key: str, value: str) -> str:
     """Resolve --state to a ProjectStatus id.
 
-    Accepts a status *type* (backlog | planned | started | paused | completed |
-    canceled) or a status *name* (exact, then substring). Raises LookupError on
+    Accepts a status *name* (exact), a status *type* (backlog | planned |
+    started | paused | completed | canceled), or a unique name substring. Raises LookupError on
     unknown values so callers fail loud instead of no-opping the update.
     """
     statuses = list_project_statuses(api_key)
@@ -1271,12 +1283,14 @@ def resolve_project_status_id(api_key: str, value: str) -> str:
     v = (value or "").strip().lower()
     if not v:
         raise LookupError("project status is required")
-    by_type = [s for s in statuses if (s.get("type") or "").lower() == v]
-    if by_type:
-        return by_type[0]["id"]
+    # Name first: a Paused status has type `planned`, so `planned` must not
+    # resolve to it by type when a status is named Planned.
     by_name = [s for s in statuses if (s.get("name") or "").lower() == v]
     if by_name:
         return by_name[0]["id"]
+    by_type = [s for s in statuses if (s.get("type") or "").lower() == v]
+    if by_type:
+        return by_type[0]["id"]
     sub = [s for s in statuses if v in (s.get("name") or "").lower()]
     if len(sub) == 1:
         return sub[0]["id"]
@@ -4165,7 +4179,7 @@ def missing_project_error(title: str, projects: list[dict], multiline: bool = Tr
     return "\n".join(lines)
 
 
-# Project status types that take no new issues (Linear's `project.state`).
+# Project states that take no new issues (see project_state).
 CLOSED_PROJECT_STATES = frozenset({"paused", "completed", "canceled"})
 
 
@@ -4760,7 +4774,7 @@ def _project_show(args, api_key, team_id):
     data = gql(api_key, """
         query($id: String!) {
             project(id: $id) {
-                id name state progress scope priority
+                id name state status { name type } progress scope priority
                 description
                 startDate targetDate
                 lead { name email }
@@ -4776,13 +4790,14 @@ def _project_show(args, api_key, team_id):
     if not proj:
         print(f"No project with id '{proj_id}'.")
         return
+    proj["state"] = project_state(proj)
     if args.json:
         print(json.dumps(proj, indent=2))
         return
     lead = (proj.get("lead") or {}).get("name") or "-"
     count = int(proj.get("scope") or 0)
     print(f"{proj['name']}")
-    print(f"  State:    {proj.get('state', '-')}")
+    print(f"  State:    {proj.get('state') or '-'}")
     print(f"  Priority: {PRIORITY_MAP.get(proj.get('priority') or 0, '-')}")
     print(f"  Progress: {int((proj.get('progress') or 0) * 100)}%")
     print(f"  Issues:   {count}")
@@ -4829,7 +4844,7 @@ _OVERVIEW_PROJECTS_QUERY = f"""query($teamId: String!, $cursor: String) {{
         projects(first: {_OVERVIEW_PROJECT_PAGE}, after: $cursor) {{
             pageInfo {{ hasNextPage endCursor }}
             nodes {{
-                id name state priority targetDate updatedAt
+                id name state status {{ name type }} priority targetDate updatedAt
                 lead {{ {_PERSON_FIELDS} }}
                 members(first: {_OVERVIEW_MEMBER_CAP}) {{
                     pageInfo {{ hasNextPage }}
@@ -5009,7 +5024,7 @@ def build_overview(cycle: dict | None, projects: list[dict], milestones: list[di
             "id": p["id"],
             "name": p.get("name"),
             "priority": PROJECT_PRIORITY_WORD.get(p.get("priority") or 0, "none"),
-            "state": p.get("state"),
+            "state": project_state(p),
             "targetDate": p.get("targetDate"),
             "updatedAt": p.get("updatedAt"),
             "members": overview_members(p, issues_by_project.get(p["id"], [])),
@@ -5277,7 +5292,7 @@ def _project_update(args, api_key, team_id):
     p = result["project"]
     lead = (p.get("lead") or {}).get("name") or "-"
     print(f"Updated project '{p['name']}'  ({p['id']})")
-    print(f"  State:    {p.get('state') or (p.get('status') or {}).get('type') or '-'}")
+    print(f"  State:    {project_state(p) or '-'}")
     print(f"  Priority: {PRIORITY_MAP.get(p.get('priority') or 0, '-')}")
     print(f"  Lead:     {lead}")
     print(f"  Start:    {p.get('startDate') or '-'}")
@@ -5578,7 +5593,7 @@ def _initiative_show(args, api_key, team_id):
                 id name description status targetDate
                 owner { name email }
                 projects {
-                    nodes { id name state progress }
+                    nodes { id name state status { name type } progress }
                 }
             }
         }
@@ -5589,6 +5604,8 @@ def _initiative_show(args, api_key, team_id):
     if not init:
         print(f"No initiative with id '{iid}'.")
         sys.exit(1)
+    for p in (init.get("projects") or {}).get("nodes") or []:
+        p["state"] = project_state(p)
     if args.json:
         print(json.dumps(init, indent=2))
         return
