@@ -245,6 +245,10 @@ def _annotate_error_extensions(err: dict, status: int | None,
         ext.setdefault("retry_after", retry_after)
 
 
+# Linear's "duplicate" state type is closed work, like completed and canceled.
+OPEN_STATE_FILTER = 'state: { type: { nin: ["completed", "canceled", "duplicate"] } }'
+
+
 def gql(api_key: str, query: str, variables: dict | None = None) -> dict:
     payload: dict = {"query": query}
     if variables:
@@ -2902,7 +2906,7 @@ def list_tasks(args, cfg, api_key, team_id):
     if args.status:
         status = args.status.lower()
         if status == "open":
-            filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+            filters.append(OPEN_STATE_FILTER)
         elif status == "done":
             filters.append('state: { type: { eq: "completed" } }')
         else:
@@ -2913,7 +2917,7 @@ def list_tasks(args, cfg, api_key, team_id):
             else:
                 filters.append(f'state: {{ name: {{ eqi: "{status}" }} }}')
     else:
-        filters.append('state: { type: { nin: ["completed", "canceled"] } }')
+        filters.append(OPEN_STATE_FILTER)
 
     filter_str = ", ".join(filters)
 
@@ -3018,7 +3022,7 @@ def show_board(args, api_key, team_id, cfg):
 
     filters = [
         f'team: {{ id: {{ eq: "{team_id}" }} }}',
-        'state: { type: { nin: ["completed", "canceled"] } }',
+        OPEN_STATE_FILTER,
     ]
     if fragment:
         filters.append(fragment)
@@ -3219,9 +3223,9 @@ def show_issue_detail(args, api_key, team_id):
         rel_lines.append(f"  {verb}: {other.get('identifier', '?')}  {other.get('title', '')}")
     for r in (n.get("inverseRelations") or {}).get("nodes", []):
         other = r.get("issue") or {}
-        # "related"/"duplicate" are symmetric, so they must render from the
-        # inverse side too; "blocks" inverts to "blocked by".
-        verb = {"blocks": "Blocked by", "related": "Related to", "duplicate": "Duplicate of"}.get(r.get("type"), r.get("type"))
+        # "related" is symmetric; "blocks" inverts to "blocked by" and
+        # "duplicate" to "duplicated by" (the other issue is the duplicate).
+        verb = {"blocks": "Blocked by", "related": "Related to", "duplicate": "Duplicated by"}.get(r.get("type"), r.get("type"))
         rel_lines.append(f"  {verb}: {other.get('identifier', '?')}  {other.get('title', '')}")
     if rel_lines:
         print("  Relations:")
@@ -4863,8 +4867,8 @@ def overview_issue_sort_key(row: dict) -> tuple:
 
 def overview_bucket(issues: list[dict]) -> dict:
     """Counts for one milestone (or a project's no-milestone bucket) plus its
-    open rows. `open` is every state type that is neither completed nor
-    canceled — backlog, unstarted, started, and triage (unfinished work too) —
+    open rows. `open` is every state type that is not completed, canceled or
+    duplicate (counted as canceled): backlog, unstarted, started and triage,
     so open + done + canceled == total always holds."""
     counts = {"total": 0, "open": 0, "done": 0, "canceled": 0}
     open_rows: list[dict] = []
@@ -4873,7 +4877,7 @@ def overview_bucket(issues: list[dict]) -> dict:
         state_type = (n.get("state") or {}).get("type")
         if state_type == "completed":
             counts["done"] += 1
-        elif state_type == "canceled":
+        elif state_type in ("canceled", "duplicate"):
             counts["canceled"] += 1
         else:
             counts["open"] += 1
@@ -5392,7 +5396,7 @@ def cascade_due_dates(api_key: str, milestone_id: str, old: str, new: str
         issues(first: 100, after: $cursor, filter: {
             projectMilestone: { id: { eq: $mid } }
             dueDate: { eq: $due }
-            state: { type: { nin: ["completed", "canceled"] } }
+            state: { type: { nin: ["completed", "canceled", "duplicate"] } }
         }) {
             pageInfo { hasNextPage endCursor }
             nodes { id identifier }
