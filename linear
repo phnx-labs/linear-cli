@@ -3160,7 +3160,8 @@ def _cached_upload(api_key: str, url: str) -> str | None:
     for existing in UPLOADS_DIR.glob(stem + ".*"):
         return str(existing)
     req = Request(url)
-    req.add_header("Authorization", api_key)
+    # Never forwarded on a redirect: the key is for uploads.linear.app alone.
+    req.add_unredirected_header("Authorization", api_key)
     try:
         with urlopen(req, timeout=API_TIMEOUT) as resp:
             kind = (resp.headers.get_content_type() or "").lower()
