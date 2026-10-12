@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A ticket in the Duplicate state is closed work: `--status open`, the default
   task list, cycle lists, project overview counts and milestone retargets no
-  longer count it as open.
+  longer count it as open, and a Duplicate sub-issue is not a goal to-do.
 - An issue's detail view shows "Duplicated by" for the tickets marked as its
   duplicates, instead of claiming it is a duplicate of them.
 

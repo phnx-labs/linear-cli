@@ -4355,7 +4355,8 @@ class GoalsJsonTest(unittest.TestCase):
             "nodes": [
                 _goal_issue("PHNX-10", "Weekly goal", "me", "2026-10-12", kids=[("PHNX-11", "started")]),
                 _goal_issue("PHNX-11", "Daily goal", "me", "2026-10-08",
-                            kids=[("PHNX-12", "completed"), ("PHNX-13", "unstarted"), ("PHNX-14", "canceled")]),
+                            kids=[("PHNX-12", "completed"), ("PHNX-13", "unstarted"), ("PHNX-14", "canceled"),
+                                  ("PHNX-15", "duplicate")]),
                 _goal_issue("PHNX-20", "daily goal", "bisma", "2026-10-08"),
                 _goal_issue("PHNX-21", "Daily goal", "bisma", "2026-10-07"),  # yesterday's
                 _goal_issue("PHNX-30", "Weekly goal", "bisma", "2026-10-05", cycle="cyc-31"),
@@ -4386,7 +4387,7 @@ class GoalsJsonTest(unittest.TestCase):
                                     "done", "total", "todos"})
         self.assertEqual(day["identifier"], "PHNX-11")
         self.assertEqual(day["milestone"], {"name": "Ready to charge", "targetDate": "2026-10-30"})
-        self.assertEqual((day["done"], day["total"]), (1, 2))  # canceled to-dos don't count
+        self.assertEqual((day["done"], day["total"]), (1, 2))  # canceled and duplicate to-dos don't count
         self.assertEqual(day["todos"][0], {"id": "id-PHNX-12", "identifier": "PHNX-12",
                                            "title": "todo PHNX-12", "url": None, "completed": True})
         self.assertEqual(doc["me"]["weekGoal"]["identifier"], "PHNX-10")

@@ -5753,7 +5753,7 @@ _GOAL_ISSUES_QUERY = """query($teamId: ID!, $cycleId: ID!, $today: TimelessDateO
                              $cursor: String) {
     issues(first: 25, after: $cursor, filter: {
         team: { id: { eq: $teamId } }
-        state: { type: { neq: "canceled" } }
+        state: { type: { nin: ["canceled", "duplicate"] } }
         or: [
             { labels: { some: { name: { eqIgnoreCase: "%s" } } }, cycle: { id: { eq: $cycleId } } }
             { labels: { some: { name: { eqIgnoreCase: "%s" } } }, dueDate: { eq: $today } }
@@ -5832,7 +5832,7 @@ def goal_object(node: dict | None) -> dict | None:
     if not node:
         return None
     kids = [c for c in (node.get("children") or {}).get("nodes") or []
-            if (c.get("state") or {}).get("type") != "canceled"]
+            if (c.get("state") or {}).get("type") not in ("canceled", "duplicate")]
     todos = [{"id": c["id"], "identifier": c["identifier"], "title": c["title"],
               "url": c.get("url"), "completed": (c.get("state") or {}).get("type") == "completed"}
              for c in kids]
