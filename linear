@@ -73,7 +73,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -4190,8 +4190,8 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     force, backlog, bug, blocker).
 
     Returns (input_obj, None) on success or (None, error) on hard failure.
-    Warnings go to stderr when verbose=True. `ctx` memoizes the cwd project
-    and team calendar across a bulk run, and receives two outputs per call:
+    Warnings go to stderr when verbose=True. `ctx` memoizes the cwd project,
+    team projects and team calendar across a bulk run, and receives two outputs per call:
     `applied` (the defaults line to print) and `remindAt` (the SLA reminder to
     set once the issue exists, or None).
     """
@@ -4289,8 +4289,9 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
     # Pausing, completing or canceling a project in Linear is how the owner
     # closes it to new work; agents that land in its directory must not keep
     # filing into it. --force is the deliberate escape hatch.
-    project = next((p for p in list_team_projects(api_key, team_id)
-                    if p.get("id") == project_id), None)
+    if "projects" not in ctx:
+        ctx["projects"] = list_team_projects(api_key, team_id)
+    project = next((p for p in ctx["projects"] if p.get("id") == project_id), None)
     if (project and project.get("state") in CLOSED_PROJECT_STATES
             and not fields.get("force")):
         return None, closed_project_error(title, project, multiline=verbose)
