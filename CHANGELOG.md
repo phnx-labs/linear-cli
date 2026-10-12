@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-12
+
+### Fixed
+
+- A project status named Paused reads as `paused` in `projects`, `projects
+  show`, `projects overview` (text and JSON), `initiatives show` and the
+  `create` guard. Linear's settings UI files Paused under the Planned
+  category, so its type is `planned` and the guard never fired. Project state
+  now comes from `status` (Linear deprecated `state`).
+- `projects update --state planned` resolves to the status named Planned, not
+  to a Paused status that shares its type: an exact name now wins over a type.
+
 ## [0.30.0] - 2026-10-12
 
 ### Added

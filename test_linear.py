@@ -1802,6 +1802,24 @@ class ProjectStatusResolveTest(unittest.TestCase):
         finally:
             linear_cli.gql = original
 
+    def test_name_wins_over_a_paused_status_of_type_planned(self):
+        # Linear's UI files Paused under the Planned category, and lists it first.
+        statuses = [
+            {"id": "s-paused", "name": "Paused", "type": "planned"},
+            {"id": "s-planned", "name": "Planned", "type": "planned"},
+        ]
+
+        def fake_gql(_key, _query, _vars=None):
+            return {"data": {"projectStatuses": {"nodes": statuses}}}
+
+        original = linear_cli.gql
+        linear_cli.gql = fake_gql
+        try:
+            self.assertEqual(linear_cli.resolve_project_status_id("key", "planned"), "s-planned")
+            self.assertEqual(linear_cli.resolve_project_status_id("key", "paused"), "s-paused")
+        finally:
+            linear_cli.gql = original
+
     def test_unknown_status_raises_with_suggestion(self):
         statuses = [
             {"id": "s-backlog", "name": "Backlog", "type": "backlog"},
@@ -1817,6 +1835,18 @@ class ProjectStatusResolveTest(unittest.TestCase):
                 linear_cli.resolve_project_status_id("key", "nope")
         finally:
             linear_cli.gql = original
+
+
+class ProjectStateTest(unittest.TestCase):
+    def test_status_named_paused_reads_as_paused_whatever_its_type(self):
+        state = linear_cli.project_state
+        self.assertEqual(state({"state": "planned",
+                                "status": {"name": "Paused", "type": "planned"}}), "paused")
+        self.assertEqual(state({"state": "planned",
+                                "status": {"name": "Planned", "type": "planned"}}), "planned")
+        self.assertEqual(state({"state": "started",
+                                "status": {"name": "In Progress", "type": "started"}}), "started")
+        self.assertEqual(state({"state": "completed"}), "completed")
 
 
 class InitiativeResolveTest(unittest.TestCase):
