@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-10-12
+
 ### Fixed
 
 - A ticket in the Duplicate state is closed work: `--status open`, the default
