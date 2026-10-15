@@ -111,6 +111,9 @@ QUEUE_BACKOFF_MAX_SECONDS = 300  # 5 minutes
 # was before profiles existed.
 # Matched with fullmatch: `$` alone would let a trailing newline through.
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+# Reserved: names the default profile explicitly, so a caller can pin the
+# default workspace (LINEAR_PROFILE=default) and keep the cwd from redirecting it.
+DEFAULT_PROFILE = "default"
 ACTIVE_PROFILE: str | None = None
 # Where ACTIVE_PROFILE came from ("--profile", "LINEAR_PROFILE", or the cwd's
 # agents project), so a missing-key error can say why that profile is active.
@@ -158,13 +161,16 @@ def activate_profile(name: str, source: str) -> None:
     Runs in main() before load_config(), so config, the board cache, the close
     queue and downloaded images of one workspace never mix with another's.
     Raises ValueError for a name that is not a profile slug (it becomes a
-    directory name, so `..` or `/` must never get through).
+    directory name, so `..` or `/` must never get through). `default` is the
+    default profile: nothing is rebound.
     """
     global ACTIVE_PROFILE, PROFILE_SOURCE, CONFIG_PATH, QUEUE_DIR, CACHE_DB_PATH, UPLOADS_DIR
     # A project YAML can hand over any type (`profile: 7`), not just a string.
     if not isinstance(name, str) or not PROFILE_RE.fullmatch(name):
         raise ValueError(f"invalid profile name {name!r} (from {source}): use lowercase "
                          "letters, digits, '.', '_' or '-', starting with a letter or digit")
+    if name == DEFAULT_PROFILE:
+        return
     root = Path.home() / ".linear-cli" / "profiles" / name
     ACTIVE_PROFILE = name
     PROFILE_SOURCE = source
@@ -1268,8 +1274,10 @@ def query_cwd_binding(timeout: float = 3.0) -> dict:
     if not isinstance(data, dict):
         return empty
     lin = data.get("linear") or {}
+    profile = lin.get("profile")
+    # `profile: default` is the default profile, the same as no profile.
     return {"projectId": lin.get("projectId"), "name": lin.get("name"),
-            "profile": lin.get("profile")}
+            "profile": None if profile == DEFAULT_PROFILE else profile}
 
 
 def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
@@ -7034,7 +7042,8 @@ def main():
                         help="Override team for this invocation (key like 'ANT' or UUID)")
     parser.add_argument("--profile", default=None, metavar="NAME",
                         help="Linear workspace profile (overrides LINEAR_PROFILE): "
-                             "config, cache and key under ~/.linear-cli/profiles/NAME/")
+                             "config, cache and key under ~/.linear-cli/profiles/NAME/; "
+                             "'default' is the default workspace")
     sub = parser.add_subparsers(dest="command")
 
     # setup

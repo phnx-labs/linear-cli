@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   projects view` call the project auto-scope makes; commands that never scope
   by project, and `autoScope: false`, skip that call. An invalid profile there
   is ignored with a warning. A cwd project whose profile is not the active
-  one is not auto-scoped to.
+  one is not auto-scoped to. The name `default` is reserved for the default
+  profile: `LINEAR_PROFILE=default` pins the default workspace and skips the
+  cwd's profile, and `profile: default` on a project means the same.
 - `setup --keychain` stores the API key in the macOS Keychain instead of
   `config.json`: service `linear-api-key.<profile>`, or `linear-api-key` for
   the default profile.

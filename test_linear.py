@@ -4748,6 +4748,16 @@ class ProfileTest(unittest.TestCase):
             linear_cli.activate_profile(good, "--profile")
             self.assertEqual(linear_cli.CONFIG_PATH.parent.name, good)
 
+    def test_default_is_the_default_profile_not_a_directory(self):
+        before = (linear_cli.CONFIG_PATH, linear_cli.QUEUE_DIR,
+                  linear_cli.CACHE_DB_PATH, linear_cli.UPLOADS_DIR)
+        linear_cli.activate_profile("default", "LINEAR_PROFILE")
+        self.assertIsNone(linear_cli.ACTIVE_PROFILE)
+        self.assertEqual((linear_cli.CONFIG_PATH, linear_cli.QUEUE_DIR,
+                          linear_cli.CACHE_DB_PATH, linear_cli.UPLOADS_DIR), before)
+        self.assertTrue(linear_cli.save_config({"teamId": "t"}))
+        self.assertFalse((self.home / ".linear-cli" / "profiles").exists())
+
     def test_legacy_config_is_not_migrated_into_a_profile(self):
         legacy = linear_cli.LEGACY_CONFIG_PATH
         legacy.parent.mkdir()
@@ -4906,6 +4916,43 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(self._calls(), [
             "security find-generic-password -s linear-api-key.work -w"])
 
+    def test_linear_profile_default_pins_the_default_workspace(self):
+        # agents-cli pins LINEAR_PROFILE=default for unprofiled projects, so the
+        # cwd's project (here bound to talora) must not pick the profile.
+        seen = []
+        self._graphql_server(seen)
+        self._fake_security({"linear-api-key.talora": "talora-key"})
+        self._fake_agents("talora", project_id="p-talora", name="Talora")
+        self._set_env("LINEAR_PROFILE", "default")
+        default_cfg = linear_cli.CONFIG_PATH
+        default_cfg.parent.mkdir(mode=0o700)
+        default_cfg.write_text(json.dumps({
+            "apiKey": "turing-cfg-key", "teamId": "team-turing",
+            "states": {"Todo": {"id": "s1", "type": "unstarted"}}}))
+
+        out, err = self._run_main("tasks", "--similar", "token", "--json")
+
+        self.assertEqual([r["identifier"] for r in json.loads(out)["rows"]], ["WRK-1"], err)
+        self.assertEqual(set(seen), {"turing-cfg-key"})
+        self.assertIsNone(linear_cli.ACTIVE_PROFILE)
+        self.assertEqual(linear_cli.CONFIG_PATH, default_cfg)
+        conn = sqlite3.connect(self.home / ".linear-cli" / "cache.sqlite")
+        self.assertEqual(conn.execute("SELECT team_id FROM sync").fetchall(), [("team-turing",)])
+        conn.close()
+        self.assertFalse((self.home / ".linear-cli" / "profiles").exists())
+        self.assertNotIn("agents projects view . --json", self._calls())
+
+    def test_setup_with_profile_default_writes_the_default_config(self):
+        self._graphql_server([])
+        self._fake_security()
+        self._run_main("--profile", "default", "setup", "--api-key", "lin_api_new",
+                       "--keychain", "--agent", "claude")
+        self.assertEqual(json.loads(linear_cli.CONFIG_PATH.read_text())["teamId"], "team-p")
+        self.assertEqual(linear_cli.CONFIG_PATH, self.home / ".linear-cli" / "config.json")
+        self.assertFalse((self.home / ".linear-cli" / "profiles").exists())
+        self.assertEqual(self._calls(), [
+            "security add-generic-password -U -s linear-api-key -a default -w lin_api_new"])
+
     # -- selection in main() --------------------------------------------------
 
     def _fake_agents(self, profile, project_id=None, name=None):
@@ -5000,6 +5047,10 @@ class ProfileTest(unittest.TestCase):
         linear_cli.ACTIVE_PROFILE = None
         linear_cli._CWD_BINDING = {"projectId": "p-1", "name": "Talora", "profile": None}
         self.assertEqual(linear_cli.resolve_cwd_project(), ("p-1", "Talora"))
+
+    def test_project_marked_profile_default_scopes_under_the_default_profile(self):
+        self._fake_agents("default", project_id="p-turing", name="Rush")
+        self.assertEqual(linear_cli.resolve_cwd_project(), ("p-turing", "Rush"))
 
     def test_group_shorthand_survives_a_leading_profile_flag(self):
         self.assertEqual(linear_cli.rewrite_group_argv(["--profile", "p", "projects", "Foo"]),
