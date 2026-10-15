@@ -28,6 +28,8 @@ Commands:
 
 Config: ~/.linear-cli/config.json
 Cache (team board for --similar, optional embedding vectors): ~/.linear-cli/cache.sqlite
+Profiles (one per Linear workspace): --profile <name> or LINEAR_PROFILE keeps
+config, cache, queue and uploads under ~/.linear-cli/profiles/<name>/
 """
 
 from __future__ import annotations
@@ -73,7 +75,7 @@ _LOCK_CONTENDED_ERRNOS = tuple(
     if e is not None
 )
 
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 # Sentinel for "flag not supplied" — distinct from None, which means an explicit
 # clear (e.g. `--project none`). Lets update pre-resolve a field once and pass
@@ -102,6 +104,16 @@ MAX_QUEUE_SIZE = 1000
 MAX_QUEUE_ATTEMPTS = 10
 QUEUE_BACKOFF_BASE_SECONDS = 2
 QUEUE_BACKOFF_MAX_SECONDS = 300  # 5 minutes
+
+# A profile is one Linear workspace: Linear API keys are per workspace, so a
+# second workspace needs its own key, team, states cache and board cache. None
+# is the default profile, which keeps every path and credential lookup as it
+# was before profiles existed.
+PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ACTIVE_PROFILE: str | None = None
+# Where ACTIVE_PROFILE came from ("--profile", "LINEAR_PROFILE", or the cwd's
+# agents project), so a missing-key error can say why that profile is active.
+PROFILE_SOURCE: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +151,39 @@ def write_config_file(cfg: dict) -> None:
     CONFIG_PATH.chmod(CONFIG_FILE_MODE)
 
 
+def activate_profile(name: str, source: str) -> None:
+    """Point every per-workspace path at ~/.linear-cli/profiles/<name>/.
+
+    Runs in main() before load_config(), so config, the board cache, the close
+    queue and downloaded images of one workspace never mix with another's.
+    Raises ValueError for a name that is not a profile slug (it becomes a
+    directory name, so `..` or `/` must never get through).
+    """
+    global ACTIVE_PROFILE, PROFILE_SOURCE, CONFIG_PATH, QUEUE_DIR, CACHE_DB_PATH, UPLOADS_DIR
+    # A project YAML can hand over any type (`profile: 7`), not just a string.
+    if not isinstance(name, str) or not PROFILE_RE.match(name):
+        raise ValueError(f"invalid profile name {name!r} (from {source}): use lowercase "
+                         "letters, digits, '.', '_' or '-', starting with a letter or digit")
+    root = Path.home() / ".linear-cli" / "profiles" / name
+    ACTIVE_PROFILE = name
+    PROFILE_SOURCE = source
+    CONFIG_PATH = root / "config.json"
+    QUEUE_DIR = root / "queue"
+    CACHE_DB_PATH = root / "cache.sqlite"
+    UPLOADS_DIR = root / "uploads"
+
+
+def setup_command() -> str:
+    """The setup invocation for the active profile, for error messages."""
+    return f"linear --profile {ACTIVE_PROFILE} setup" if ACTIVE_PROFILE else "linear setup"
+
+
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         _harden_config_perms()
         return json.loads(CONFIG_PATH.read_text())
-    if LEGACY_CONFIG_PATH.exists():
+    # The legacy file is the default workspace's config; a profile starts empty.
+    if ACTIVE_PROFILE is None and LEGACY_CONFIG_PATH.exists():
         cfg = json.loads(LEGACY_CONFIG_PATH.read_text())
         write_config_file(cfg)
         print(f"Migrated config: {LEGACY_CONFIG_PATH} -> {CONFIG_PATH}", file=sys.stderr)
@@ -173,38 +213,43 @@ def save_config(cfg: dict) -> bool:
         return False
 
 
-def get_api_key(cfg: dict) -> str:
-    """Resolve API key: config > env > Keychain."""
-    key = cfg.get("apiKey") or os.environ.get("LINEAR_API_KEY")
-    if key:
-        return key
+def _keychain_secret(service: str) -> str:
+    """Read a generic password from the macOS Keychain ("" when absent).
+
+    Under a profile the item is the one whose account is the profile name; the
+    default profile keeps the account-less lookup it has always used.
+    """
+    argv = ["security", "find-generic-password", "-s", service]
+    if ACTIVE_PROFILE:
+        argv += ["-a", ACTIVE_PROFILE]
+    argv.append("-w")
     try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "linear-api-key", "-w"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        result = subprocess.run(argv, capture_output=True, text=True)
     except FileNotFoundError:
-        pass
+        return ""
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
     return ""
+
+
+def get_api_key(cfg: dict) -> str:
+    """Resolve API key: config > env > Keychain.
+
+    Under a profile: config > Keychain only. LINEAR_API_KEY is the default
+    workspace's key, and using it here would silently read the wrong workspace.
+    """
+    if ACTIVE_PROFILE:
+        return cfg.get("apiKey") or _keychain_secret("linear-api-key")
+    return (cfg.get("apiKey") or os.environ.get("LINEAR_API_KEY")
+            or _keychain_secret("linear-api-key"))
 
 
 def get_team_id(cfg: dict) -> str:
-    """Resolve team ID: config > env > Keychain."""
-    tid = cfg.get("teamId") or os.environ.get("LINEAR_TEAM_ID")
-    if tid:
-        return tid
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "linear-team-id", "-w"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except FileNotFoundError:
-        pass
-    return ""
+    """Resolve team ID: config > env > Keychain (env skipped under a profile)."""
+    if ACTIVE_PROFILE:
+        return cfg.get("teamId") or _keychain_secret("linear-team-id")
+    return (cfg.get("teamId") or os.environ.get("LINEAR_TEAM_ID")
+            or _keychain_secret("linear-team-id"))
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +1239,34 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
     return match["id"]
 
 
+# main() asks `agents` about the cwd once (to pick the workspace profile) and
+# keeps the answer here, so the project auto-scope that follows in `tasks` /
+# `create` reuses it instead of paying for a second subprocess.
+_CWD_BINDING: dict | None = None
+
+
+def query_cwd_binding(timeout: float = 3.0) -> dict:
+    """The cwd's `agents projects` Linear binding: {projectId, name, profile},
+    each None when absent. Never raises; see resolve_cwd_project for why."""
+    empty = {"projectId": None, "name": None, "profile": None}
+    try:
+        out = subprocess.run(["agents", "projects", "view", ".", "--json"],
+                             capture_output=True, text=True, timeout=timeout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return empty
+    if out.returncode != 0 or not out.stdout.strip():
+        return empty
+    try:
+        data = json.loads(out.stdout)
+    except (ValueError, TypeError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    lin = data.get("linear") or {}
+    return {"projectId": lin.get("projectId"), "name": lin.get("name"),
+            "profile": lin.get("profile")}
+
+
 def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
     """Best-effort: which Linear project owns the current working directory?
 
@@ -1213,24 +1286,12 @@ def resolve_cwd_project(timeout: float = 3.0) -> tuple[str | None, str | None]:
 
     One bounded subprocess call (~0.3s on an idle box): `agents projects view .
     --json` longest-matches the cwd and returns `{name, linear:{name,
-    projectId}, root}` in a single shot (an unmatched cwd returns those fields
-    as null with exit 0).
+    projectId, profile}, root}` in a single shot (an unmatched cwd returns
+    those fields as null with exit 0). When main() already asked, its answer is
+    reused and no subprocess runs.
     """
-    try:
-        out = subprocess.run(["agents", "projects", "view", ".", "--json"],
-                             capture_output=True, text=True, timeout=timeout)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return (None, None)
-    if out.returncode != 0 or not out.stdout.strip():
-        return (None, None)
-    try:
-        data = json.loads(out.stdout)
-    except (ValueError, TypeError):
-        return (None, None)
-    if not isinstance(data, dict):
-        return (None, None)
-    lin = data.get("linear") or {}
-    return (lin.get("projectId"), lin.get("name"))
+    binding = _CWD_BINDING if _CWD_BINDING is not None else query_cwd_binding(timeout)
+    return (binding["projectId"], binding["name"])
 
 
 def resolve_auto_project_id(api_key: str, team_id: str, value: str) -> str | None:
@@ -2117,6 +2178,25 @@ def apply_embeddings_choice(cfg: dict, backend: str, model: str | None) -> str:
     return f"Embeddings ranker: {backend} ({chosen})"
 
 
+def store_keychain_api_key(api_key: str) -> str:
+    """`setup --keychain`: save the key as Keychain item linear-api-key under the
+    profile's account ("default" for the default profile). Exits on failure,
+    since setup would otherwise finish with no key anywhere."""
+    account = ACTIVE_PROFILE or "default"
+    try:
+        result = subprocess.run(["security", "add-generic-password", "-U", "-s",
+                                 "linear-api-key", "-a", account, "-w", api_key],
+                                capture_output=True, text=True)
+    except FileNotFoundError:
+        print("Setup failed: --keychain needs the macOS `security` tool.", file=sys.stderr)
+        sys.exit(1)
+    if result.returncode != 0:
+        print(f"Setup failed: could not store the key in the Keychain: "
+              f"{result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    return f"API key: macOS Keychain (service linear-api-key, account {account})"
+
+
 def cmd_setup(args, cfg):
     if args.embeddings_model and not args.embeddings:
         print("--embeddings-model needs --embeddings ollama|gemini", file=sys.stderr)
@@ -2138,7 +2218,12 @@ def cmd_setup(args, cfg):
         print("API key required.")
         sys.exit(1)
 
-    cfg["apiKey"] = api_key
+    # With --keychain the key never touches config.json, and an old apiKey there
+    # goes too: config wins over the Keychain, so it would shadow the new key.
+    if args.keychain:
+        cfg.pop("apiKey", None)
+    else:
+        cfg["apiKey"] = api_key
 
     data = gql(api_key, "{ teams { nodes { id name key } } }")
     if check_errors(data):
@@ -2176,12 +2261,19 @@ def cmd_setup(args, cfg):
     cfg.pop("states", None)
     states = get_states(api_key, team["id"], cfg)
 
+    # Stored only after the teams query accepted the key, so a typo never lands.
+    if args.keychain:
+        key_note = store_keychain_api_key(api_key)
+    else:
+        key_note = f"API key: {CONFIG_PATH}"
+
     # Here persistence IS the operation — a setup that didn't land is a failure,
     # not a warning, or the next command silently runs unconfigured.
     if not save_config(cfg):
         print(f"Setup failed: could not persist {CONFIG_PATH}", file=sys.stderr)
         sys.exit(1)
     print(f"\nConfigured: team={team['name']}, states={len(states)}")
+    print(key_note)
     if agent:
         print(f"Agent identity: {agent}")
     if embeddings_note:
@@ -2608,7 +2700,9 @@ def _cache_db() -> sqlite3.Connection:
     modes as the config that holds the API key.
     """
     CACHE_DB_PATH.parent.mkdir(mode=CONFIG_DIR_MODE, parents=True, exist_ok=True)
-    if not CACHE_DB_PATH.exists() and _LEGACY_EMBEDDINGS_DB_PATH.exists():
+    # The pre-0.25 vector file belongs to the default workspace, never a profile.
+    if (ACTIVE_PROFILE is None and not CACHE_DB_PATH.exists()
+            and _LEGACY_EMBEDDINGS_DB_PATH.exists()):
         with contextlib.suppress(FileNotFoundError):  # a parallel first run already moved it
             os.replace(_LEGACY_EMBEDDINGS_DB_PATH, CACHE_DB_PATH)
     CACHE_DB_PATH.touch(mode=CONFIG_FILE_MODE, exist_ok=True)
@@ -6868,12 +6962,21 @@ def rewrite_group_argv(argv: list[str]) -> list[str]:
     name, not a verb) is shorthand for `<group> show <name>`. Insert the implicit
     `show` so the detail view keeps working alongside the other subcommands."""
     argv = list(argv)
-    if len(argv) < 2:
+    # Skip the global options (`--profile p projects Foo`) to find the group.
+    g = 0
+    while g < len(argv):
+        if argv[g] in ("--team", "--profile"):
+            g += 2
+        elif argv[g].startswith(("--team=", "--profile=")):
+            g += 1
+        else:
+            break
+    if len(argv) < g + 2:
         return argv
-    verbs = {"projects": _PROJECTS_VERBS, "initiatives": _INITIATIVES_VERBS}.get(argv[0])
+    verbs = {"projects": _PROJECTS_VERBS, "initiatives": _INITIATIVES_VERBS}.get(argv[g])
     if not verbs:
         return argv
-    for i in range(1, len(argv)):
+    for i in range(g + 1, len(argv)):
         if not argv[i].startswith("-"):
             if argv[i] not in verbs:
                 argv = argv[:i] + ["show"] + argv[i:]
@@ -6889,12 +6992,19 @@ def main():
     parser.add_argument("--version", action="version", version=f"linear-cli {__version__}")
     parser.add_argument("--team", default=None,
                         help="Override team for this invocation (key like 'ANT' or UUID)")
+    parser.add_argument("--profile", default=None, metavar="NAME",
+                        help="Linear workspace profile (overrides LINEAR_PROFILE): "
+                             "config, cache and key under ~/.linear-cli/profiles/NAME/")
     sub = parser.add_subparsers(dest="command")
 
     # setup
     p_setup = sub.add_parser("setup", help="Configure Linear connection and agent identity")
     p_setup.add_argument("--api-key", help="Linear API key")
     p_setup.add_argument("--agent", help="Default agent identity")
+    p_setup.add_argument("--keychain", action="store_true",
+                         help="Store the API key in the macOS Keychain (service "
+                              "linear-api-key, account = the profile name or "
+                              "'default') instead of config.json")
     p_setup.add_argument("--embeddings", choices=["ollama", "gemini", "none"],
                          help="Optional embeddings ranker for `tasks --similar`: "
                               "ollama (local, OLLAMA_HOST), gemini (GEMINI_API_KEY "
@@ -7253,6 +7363,25 @@ def main():
         parser.print_help()
         sys.exit(0)
 
+    # Pick the workspace before anything reads config: --profile, then
+    # LINEAR_PROFILE, then the profile the cwd's agents project names.
+    global _CWD_BINDING
+    if args.profile is not None:
+        profile, source = args.profile, "--profile"
+    elif os.environ.get("LINEAR_PROFILE"):
+        profile, source = os.environ["LINEAR_PROFILE"], "LINEAR_PROFILE"
+    elif args.command != "setup":
+        _CWD_BINDING = query_cwd_binding()
+        profile, source = _CWD_BINDING["profile"], "this directory's agents project"
+    else:
+        profile = None
+    if profile is not None:
+        try:
+            activate_profile(profile, source)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     cfg = load_config()
     register_embeddings_ranker(cfg)
 
@@ -7265,7 +7394,11 @@ def main():
     team_id = get_team_id(cfg)
 
     if not api_key:
-        print("No API key configured. Run: linear setup", file=sys.stderr)
+        if ACTIVE_PROFILE:
+            print(f"No API key configured for profile '{ACTIVE_PROFILE}' (from "
+                  f"{PROFILE_SOURCE}). Run: {setup_command()}", file=sys.stderr)
+        else:
+            print("No API key configured. Run: linear setup", file=sys.stderr)
         sys.exit(1)
 
     if args.team:
@@ -7278,7 +7411,7 @@ def main():
         cfg = {**cfg, "states": {}, "__volatile__": True}
 
     if not team_id:
-        print("No team configured. Run: linear setup", file=sys.stderr)
+        print(f"No team configured. Run: {setup_command()}", file=sys.stderr)
         sys.exit(1)
 
     if args.command == "tasks":

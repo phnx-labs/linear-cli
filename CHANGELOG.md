@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-14
+
+### Added
+
+- Profiles, one per Linear workspace: `--profile <name>` or `LINEAR_PROFILE`
+  keeps config, cache, queue and uploads under
+  `~/.linear-cli/profiles/<name>/`. The key resolves from the profile config,
+  then Keychain `linear-api-key` with account `<name>`; `LINEAR_API_KEY` and
+  `LINEAR_TEAM_ID` are not read under a profile. With neither flag nor env
+  set, the `linear.profile` of the cwd's `agents projects` project is used,
+  from the same `agents projects view` call the project auto-scope makes.
+- `setup --keychain` stores the API key in the macOS Keychain instead of
+  `config.json` (account = the profile name, or `default`).
+
+### Fixed
+
+- `projects <name>` and `initiatives <name>` shorthand works after a leading
+  `--team` or `--profile` flag.
+
 ## [0.31.0] - 2026-10-12
 
 ### Fixed
