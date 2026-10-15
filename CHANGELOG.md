@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `linear-team-id.<name>`); `LINEAR_API_KEY` and `LINEAR_TEAM_ID` are not
   read under a profile. With neither flag nor env set, the `linear.profile`
   of the cwd's `agents projects` project is used, from the same `agents
-  projects view` call the project auto-scope makes; commands that never scope
-  by project, and `autoScope: false`, skip that call. An invalid profile there
+  projects view` call the project auto-scope makes. Every command but `setup`
+  follows it, so `update` and `queue drain` in one directory share a queue;
+  `autoScope: false` in the default config turns the call off. An invalid profile there
   is ignored with a warning. A cwd project whose profile is not the active
   one is not auto-scoped to. The name `default` is reserved for the default
   profile: `LINEAR_PROFILE=default` pins the default workspace and skips the

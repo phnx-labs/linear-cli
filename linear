@@ -6987,17 +6987,11 @@ _PROJECTS_VERBS = frozenset({"show", "overview", "create", "update", "archive", 
 _INITIATIVES_VERBS = frozenset({"show", "create", "update", "link", "unlink", "archive"})
 
 
-# Commands that never scope to a project, so they skip the cwd `agents` lookup
-# (and with it the cwd's profile; --profile / LINEAR_PROFILE still apply).
-UNSCOPED_COMMANDS = frozenset({"setup", "queue", "states", "labels", "users",
-                               "agents", "inbox"})
-
-
 def _default_auto_scope() -> bool:
     """`autoScope` from the default profile's config.json, read as a plain file
     (no legacy migration, no permission fix-up) because main() needs it before
     it knows which profile's config to load. `autoScope: false` turns off the
-    cwd lookup, and with it the cwd's profile."""
+    cwd lookup entirely: no project auto-scope and no profile from the cwd."""
     try:
         cfg = json.loads(CONFIG_PATH.read_text())
     except (OSError, ValueError):
@@ -7413,14 +7407,19 @@ def main():
         sys.exit(0)
 
     # Pick the workspace before anything reads config: --profile, then
-    # LINEAR_PROFILE, then the profile the cwd's agents project names.
+    # LINEAR_PROFILE, then the profile the cwd's agents project names. Every
+    # command but setup takes the cwd's profile, even ones that never scope to
+    # its project: `update` queues a close into the profile's queue, so `queue
+    # drain` in the same directory has to read that queue with that key. The
+    # project half of the answer is used only where auto-scope always applied
+    # (tasks, create), through resolve_cwd_project.
     global _CWD_BINDING
     profile = None
     if args.profile is not None:
         profile, source = args.profile, "--profile"
     elif os.environ.get("LINEAR_PROFILE"):
         profile, source = os.environ["LINEAR_PROFILE"], "LINEAR_PROFILE"
-    elif args.command not in UNSCOPED_COMMANDS and _default_auto_scope():
+    elif args.command != "setup" and _default_auto_scope():
         _CWD_BINDING = query_cwd_binding()
         cwd_profile = _CWD_BINDING["profile"]
         if cwd_profile is not None and not (isinstance(cwd_profile, str)

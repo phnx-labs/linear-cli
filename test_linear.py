@@ -5010,21 +5010,92 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(self._calls(), ["security find-generic-password -s linear-api-key -w",
                                          "security find-generic-password -s linear-team-id -w"])
 
-    def test_unscoped_commands_and_auto_scope_off_skip_the_cwd_lookup(self):
+    def test_every_command_but_setup_takes_the_cwd_profile(self):
         self._fake_agents("talora")
         self._fake_security()
-        for command in ("states", "queue", "labels", "users", "agents", "inbox"):
-            self._cli(command)
-        self.assertNotIn("agents projects view . --json", self._calls())
+        for command in ("states", "queue", "labels", "users", "agents", "inbox", "update"):
+            rc, err = self._cli(command, *(["X-1"] if command == "update" else []))
+            self.assertEqual(rc, 1, command)
+            self.assertIn("No API key configured for profile 'talora' (from this "
+                          "directory's agents project)", err, command)
+
+    def test_auto_scope_off_skips_the_cwd_lookup(self):
+        self._fake_agents("talora")
+        self._fake_security()
         cfg = self.home / ".linear-cli" / "config.json"
         cfg.parent.mkdir(mode=0o700)
         cfg.write_text(json.dumps({"autoScope": False}))
-        rc, err = self._cli("tasks")
+        rc, err = self._cli("queue")
         self.assertIn("No API key configured. Run: linear setup", err)
         self.assertNotIn("agents projects view . --json", self._calls())
         cfg.write_text(json.dumps({"autoScope": True}))
-        self._cli("tasks")
+        self._cli("queue")
         self.assertIn("agents projects view . --json", self._calls())
+
+    def _fresh_process(self):
+        """Module state as a new `linear` process starts with it (temp HOME)."""
+        linear_cli.CONFIG_PATH = self.home / ".linear-cli" / "config.json"
+        linear_cli.CACHE_DB_PATH = self.home / ".linear-cli" / "cache.sqlite"
+        linear_cli.QUEUE_DIR = self.home / ".linear-cli" / "queue"
+        linear_cli.UPLOADS_DIR = self.home / ".linear-cli" / "uploads"
+        linear_cli.ACTIVE_PROFILE = linear_cli.PROFILE_SOURCE = linear_cli._CWD_BINDING = None
+
+    def test_update_and_queue_share_the_cwd_profiles_queue(self):
+        # A directory bound to profile `work`: `update --done` drains (and so
+        # retries) the work queue, and `queue list` / `queue drain --dry-run`
+        # in the same directory read that queue, never the default one.
+        seen = []
+
+        class RateLimited(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                seen.append(self.headers.get("Authorization"))
+                self.rfile.read(int(self.headers["Content-Length"]))
+                body = json.dumps({"errors": [{"message": "Rate limit exceeded",
+                                               "extensions": {"status": 429}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), RateLimited)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        linear_cli.API_URL = f"http://127.0.0.1:{server.server_port}"
+        self._fake_agents("work")
+        self._fake_security({"linear-api-key.work": "work-key", "linear-api-key": "turing-key"})
+        root = self.home / ".linear-cli" / "profiles" / "work"
+        root.mkdir(parents=True)
+        (root / "config.json").write_text(json.dumps({
+            "teamId": "team-work", "states": {"Done": {"id": "s-done", "type": "completed"}}}))
+        default_queue = self.home / ".linear-cli" / "queue"
+        for queue, ident in ((root / "queue", "WRK-1"), (default_queue, "DEF-1")):
+            linear_cli.QUEUE_DIR = queue
+            linear_cli.save_queue_intent(linear_cli.build_close_intent(ident, f"id-{ident}", "Done"))
+        self._fresh_process()
+
+        with self.assertRaises(SystemExit):
+            self._run_main("update", "WRK-1", "--done", "--proof", "shipped")
+        self.assertEqual(linear_cli.queue_dir(), root / "queue")
+        work = json.loads((root / "queue" / "WRK-1.json").read_text())
+        self.assertEqual(work["attempts"], 1)  # the drain retried it, and kept it
+        self.assertEqual(json.loads((default_queue / "DEF-1.json").read_text())["attempts"], 0)
+
+        self._fresh_process()
+        out, _ = self._run_main("queue", "list")
+        self.assertIn("WRK-1 -> Done (attempts=1", out)
+        self.assertNotIn("DEF-1", out)
+
+        self._fresh_process()
+        out, _ = self._run_main("queue", "drain", "--dry-run")
+        self.assertIn("WRK-1 -> Done (retry 1", out)
+        self.assertNotIn("DEF-1", out)
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {"work-key"})
 
     # -- project auto-scope follows the profile -------------------------------
 
