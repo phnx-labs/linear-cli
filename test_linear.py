@@ -4667,7 +4667,8 @@ def _fake_bin(directory, name, body):
 
 class ProfileTest(unittest.TestCase):
     """--profile / LINEAR_PROFILE / the cwd's agents project pick a workspace:
-    its own paths, and a key that never comes from the default workspace's env."""
+    its own paths, and a key that never comes from the default workspace's env
+    or Keychain item."""
 
     _GLOBALS = ("CONFIG_PATH", "LEGACY_CONFIG_PATH", "QUEUE_DIR", "CACHE_DB_PATH",
                 "UPLOADS_DIR", "ACTIVE_PROFILE", "PROFILE_SOURCE", "_CWD_BINDING", "API_URL")
@@ -4682,6 +4683,12 @@ class ProfileTest(unittest.TestCase):
         self.log = Path(tmp.name) / "calls.log"
         saved = {n: getattr(linear_cli, n) for n in self._GLOBALS}
         self.addCleanup(lambda: [setattr(linear_cli, n, v) for n, v in saved.items()])
+        # The module's default paths were computed from the real HOME at import.
+        linear_cli.CONFIG_PATH = self.home / ".linear-cli" / "config.json"
+        linear_cli.CACHE_DB_PATH = self.home / ".linear-cli" / "cache.sqlite"
+        linear_cli.QUEUE_DIR = self.home / ".linear-cli" / "queue"
+        linear_cli.UPLOADS_DIR = self.home / ".linear-cli" / "uploads"
+        linear_cli.LEGACY_CONFIG_PATH = self.home / ".agents" / "linear.json"
         for name, value in (("HOME", str(self.home)),
                             ("PATH", f"{self.bin}:/usr/bin:/bin"),
                             ("LINEAR_API_KEY", None), ("LINEAR_TEAM_ID", None),
@@ -4697,13 +4704,16 @@ class ProfileTest(unittest.TestCase):
         self.addCleanup(lambda: os.environ.__setitem__(name, saved) if saved is not None
                         else os.environ.pop(name, None))
 
-    def _fake_security(self, key=None):
-        """A `security` that logs its argv and answers find-generic-password with
-        `key` (or "not found", exit 44, like the real one)."""
-        found = f"printf '%s\\n' '{key}'; exit 0" if key else "exit 44"
+    def _fake_security(self, items=None):
+        """A `security` that logs its argv and answers find-generic-password -s
+        SERVICE from `items` ({service: secret}), else "not found" (exit 44)
+        like the real one."""
+        cases = "".join(f"    {svc}) printf '%s\\n' '{val}'; exit 0;;\n"
+                        for svc, val in (items or {}).items())
         _fake_bin(self.bin, "security",
                   f'echo "security $*" >> "{self.log}"\n'
-                  f'case "$1" in find-generic-password) {found};; esac\nexit 0\n')
+                  'if [ "$1" = find-generic-password ]; then\n'
+                  f'  case "$3" in\n{cases}  esac\n  exit 44\nfi\nexit 0\n')
 
     def _calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -4729,8 +4739,8 @@ class ProfileTest(unittest.TestCase):
 
     def test_invalid_profile_names_are_refused_and_change_nothing(self):
         before = linear_cli.CONFIG_PATH
-        for bad in ("../etc", "a/b", "Work", "", "-x", ".x", "x" * 65, "a b", 7):
-            with self.assertRaises(ValueError, msg=bad):
+        for bad in ("../etc", "a/b", "Work", "", "-x", ".x", "x" * 65, "a b", 7, "work\n"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
                 linear_cli.activate_profile(bad, "--profile")
             self.assertEqual(linear_cli.CONFIG_PATH, before)
             self.assertIsNone(linear_cli.ACTIVE_PROFILE)
@@ -4739,47 +4749,62 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(linear_cli.CONFIG_PATH.parent.name, good)
 
     def test_legacy_config_is_not_migrated_into_a_profile(self):
-        legacy = self.home / ".agents" / "linear.json"
+        legacy = linear_cli.LEGACY_CONFIG_PATH
         legacy.parent.mkdir()
         legacy.write_text(json.dumps({"apiKey": "turing-key", "teamId": "turing"}))
-        linear_cli.LEGACY_CONFIG_PATH = legacy
         linear_cli.activate_profile("personal", "--profile")
         self.assertEqual(linear_cli.load_config(), {})
         self.assertFalse(linear_cli.CONFIG_PATH.exists())
 
     # -- credentials ----------------------------------------------------------
 
-    def test_profile_key_skips_env_and_asks_keychain_for_its_account(self):
-        self._fake_security(key="personal-secret")
+    def test_profile_key_skips_env_and_reads_its_own_keychain_service(self):
+        self._fake_security({"linear-api-key.personal": "personal-key",
+                             "linear-team-id.personal": "personal-team"})
         self._set_env("LINEAR_API_KEY", "turing-key")
         self._set_env("LINEAR_TEAM_ID", "turing-team")
         linear_cli.activate_profile("personal", "LINEAR_PROFILE")
-        self.assertEqual(linear_cli.get_api_key({}), "personal-secret")
-        self.assertEqual(linear_cli.get_team_id({}), "personal-secret")
+        self.assertEqual(linear_cli.get_api_key({}), "personal-key")
+        self.assertEqual(linear_cli.get_team_id({}), "personal-team")
         self.assertEqual(self._calls(), [
-            "security find-generic-password -s linear-api-key -a personal -w",
-            "security find-generic-password -s linear-team-id -a personal -w"])
+            "security find-generic-password -s linear-api-key.personal -w",
+            "security find-generic-password -s linear-team-id.personal -w"])
         # The profile's own config still wins over its Keychain item.
         self.assertEqual(linear_cli.get_api_key({"apiKey": "cfg-key"}), "cfg-key")
 
-    def test_profile_without_a_key_is_empty_even_with_env_set(self):
-        self._fake_security(key=None)
+    def test_profile_without_a_key_is_empty_even_with_env_and_a_default_item(self):
+        self._fake_security({"linear-api-key": "turing-key"})
         self._set_env("LINEAR_API_KEY", "turing-key")
         linear_cli.activate_profile("personal", "LINEAR_PROFILE")
         self.assertEqual(linear_cli.get_api_key({}), "")
 
-    def test_default_profile_keeps_env_then_account_less_keychain(self):
-        self._fake_security(key="default-secret")
+    def test_default_lookup_names_no_profile(self):
+        # `find-generic-password` without -a matches any account under a
+        # service, so the default lookup must use a service no profile writes:
+        # the bare one, with no profile suffix and no account filter.
+        self._fake_security({"linear-api-key": "default-key",
+                             "linear-api-key.talora": "talora-key"})
         self._set_env("LINEAR_API_KEY", "env-key")
         self.assertEqual(linear_cli.get_api_key({}), "env-key")
         self._set_env("LINEAR_API_KEY", None)
-        self.assertEqual(linear_cli.get_api_key({}), "default-secret")
-        self.assertEqual(self._calls(),
-                         ["security find-generic-password -s linear-api-key -w"])
+        self.assertEqual(linear_cli.get_api_key({}), "default-key")
+        self.assertEqual(self._calls(), ["security find-generic-password -s linear-api-key -w"])
+        linear_cli.activate_profile("talora", "--profile")
+        self.assertEqual(linear_cli.get_api_key({}), "talora-key")
+        self.assertEqual(self._calls()[-1],
+                         "security find-generic-password -s linear-api-key.talora -w")
 
     # -- setup --keychain -----------------------------------------------------
 
+    _ISSUE = {"id": "i-1", "identifier": "WRK-1", "title": "Token refresh fails",
+              "description": "", "updatedAt": "2026-10-01T00:00:00.000Z", "url": "u",
+              "state": {"name": "Todo", "type": "unstarted"}}
+
     def _graphql_server(self, seen):
+        """A local Linear: answers the queries setup and `tasks --similar` send,
+        and records the Authorization header of every request."""
+        issue = self._ISSUE
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
@@ -4787,7 +4812,12 @@ class ProfileTest(unittest.TestCase):
             def do_POST(self):
                 seen.append(self.headers.get("Authorization"))
                 query = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["query"]
-                if "teams" in query:
+                if "searchIssues" in query:
+                    data = {"searchIssues": {"nodes": [issue]}}
+                elif "issues(" in query:
+                    data = {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                       "nodes": [issue]}}
+                elif "teams" in query:
                     data = {"teams": {"nodes": [{"id": "team-p", "name": "Personal", "key": "PER"}]}}
                 else:
                     data = {"workflowStates": {"nodes": [{"id": "s1", "name": "Todo", "type": "unstarted"}]}}
@@ -4821,14 +4851,12 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(json.loads(written)["teamId"], "team-p")
         self.assertEqual(seen, ["lin_api_new", "lin_api_new"])
         self.assertEqual(self._calls(), [
-            "security add-generic-password -U -s linear-api-key -a personal -w lin_api_new"])
-        self.assertIn("API key: macOS Keychain (service linear-api-key, account personal)",
-                      out.getvalue())
+            "security add-generic-password -U -s linear-api-key.personal -a personal -w lin_api_new"])
+        self.assertIn("API key: macOS Keychain (service linear-api-key.personal)", out.getvalue())
 
-    def test_setup_keychain_default_profile_uses_account_default(self):
+    def test_setup_keychain_default_profile_writes_the_bare_service(self):
         self._graphql_server([])
         self._fake_security()
-        linear_cli.CONFIG_PATH = self.home / ".linear-cli" / "config.json"
         args = types.SimpleNamespace(api_key="lin_api_new", agent="claude", embeddings=None,
                                      embeddings_model=None, keychain=True)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -4837,30 +4865,71 @@ class ProfileTest(unittest.TestCase):
             "security add-generic-password -U -s linear-api-key -a default -w lin_api_new"])
         self.assertNotIn("apiKey", json.loads(linear_cli.CONFIG_PATH.read_text()))
 
+    # -- a command really runs inside a profile -------------------------------
+
+    def _run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        saved_argv = sys.argv
+        sys.argv = ["linear", *argv]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                linear_cli.main()
+        finally:
+            sys.argv = saved_argv
+        return out.getvalue(), err.getvalue()
+
+    def test_tasks_under_a_profile_uses_its_key_config_and_cache(self):
+        seen = []
+        self._graphql_server(seen)
+        self._fake_security({"linear-api-key.work": "work-key",
+                             "linear-api-key": "turing-key"})
+        self._set_env("LINEAR_API_KEY", "turing-env-key")
+        default_cfg = linear_cli.CONFIG_PATH
+        default_cfg.parent.mkdir(mode=0o700)
+        default_cfg.write_text(json.dumps({"apiKey": "turing-cfg-key", "teamId": "team-turing"}))
+        before = default_cfg.read_bytes()
+        root = self.home / ".linear-cli" / "profiles" / "work"
+        root.mkdir(parents=True)
+        (root / "config.json").write_text(json.dumps({
+            "teamId": "team-work", "states": {"Todo": {"id": "s1", "type": "unstarted"}}}))
+
+        out, err = self._run_main("--profile", "work", "tasks", "--similar", "token", "--json")
+
+        self.assertEqual([r["identifier"] for r in json.loads(out)["rows"]], ["WRK-1"], err)
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {"work-key"})
+        conn = sqlite3.connect(root / "cache.sqlite")
+        self.assertEqual(conn.execute("SELECT team_id FROM sync").fetchall(), [("team-work",)])
+        conn.close()
+        self.assertFalse((self.home / ".linear-cli" / "cache.sqlite").exists())
+        self.assertEqual(default_cfg.read_bytes(), before)
+        self.assertEqual(self._calls(), [
+            "security find-generic-password -s linear-api-key.work -w"])
+
     # -- selection in main() --------------------------------------------------
 
-    def _fake_agents(self, profile):
+    def _fake_agents(self, profile, project_id=None, name=None):
         _fake_bin(self.bin, "agents",
                   f'echo "agents $*" >> "{self.log}"\n'
                   "echo '" + json.dumps({"name": "talora", "root": "/x", "linear": {
-                      "projectId": None, "name": None, "profile": profile}}) + "'\n")
+                      "projectId": project_id, "name": name, "profile": profile}}) + "'\n")
 
     def test_cwd_agents_project_picks_the_profile(self):
         self._fake_agents("talora")
-        self._fake_security(key=None)
+        self._fake_security()
         rc, err = self._cli("tasks")
         self.assertEqual(rc, 1)
         self.assertIn("No API key configured for profile 'talora' (from this directory's "
                       "agents project). Run: linear --profile talora setup", err)
-        # One `agents` call, and the Keychain lookup used the profile's account.
+        # One `agents` call, and the Keychain lookups used the profile's services.
         self.assertEqual(self._calls(), [
             "agents projects view . --json",
-            "security find-generic-password -s linear-api-key -a talora -w",
-            "security find-generic-password -s linear-team-id -a talora -w"])
+            "security find-generic-password -s linear-api-key.talora -w",
+            "security find-generic-password -s linear-team-id.talora -w"])
 
     def test_flag_beats_env_and_env_skips_the_cwd_lookup(self):
         self._fake_agents("talora")
-        self._fake_security(key=None)
+        self._fake_security()
         rc, err = self._cli("--profile", "flagged", "tasks", env={"LINEAR_PROFILE": "fromenv"})
         self.assertEqual(rc, 1)
         self.assertIn("profile 'flagged' (from --profile). Run: linear --profile flagged setup", err)
@@ -4874,17 +4943,62 @@ class ProfileTest(unittest.TestCase):
         self.assertIn("invalid profile name '../escape' (from --profile)", err)
         self.assertFalse((self.home / ".linear-cli").exists())
 
+    def test_invalid_cwd_profile_is_ignored_not_fatal(self):
+        self._fake_security()
+        for bad, shown in (("", "''"), (7, "7"), ("Talora", "'Talora'")):
+            self._fake_agents(bad, project_id="p-1", name="Talora")
+            rc, err = self._cli("tasks")
+            self.assertEqual(rc, 1, bad)
+            self.assertIn(f"ignoring invalid profile {shown} from this directory's agents "
+                          "project; using the default profile.", err)
+            # It carried on, on the default profile.
+            self.assertIn("No API key configured. Run: linear setup", err)
+        self.assertNotIn("linear-api-key.", "\n".join(self._calls()))
+
     def test_no_agents_binary_keeps_the_default_profile(self):
-        self._fake_security(key=None)
+        self._fake_security()
         rc, err = self._cli("tasks")
         self.assertEqual(rc, 1)
         self.assertIn("No API key configured. Run: linear setup", err)
         self.assertEqual(self._calls(), ["security find-generic-password -s linear-api-key -w",
                                          "security find-generic-password -s linear-team-id -w"])
 
+    def test_unscoped_commands_and_auto_scope_off_skip_the_cwd_lookup(self):
+        self._fake_agents("talora")
+        self._fake_security()
+        for command in ("states", "queue", "labels", "users", "agents", "inbox"):
+            self._cli(command)
+        self.assertNotIn("agents projects view . --json", self._calls())
+        cfg = self.home / ".linear-cli" / "config.json"
+        cfg.parent.mkdir(mode=0o700)
+        cfg.write_text(json.dumps({"autoScope": False}))
+        rc, err = self._cli("tasks")
+        self.assertIn("No API key configured. Run: linear setup", err)
+        self.assertNotIn("agents projects view . --json", self._calls())
+        cfg.write_text(json.dumps({"autoScope": True}))
+        self._cli("tasks")
+        self.assertIn("agents projects view . --json", self._calls())
+
+    # -- project auto-scope follows the profile -------------------------------
+
     def test_project_scope_reuses_mains_cwd_answer(self):
         # main() already asked `agents`; no binary on PATH proves no second call.
+        linear_cli.activate_profile("talora", "this directory's agents project")
         linear_cli._CWD_BINDING = {"projectId": "p-1", "name": "Talora", "profile": "talora"}
+        self.assertEqual(linear_cli.resolve_cwd_project(), ("p-1", "Talora"))
+
+    def test_project_of_another_profile_does_not_scope(self):
+        cases = (("talora", None), (None, "work"), ("talora", "work"))
+        for bound, active in cases:
+            linear_cli.ACTIVE_PROFILE = active
+            linear_cli._CWD_BINDING = {"projectId": "p-1", "name": "Talora", "profile": bound}
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(linear_cli.resolve_cwd_project(), (None, None), (bound, active))
+            self.assertIn("project 'Talora' is in profile", err.getvalue())
+            self.assertIn("not scoping to it", err.getvalue())
+        linear_cli.ACTIVE_PROFILE = None
+        linear_cli._CWD_BINDING = {"projectId": "p-1", "name": "Talora", "profile": None}
         self.assertEqual(linear_cli.resolve_cwd_project(), ("p-1", "Talora"))
 
     def test_group_shorthand_survives_a_leading_profile_flag(self):
