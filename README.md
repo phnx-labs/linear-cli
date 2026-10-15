@@ -50,7 +50,20 @@ linear setup --api-key lin_api_... --agent claude
 
 Config is written to `~/.linear-cli/config.json`. If you already have `~/.agents/linear.json` from an earlier setup, linear-cli auto-migrates it on first run.
 
-> **Security:** treat the API key like a password. **Do not paste it into chat with an LLM in plaintext.** Pass it from your shell env (`linear setup --api-key "$LINEAR_API_KEY"`), or let linear-cli read it from the macOS Keychain. Resolution order is: config file → `LINEAR_API_KEY` env → Keychain service `linear-api-key`.
+> **Security:** treat the API key like a password. **Do not paste it into chat with an LLM in plaintext.** Pass it from your shell env (`linear setup --api-key "$LINEAR_API_KEY"`), or let linear-cli read it from the macOS Keychain. Resolution order is: config file → `LINEAR_API_KEY` env → Keychain service `linear-api-key`. `linear setup --keychain` stores the key in the Keychain (service `linear-api-key`) and leaves it out of `config.json`.
+
+### Profiles (several workspaces)
+
+A Linear API key belongs to one workspace. To work in a second one, give it a profile:
+
+```bash
+linear --profile personal setup --api-key "$KEY" --keychain   # key -> Keychain service linear-api-key.personal
+linear --profile personal tasks                               # or: LINEAR_PROFILE=personal linear tasks
+```
+
+A profile keeps its own config, board cache, close queue and downloaded images under `~/.linear-cli/profiles/<name>/`. Names are lowercase letters, digits, `.`, `_` and `-` (up to 64, starting with a letter or digit). `default` is reserved for the default profile: `--profile default` or `LINEAR_PROFILE=default` uses `~/.linear-cli/config.json` and the default key, and keeps the current directory from choosing another profile. `--profile` wins over `LINEAR_PROFILE`. With neither set, linear-cli uses the `linear.profile` of the `agents projects` project that owns the current directory, so an agent launched in that folder reaches that project's workspace; no `agents` CLI, no profile on the project, or an invalid one (ignored with a warning) means the default. Every command except `setup` follows that profile, so `update` and `queue drain` in the same directory share one queue and one key; only `tasks` and `create` also scope to the directory's project. `autoScope: false` in the default `~/.linear-cli/config.json` turns the lookup off entirely: no profile and no project from the directory. The directory's project auto-scope only applies when its `linear.profile` is the active profile; a project of another workspace is not scoped to.
+
+Under a profile the key comes from the profile's `config.json`, then Keychain service `linear-api-key.<name>`; the team id from `teamId` in that config, then Keychain service `linear-team-id.<name>`. Each profile has its own service name, so the default lookup (`linear-api-key`, any account) can never pick up a profile's key. `LINEAR_API_KEY` and `LINEAR_TEAM_ID` are ignored there because they belong to the default workspace. With no profile, nothing changes.
 
 ### Fleet setup for agents
 
