@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An explicit `--project <uuid>` that is not a live project on the team now
   fails like an unknown name does, instead of passing through and listing an
   empty project. A project id `agents projects` recorded before the project was
-  deleted or moved no longer reads as "no issues".
+  deleted, archived or moved no longer reads as "no issues"; a project list that
+  could not be read says so instead.
 
 ## [0.31.0] - 2026-10-12
 

@@ -1249,27 +1249,32 @@ class ResolveAutoProjectIdTest(unittest.TestCase):
 class ResolveExplicitProjectUuidTest(unittest.TestCase):
     """An explicit --project UUID must name a live project; a stale one fails."""
 
-    def _with_projects(self, projects):
+    def _with_nodes(self, nodes):
         original = linear_cli.list_team_projects
-        linear_cli.list_team_projects = lambda a, t: projects
+        linear_cli.list_team_projects = lambda *a, **k: nodes
         self.addCleanup(lambda: setattr(linear_cli, "list_team_projects", original))
 
     def test_live_uuid_resolves(self):
-        self._with_projects([{"id": _PRIX_UUID, "name": "Prix"}])
+        self._with_nodes([{"id": _PRIX_UUID, "name": "Prix"}])
         self.assertEqual(linear_cli.resolve_project_id("k", "t", _PRIX_UUID, strict=True), _PRIX_UUID)
 
     def test_stale_uuid_raises_when_strict(self):
-        self._with_projects([{"id": _PRIX_UUID, "name": "Prix"}])
+        self._with_nodes([{"id": _PRIX_UUID, "name": "Prix"}])
         stale = "2a56fa44-adc9-45be-acb5-1d20ad07afcb"
         with self.assertRaisesRegex(LookupError, f"project {stale} is not a live project"):
             linear_cli.resolve_project_id("k", "t", stale, strict=True)
 
+    def test_unreadable_project_list_is_not_called_stale(self):
+        # A failed read (list_team_projects returns []) must not report a valid id as deleted.
+        self._with_nodes([])
+        with self.assertRaisesRegex(LookupError, "project list came back empty"):
+            linear_cli.resolve_project_id("k", "t", _PRIX_UUID, strict=True)
+
     def test_uuid_passes_through_when_not_strict(self):
         def no_call(*a, **k):
             raise AssertionError("non-strict UUID must not list projects")
-        original = linear_cli.list_team_projects
+        self._with_nodes([])
         linear_cli.list_team_projects = no_call
-        self.addCleanup(lambda: setattr(linear_cli, "list_team_projects", original))
         self.assertEqual(linear_cli.resolve_project_id("k", "t", _PRIX_UUID), _PRIX_UUID)
 
 
