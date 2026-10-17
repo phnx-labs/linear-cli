@@ -1183,9 +1183,14 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
     not strict, warn to stderr and return None."""
     if not value:
         return None
-    # Looks like a UUID? Pass through.
     if len(value) == 36 and value.count("-") == 4:
-        return value
+        if not strict:
+            return value
+        # A stale recorded id must not read as an empty project.
+        projects = list_team_projects(api_key, team_id)
+        if any(p.get("id") == value for p in projects):
+            return value
+        raise LookupError(f"project {value} is not a live project on this team.")
     projects = list_team_projects(api_key, team_id)
     match = _select_named_node(projects, value, "project", strict=strict,
                                suggest=True, skip_word=True)
