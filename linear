@@ -1175,7 +1175,8 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
                        strict: bool = False) -> str | None:
     """Resolve --project to a projectId. Accepts UUID or name (exact match
     preferred, then substring). On ambiguity, picks the most-recently-active
-    match and notes it to stderr.
+    match and notes it to stderr. When strict, a UUID must be one of the team's
+    live projects.
 
     On no match: when strict, raise LookupError with close-match suggestions so
     the caller aborts instead of silently proceeding — a mistyped or not-yet-
@@ -1188,9 +1189,13 @@ def resolve_project_id(api_key: str, team_id: str, value: str,
             return value
         # A stale recorded id must not read as an empty project.
         projects = list_team_projects(api_key, team_id)
+        if not projects:
+            raise LookupError(f"could not check project {value}: the team's project list "
+                              f"came back empty.")
         if any(p.get("id") == value for p in projects):
             return value
-        raise LookupError(f"project {value} is not a live project on this team.")
+        raise LookupError(f"project {value} is not a live project on this team "
+                          f"(deleted, archived or moved).")
     projects = list_team_projects(api_key, team_id)
     match = _select_named_node(projects, value, "project", strict=strict,
                                suggest=True, skip_word=True)
