@@ -172,6 +172,14 @@ class InboxTypeLabelTest(unittest.TestCase):
         self.assertIn("Marked read (2): n1, n2", stdout.getvalue())
 
 
+class IssueFieldsTest(unittest.TestCase):
+    def test_task_lists_carry_the_assignees_profile_picture(self):
+        # `tasks --json` prints these nodes as read; a client draws the assignee from
+        # avatarUrl (the AGI extension's Issues rows) without a `users` read.
+        fields = " ".join(linear_cli.ISSUE_FIELDS.split())
+        self.assertIn("assignee { name avatarUrl }", fields)
+
+
 class BulkUpdateTest(unittest.TestCase):
     def test_collect_update_identifiers_dedupes_positional_and_stdin_in_order(self):
         self.assertEqual(

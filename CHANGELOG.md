@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `linear tasks --json` gives each issue's assignee their Linear profile picture
+  (`assignee.avatarUrl`), so a client can draw the person instead of an initial
+  without a second `linear users` read.
+
 ## [0.32.0] - 2026-10-17
 
 ### Fixed

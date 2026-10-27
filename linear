@@ -1707,7 +1707,7 @@ ISSUE_FIELDS = """
     id updatedAt
     identifier title description state { name type }
     priority labels { nodes { name } }
-    assignee { name }
+    assignee { name avatarUrl }
     delegate { name }
     project { name id }
     projectMilestone { name }
