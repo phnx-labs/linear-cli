@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-27
+
 ### Added
 
 - `linear tasks --json` gives each issue's assignee their Linear profile picture
