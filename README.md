@@ -298,8 +298,12 @@ Every issue `linear create` makes resolves to one horizon:
 | **backlog** | `--backlog` | none | none | a future one, default `policy.backlogMilestone` | Backlog |
 
 - An explicit `--due-date`, `--cycle` or `--status` always wins.
-- "Next open milestone" is the project's earliest `targetDate` still under 100%,
-  never the backlog milestone. Undated milestones are skipped.
+- "Next open milestone" is the project's earliest `targetDate` that is today or
+  later and still under 100%, never the backlog milestone. Undated milestones
+  are skipped.
+- A milestone whose target date has passed takes no new issues: `create`,
+  `update` and `goals` refuse it by name, list the milestones still open, and
+  name the way to keep using it (`linear milestones set-target-date`).
 - `--bug` adds label Bug and, without `--blocker`, means backlog at priority low.
   `--bug --blocker` means now at priority high.
 - With an agent identity in config (`linear setup --agent claude`), new issues
