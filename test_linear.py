@@ -4732,3 +4732,77 @@ class GoalsWriteGuardTest(unittest.TestCase):
         finally:
             (linear_cli.goals_state, linear_cli._issue_write, linear_cli._emit_goal,
              linear_cli.get_states) = orig
+
+    def test_todo_leaves_a_day_goal_milestone_that_has_passed(self):
+        # Today is past "Ready to charge" (2026-10-30): the to-do goes to the next open one.
+        state = GoalsJsonTest().state(today=date(2026, 11, 3))
+        state["tz"] = timezone.utc
+        state["initiative"]["projects"]["nodes"][0]["projectMilestones"]["nodes"].append(
+            {"id": "m5", "name": "0.2.5", "targetDate": "2026-11-05", "progress": 40})
+        for n in state["nodes"]:
+            n["dueDate"] = "2026-11-03"
+        writes = []
+        orig = (linear_cli.goals_state, linear_cli._issue_write, linear_cli._emit_goal,
+                linear_cli.get_states)
+        linear_cli.goals_state = lambda *_a: state
+        linear_cli._issue_write = lambda _k, iid, inp: writes.append(inp) or {"identifier": "PHNX-99"}
+        linear_cli._emit_goal = lambda *a, **k: None
+        linear_cli.get_states = lambda *a: {"Todo": {"id": "todo-id", "type": "unstarted"}}
+        try:
+            linear_cli._goals_todo(types.SimpleNamespace(text="t", done=None, json=False),
+                                   {}, "k", "team")
+        finally:
+            (linear_cli.goals_state, linear_cli._issue_write, linear_cli._emit_goal,
+             linear_cli.get_states) = orig
+        self.assertEqual(writes[0]["projectMilestoneId"], "m5")
+
+    def test_goal_refuses_a_named_milestone_that_has_passed(self):
+        state = GoalsJsonTest().state(today=date(2026, 11, 3))
+        orig = linear_cli.list_milestone_catalog
+        linear_cli.list_milestone_catalog = lambda *a, **k: [
+            {"id": "m1", "name": "Ready to charge", "targetDate": "2026-10-30",
+             "project": {"id": "p1", "name": "Rush"}},
+            {"id": "m5", "name": "0.2.5", "targetDate": "2026-11-05",
+             "project": {"id": "p1", "name": "Rush"}}]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                linear_cli._goal_milestone("k", "team", {}, state, "Ready to charge")
+        finally:
+            linear_cli.list_milestone_catalog = orig
+        self.assertIn("'Ready to charge' targeted 2026-10-30, which has passed", err.getvalue())
+        self.assertIn("0.2.5", err.getvalue())
+
+
+class ResolveOpenMilestoneTest(unittest.TestCase):
+    """`update --milestone` resolves through resolve_milestone_id(open_on=today)."""
+
+    UUID = "11111111-2222-3333-4444-555555555555"
+
+    def resolve(self, target, name=None, read=True):
+        node = {"id": self.UUID, "name": "0.2.1", "targetDate": target, "project": {"id": "p1"}}
+        orig = (linear_cli.gql, linear_cli.list_milestone_catalog)
+        linear_cli.gql = lambda *_a, **_k: ({"data": {"projectMilestone": node}} if read
+                                            else {"errors": [{"message": "boom"}]})
+        linear_cli.list_milestone_catalog = lambda *a, **k: [
+            node, {"id": "m5", "name": "0.2.5", "targetDate": "2026-11-05"}]
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                return linear_cli.resolve_milestone_id("k", "team", name or self.UUID, None,
+                                                       strict=True, open_on=date(2026, 11, 3))
+        finally:
+            linear_cli.gql, linear_cli.list_milestone_catalog = orig
+
+    def test_passed_milestone_is_refused_even_by_uuid(self):
+        with self.assertRaises(LookupError) as cm:
+            self.resolve("2026-10-23")
+        self.assertIn("'0.2.1' targeted 2026-10-23, which has passed", str(cm.exception))
+        self.assertIn("0.2.5", str(cm.exception))
+
+    def test_due_today_and_undated_resolve(self):
+        self.assertEqual(self.resolve("2026-11-03"), self.UUID)
+        self.assertEqual(self.resolve(None), self.UUID)
+
+    def test_unreadable_milestone_is_an_error(self):
+        with self.assertRaises(LookupError):
+            self.resolve("2026-11-05", read=False)
