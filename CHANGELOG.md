@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   milestones whose date has passed. `create --milestone`, `update --milestone`
   and `goals --milestone` refuse a passed milestone, list the ones still open, and
   name `linear milestones set-target-date` for work that really belongs to it.
+  `goals todo` files a to-do in the next open milestone when today's Daily goal
+  sits in a passed one. Re-setting an issue's own passed milestone with
+  `update --milestone` is refused too: leave the flag off to keep it.
 
 ## [0.33.0] - 2026-10-27
 

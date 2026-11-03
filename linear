@@ -6288,8 +6288,12 @@ def _goals_todo(args, cfg, api_key, team_id):
                  "assigneeId": state["viewer"].get("id"), "dueDate": state["today"].isoformat()}
     if (day.get("project") or {}).get("id"):
         input_obj["projectId"] = day["project"]["id"]
-    if (day.get("projectMilestone") or {}).get("id"):
-        input_obj["projectMilestoneId"] = day["projectMilestone"]["id"]
+    day_ms = day.get("projectMilestone") or {}
+    if day_ms.get("id") and milestone_passed(day_ms, state["today"]):
+        m = _goal_milestone(api_key, team_id, cfg, state, None)
+        input_obj.update(projectId=m["project"]["id"], projectMilestoneId=m["id"])
+    elif day_ms.get("id"):
+        input_obj["projectMilestoneId"] = day_ms["id"]
     if cycle:
         input_obj["cycleId"] = cycle["id"]
     sid = resolve_state_id(get_states(api_key, team_id, cfg), "Todo")
