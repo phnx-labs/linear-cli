@@ -1372,14 +1372,33 @@ def find_initiative_to_project_id(api_key: str, initiative_id: str,
 
 def resolve_milestone_id(api_key: str, team_id: str, name: str,
                          project_id: str | None,
-                         strict: bool = False) -> str | None:
+                         strict: bool = False,
+                         open_on: date | None = None) -> str | None:
     """Resolve --milestone to a projectMilestoneId. If project_id is given,
     look only there. Else search all team projects and pick the
     most-recently-updated match.
 
     On no match: when strict, raise LookupError with suggestions (so a batch
     aborts rather than silently dropping the milestone); else warn and return
-    None."""
+    None. With `open_on`, a milestone whose target passed before that day
+    raises LookupError too: issues are being filed into it."""
+    mid = _resolve_milestone_id(api_key, team_id, name, project_id, strict)
+    if not (mid and open_on):
+        return mid
+    data = gql(api_key, """query($id: String!) {
+        projectMilestone(id: $id) { id name targetDate project { id } }
+    }""", {"id": mid})
+    m = ((data.get("data") or {}).get("projectMilestone") if not check_errors(data) else None)
+    if not m:
+        raise LookupError(f"milestone '{name}' could not be read.")
+    if milestone_passed(m, open_on):
+        catalog = list_milestone_catalog(api_key, team_id, (m.get("project") or {}).get("id"))
+        raise LookupError(passed_milestone_error(m, catalog, open_on))
+    return mid
+
+
+def _resolve_milestone_id(api_key: str, team_id: str, name: str,
+                          project_id: str | None, strict: bool) -> str | None:
     if not name:
         return None
     if len(name) == 36 and name.count("-") == 4:
@@ -3423,10 +3442,13 @@ def cmd_update(args, cfg, api_key, team_id):
         if args.project:
             project_id = (None if args.project.lower() == "none"
                           else resolve_project_id(api_key, team_id, args.project, strict=True))
-        if args.milestone:
+        if args.milestone and args.milestone.lower() == "none":
+            milestone_id = None
+        elif args.milestone:
             scope = project_id if project_id not in (_UNSET, None) else None
-            milestone_id = (None if args.milestone.lower() == "none"
-                            else resolve_milestone_id(api_key, team_id, args.milestone, scope, strict=True))
+            today = datetime.now(team_calendar(api_key, team_id)["tz"]).date()
+            milestone_id = resolve_milestone_id(api_key, team_id, args.milestone, scope,
+                                                strict=True, open_on=today)
     except LookupError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -4100,14 +4122,53 @@ def cycle_days(cycle: dict | None, tz: tzinfo) -> tuple[date, date] | None:
             (end - timedelta(microseconds=1)).astimezone(tz).date())
 
 
-def next_open_milestone(milestones: list[dict], exclude: str | None = None) -> dict | None:
-    """The project's next deliverable: earliest targetDate still under 100%,
-    never the parking milestone (policy.backlogMilestone)."""
+def milestone_passed(m: dict, today: date) -> bool:
+    """A milestone whose target date is before today takes no new issues."""
+    target = (m.get("targetDate") or "")[:10]
+    return bool(target) and target < today.isoformat()
+
+
+def next_open_milestone(milestones: list[dict], today: date,
+                        exclude: str | None = None) -> dict | None:
+    """The project's next deliverable: earliest targetDate still under 100%
+    and not passed, never the parking milestone (policy.backlogMilestone)."""
     skip = (exclude or "").lower()
     open_ms = [m for m in milestones
                if m.get("targetDate") and (m.get("progress") or 0) < 100
+               and not milestone_passed(m, today)
                and (m.get("name") or "").lower() != skip]
     return min(open_ms, key=lambda m: m["targetDate"]) if open_ms else None
+
+
+def passed_milestone_error(m: dict, catalog: list[dict], today: date,
+                           multiline: bool = True) -> str:
+    """Refusal for filing into a milestone whose target date has passed. Names
+    the milestones still open and the one honest way to keep this one: move
+    its date first."""
+    name = m.get("name") or ""
+    target = (m.get("targetDate") or "")[:10]
+    open_ms = sorted((x for x in catalog if not milestone_passed(x, today)),
+                     key=lambda x: (x.get("targetDate") or "9999", x.get("name") or ""))
+    retarget = f"linear milestones set-target-date {name!r} <YYYY-MM-DD>"
+    if not multiline:
+        msg = (f"milestone {name!r} targeted {target}, which has passed; it takes no new "
+               f"issues. Pick a milestone that is still open")
+        if open_ms:
+            msg += ": " + ", ".join(repr(x.get("name") or "")
+                                    for x in open_ms[:_MILESTONE_CATALOG_CAP])
+        return msg + f", or move its date first: {retarget}."
+    lines = [f"Refusing: milestone {name!r} targeted {target}, which has passed.",
+             "  A milestone past its target date takes no new issues.", ""]
+    if open_ms:
+        lines.append("  Milestones still open:")
+        lines += [f"    {(x.get('name') or '')}{_milestone_target_suffix(x)}"
+                  for x in open_ms[:_MILESTONE_CATALOG_CAP]]
+    else:
+        lines.append("  No milestone in this project is still open. "
+                     "Create one with `linear milestones create`.")
+    lines += ["", "  If the work really belongs to this milestone, move its date first:",
+              f"    {retarget}"]
+    return "\n".join(lines)
 
 
 def plan_horizon(horizon: str, priority: int, policy: dict, today: date,
@@ -4345,6 +4406,8 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
                                             strict=True, suggest=True)
             except LookupError as e:
                 return None, str(e)
+        if milestone_passed(chosen, today):
+            return None, passed_milestone_error(chosen, catalog, today, multiline=verbose)
     elif skip_milestone:
         warn("--skip-milestone: this issue lands in the project's \"No milestone\" bucket.")
     elif horizon == "backlog":
@@ -4357,9 +4420,10 @@ def _build_create_input(api_key: str, team_id: str, cfg: dict, fields: dict,
                           f"{project_name!r}. Pass --milestone <a future milestone>.")
         applied.append(f"milestone: {chosen['name']} (backlog)")
     else:
-        chosen = next_open_milestone(catalog, policy["backlogMilestone"])
+        chosen = next_open_milestone(catalog, today, policy["backlogMilestone"])
         if not chosen:
-            return None, missing_milestone_error(title, catalog, project_name=project_name,
+            open_catalog = [m for m in catalog if not milestone_passed(m, today)]
+            return None, missing_milestone_error(title, open_catalog, project_name=project_name,
                                                  multiline=verbose,
                                                  backlog_milestone=policy["backlogMilestone"])
         applied.append(f"milestone: {chosen['name']} (next for {project_name})")
@@ -6085,12 +6149,17 @@ def _goal_milestone(api_key: str, team_id: str, cfg: dict, state: dict,
     company's next open key-result milestone. Returns a catalog node with
     `project: {id, name}`."""
     if value:
+        catalog = list_milestone_catalog(api_key, team_id)
         try:
-            return _select_named_node(list_milestone_catalog(api_key, team_id), value,
-                                      "milestone", strict=True, suggest=True)
+            m = _select_named_node(catalog, value, "milestone", strict=True, suggest=True)
         except LookupError as e:
             _die(str(e))
-    m = next_open_milestone(initiative_milestones(state["initiative"]),
+        if milestone_passed(m, state["today"]):
+            same_project = [x for x in catalog
+                            if (x.get("project") or {}).get("id") == (m.get("project") or {}).get("id")]
+            _die(passed_milestone_error(m, same_project, state["today"]))
+        return m
+    m = next_open_milestone(initiative_milestones(state["initiative"]), state["today"],
                             load_policy(cfg)["backlogMilestone"])
     if not m:
         _die("No open milestone in the Active initiative's projects to file the goal in. "

@@ -227,7 +227,8 @@ Read it: it is the issue's due date, cycle and milestone.
   open milestone unless you pass `--milestone`.
 - **milestone** (`--milestone "<name>"`): due on that milestone's target date
   (urgent/high keep an earlier SLA date). In the active cycle only when that
-  date falls inside it.
+  date falls inside it. A milestone whose target date has passed is refused;
+  pick one still open, or move its date with `linear milestones set-target-date`.
 - **backlog** (`--backlog`): Backlog state, no cycle, no due date, and a future
   milestone, by default `Q1 2027`.
 

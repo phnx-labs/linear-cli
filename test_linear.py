@@ -677,12 +677,14 @@ class CreateRequiresMilestoneTest(_CreateWorld, unittest.TestCase):
     }
 
     # Every milestone is finished, so there is no "next open" one to default to.
+    # Targets stay in the future: a passed milestone takes no new issues.
+    _TODAY = datetime.now(timezone.utc).date()
     CATALOG = [
         {"id": "m1", "name": "0.1.0 — Interactive cloud run", "progress": 100,
-         "targetDate": "2026-09-11", "sortOrder": 1,
+         "targetDate": str(_TODAY + timedelta(days=11)), "sortOrder": 1,
          "project": {"id": "p1", "name": "Rush"}},
         {"id": "m2", "name": "0.1.1 — Headless mode + unblock", "progress": 100,
-         "targetDate": "2026-09-08", "sortOrder": 2,
+         "targetDate": str(_TODAY + timedelta(days=8)), "sortOrder": 2,
          "project": {"id": "p1", "name": "Rush"}},
     ]
 
@@ -4303,16 +4305,21 @@ class SlaTableTest(unittest.TestCase):
         self.assertEqual(linear_cli.cycle_days(cycle, la), (date(2026, 10, 6), date(2026, 10, 12)))
         self.assertIsNone(linear_cli.cycle_days(None, la))
 
-    def test_next_open_milestone_skips_done_undated_and_backlog(self):
+    def test_next_open_milestone_skips_done_undated_passed_and_backlog(self):
+        today = date(2026, 10, 10)
         ms = [
             {"name": "done", "targetDate": "2026-09-01", "progress": 100},
             {"name": "undated", "targetDate": None, "progress": 0},
+            {"name": "overdue", "targetDate": "2026-10-09", "progress": 80},
             {"name": "Q1 2027", "targetDate": "2026-10-01", "progress": 0},
             {"name": "later", "targetDate": "2026-11-20", "progress": 18},
             {"name": "next", "targetDate": "2026-10-16", "progress": 92},
         ]
-        self.assertEqual(linear_cli.next_open_milestone(ms, "Q1 2027")["name"], "next")
-        self.assertIsNone(linear_cli.next_open_milestone(ms[:2]))
+        self.assertEqual(linear_cli.next_open_milestone(ms, today, "Q1 2027")["name"], "next")
+        self.assertIsNone(linear_cli.next_open_milestone(ms[:3], today))
+        # A milestone due today is still open.
+        self.assertEqual(linear_cli.next_open_milestone(ms[:3], date(2026, 10, 9))["name"],
+                         "overdue")
 
 
 class PlanHorizonTest(unittest.TestCase):
@@ -4420,7 +4427,39 @@ class CreateHorizonTest(_CreateWorld, unittest.TestCase):
 
     def test_backlog_refuses_a_past_milestone(self):
         _, err, _, _ = self.build(backlog=True, milestone="0.1.1 — Headless")
-        self.assertIn("--backlog needs a future milestone", err)
+        self.assertIn("'0.1.1 — Headless' targeted", err)
+        self.assertIn("which has passed", err)
+
+    def _add_overdue(self):
+        self.catalog.append({"id": "m-late", "name": "0.0.9 — Overdue", "progress": 60,
+                             "targetDate": str(self.TODAY - timedelta(days=5)), "sortOrder": 0,
+                             "project": {"id": "p1", "name": "Rush"}})
+
+    def test_default_skips_an_open_milestone_whose_target_passed(self):
+        self._add_overdue()
+        obj, err, ctx, _ = self.build()
+        self.assertIsNone(err)
+        self.assertEqual(obj["projectMilestoneId"], "m-next")
+        self.assertIn("milestone: 0.1.0 — Interactive cloud run (next for Rush)", ctx["applied"])
+
+    def test_named_milestone_whose_target_passed_is_refused(self):
+        self._add_overdue()
+        obj, err, _, _ = self.build(milestone="0.0.9 — Overdue")
+        self.assertIsNone(obj)
+        self.assertIn("Refusing: milestone '0.0.9 — Overdue' targeted", err)
+        self.assertIn("0.1.0 — Interactive cloud run", err)
+        self.assertNotIn("0.1.1 — Headless", err)
+        self.assertIn("linear milestones set-target-date '0.0.9 — Overdue' <YYYY-MM-DD>", err)
+        # The bulk form stays one line so the per-row record is not split.
+        _, err, _, _ = self.build(verbose=False, milestone="0.0.9 — Overdue")
+        self.assertNotIn("\n", err)
+        self.assertIn("which has passed", err)
+
+    def test_milestone_due_today_still_takes_issues(self):
+        self.catalog[0]["targetDate"] = str(self.TODAY)
+        obj, err, _, _ = self.build(milestone="0.1.0 — Interactive cloud run")
+        self.assertIsNone(err)
+        self.assertEqual(obj["projectMilestoneId"], "m-next")
 
     def test_bug_alone_is_backlog_and_low(self):
         obj, err, ctx, _ = self.build(bug=True)

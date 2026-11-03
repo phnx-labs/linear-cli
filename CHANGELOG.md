@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A milestone whose target date has passed takes no new issues. `create`'s
+  default milestone was the project's earliest one still under 100%, so with an
+  overdue milestone left open every new issue landed in it; the default now skips
+  milestones whose date has passed. `create --milestone`, `update --milestone`
+  and `goals --milestone` refuse a passed milestone, list the ones still open, and
+  name `linear milestones set-target-date` for work that really belongs to it.
+
 ## [0.33.0] - 2026-10-27
 
 ### Added
